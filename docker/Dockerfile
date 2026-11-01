@@ -31,7 +31,7 @@
 # The .NET 8 SDK and a C toolchain (tlib), per Renode's build docs; the
 # package bundles its own .NET runtime. One RUN fetches, checks, patches,
 # builds and deletes the tree, so the layer is the package alone (~180 MB).
-FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim@sha256:ec9c0a0dc5f60adc2065762050638dd5ed5facfc53716d4580a42d86027c8e80 AS renode-build
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim@sha256:6ba9644da07bb5b560a402acec9ca38711a0762969f1b61da261df5c9f6f85da AS renode-build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake ninja-build build-essential git python3 automake autoconf libtool \
         pkg-config zip xz-utils file \
