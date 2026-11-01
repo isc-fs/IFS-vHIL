@@ -46,7 +46,7 @@ FROM scratch AS renode-package
 COPY --from=renode-build /opt/renode/ /
 
 # --- the vHIL image ----------------------------------------------------------
-FROM python:3.11-bookworm@sha256:3fd8382c50bae84184460a6e1a8ff4eeac0e3ca6a560691cb56bd84d2b6ec9ca
+FROM python:3.11-bookworm@sha256:84fa927127b46670e768371d1ad1be271d57ba93a6fbb3479045c7c6c452432f
 
 ARG TARGETARCH
 ARG ARM_GNU_VERSION=14.2.rel1
