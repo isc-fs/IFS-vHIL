@@ -219,7 +219,7 @@ Filled by this work (ranked by safety relevance, as they were found):
 8. **LOGFS** (A18): 7 % → 94 % of its lines. Its vehicle-state gate keeps
    a log pull from starving the VCU heartbeat in Run.
 
-Left, ranked (each needs a model or hook the vHIL doesn't have; issues filed in IFS_vHIL):
+Left, ranked (each needs a model or hook the vHIL doesn't have; issues filed in IFS-vHIL):
 
 | Rank | Gap | Why it matters | What it needs |
 |---|---|---|---|

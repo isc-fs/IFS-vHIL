@@ -46,7 +46,7 @@ sys.modules["ci_select"] = cs
 spec.loader.exec_module(cs)
 
 NIGHTLY = ("sim.yml", "smoke.yml", "scenarios.yml", "ifs-hil-ecu.yml")
-REPO_SLUG = os.environ.get("GITHUB_REPOSITORY", "isc-fs/IFS_vHIL")
+REPO_SLUG = os.environ.get("GITHUB_REPOSITORY", "isc-fs/IFS-vHIL")
 
 
 # -- failures --------------------------------------------------------------------

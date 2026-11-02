@@ -329,7 +329,7 @@ def test_a_pr_needs_a_saved_branch(env):
 
 
 def test_without_credentials_a_pr_is_409_and_nothing_is_pushed(env, monkeypatch):
-    env.app.state.git_host = GitHubHost(token=None, repo="isc-fs/IFS_vHIL")
+    env.app.state.git_host = GitHubHost(token=None, repo="isc-fs/IFS-vHIL")
     put(env, "ams", yaml=edited_ams(env.ws), branch="feat/notoken")
     r = env.client.post("/api/systems/ams/pr", json={"branch": "feat/notoken", "title": "x"})
     assert r.status_code == 409 and "VHIL_GITHUB_TOKEN" in r.text
@@ -360,7 +360,7 @@ def test_the_github_app_token_is_used_when_configured(env):
     def broken():
         raise RuntimeError("not installed")
     with pytest.raises(HostError, match="not installed"):
-        GitHubHost(token=broken, repo="isc-fs/IFS_vHIL")._need_token()
+        GitHubHost(token=broken, repo="isc-fs/IFS-vHIL")._need_token()
 
 
 # -- firmware picker -----------------------------------------------------------------

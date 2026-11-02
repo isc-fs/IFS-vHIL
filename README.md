@@ -1,4 +1,4 @@
-# IFS_vHIL — virtual hardware-in-the-loop
+# IFS-vHIL — virtual hardware-in-the-loop
 
 Virtual hardware-in-the-loop bench: runs emulated ISC boards so HIL suites can
 run in CI without physical hardware.

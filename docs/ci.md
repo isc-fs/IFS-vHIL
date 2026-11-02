@@ -241,7 +241,7 @@ it in about 10 runner-minutes.
 Runner-minutes of a run: the sum of its jobs' durations,
 
 ```sh
-gh api repos/isc-fs/IFS_vHIL/actions/runs/<id>/jobs --paginate \
+gh api repos/isc-fs/IFS-vHIL/actions/runs/<id>/jobs --paginate \
   --jq '[.jobs[] | select(.started_at and .completed_at) |
          ((.completed_at|fromdate) - (.started_at|fromdate))] | add / 60'
 ```

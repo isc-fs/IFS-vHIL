@@ -47,7 +47,7 @@ vHIL has no backplane kind. Systems name the MainLite's own connectors and pins
 isospi: {model: ltc6820, spi: ams.SPI1, cs: ams.PB9}  # SPI1 + LTC6820_CS -> U4 LTC6820 (docs/backplanes/ams.md)
 ```
 
-isc-fs/IFS_vHIL#138 briefly made backplanes a catalogue kind that aliased
+isc-fs/IFS-vHIL#138 briefly made backplanes a catalogue kind that aliased
 signal names to pins. It was removed because it caught no wiring mistakes:
 it only checked a backplane against its own map. It also changed no generated
 script, and it added an alias layer that every endpoint feature had to honour.

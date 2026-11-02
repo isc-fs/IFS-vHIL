@@ -29,7 +29,7 @@ browser ─────────▶│ VHIL_SITE: one origin                 
 |---|---|---|
 | `volume-owner` | `ifs-vhil` | One-shot, first on every `up`: chowns to uid 10001 whatever in the volumes isn't yet (volumes made when the services still ran as root); a no-op after |
 | `egress` | `ifs-vhil` | [`deploy/egress_proxy.py`](../deploy/egress_proxy.py): the workers' and the workspace's only way out, CONNECT to `VHIL_EGRESS_ALLOW` |
-| `workspace` | `ifs-vhil` | One-shot, runs before the others on every `up`: clones IFS_vHIL into the `workspace` volume if empty, `git fetch`es, checks out `VHIL_WORKSPACE_REF` detached ([`deploy/workspace.sh`](../deploy/workspace.sh)) |
+| `workspace` | `ifs-vhil` | One-shot, runs before the others on every `up`: clones IFS-vHIL into the `workspace` volume if empty, `git fetch`es, checks out `VHIL_WORKSPACE_REF` detached ([`deploy/workspace.sh`](../deploy/workspace.sh)) |
 | `api` | `ifs-vhil` | `python -m vhil.server`: the shell, systems read/save, runs, inspect, login. Healthcheck `GET /api/health` |
 | `worker` | `ifs-vhil` | `python -m vhil.worker`, `VHIL_WORKERS` replicas: claims queued runs, runs Renode, builds missing firmware into `fw` |
 | `editor` | `ifs-vhil-editor` | Pipeline Manager + `vhil.editor`, at `/editor/`: the vHIL workspace |
@@ -206,7 +206,7 @@ limits.
 
 | Volume | Mounted at | Holds | Backed up |
 |---|---|---|---|
-| `workspace` | `/workspace` (api rw; worker, editor, backup ro) | the app's IFS_vHIL clone; its local branches are the systems users saved | local branches, as a git bundle |
+| `workspace` | `/workspace` (api rw; worker, editor, backup ro) | the app's IFS-vHIL clone; its local branches are the systems users saved | local branches, as a git bundle |
 | `db` | `/data/db` | `vhil.db` (WAL): run queue + history | yes, `sqlite3` backup API |
 | `runs` | `/data/runs` | per-run traces, JUnit, snapshots, logs | no (large; copy by hand if wanted) |
 | `fw` | `/vhil/fw` | firmware sources, builds, `built.txt` | no (rebuilt from source) |
@@ -223,7 +223,7 @@ browser writes a commit and a branch ref into the workspace
 someone's working copy. [`deploy/workspace.sh`](../deploy/workspace.sh), on every
 `docker compose up`:
 
-1. clones `VHIL_WORKSPACE_REMOTE` (default `https://github.com/isc-fs/IFS_vHIL.git`)
+1. clones `VHIL_WORKSPACE_REMOTE` (default `https://github.com/isc-fs/IFS-vHIL.git`)
    into the empty volume (refuses a non-empty directory that is not a clone);
 2. `git fetch --tags origin`: remote branches move under `refs/remotes/origin/*`
    (saves start from the fresh `origin/dev`), tags follow;
@@ -237,7 +237,7 @@ right after the first clone, where the copy of the default branch the clone
 made is dropped so only user branches are local). A saved branch that was
 never pushed survives every upgrade, and the backup bundles it.
 
-IFS_vHIL and the firmware repos are public, so clone, fetch and firmware
+IFS-vHIL and the firmware repos are public, so clone, fetch and firmware
 builds need no credentials. **Pushes** of saved branches and PRs are the
 API's: with the GitHub App configured it uses an installation token for
 `VHIL_GITHUB_REPO` (contents + pull requests write, minted per push), else
@@ -325,7 +325,7 @@ token.
 ## First-time setup
 
 ```sh
-git clone https://github.com/isc-fs/IFS_vHIL ~/ifs-vhil-deploy   # for deploy/ only
+git clone https://github.com/isc-fs/IFS-vHIL ~/ifs-vhil-deploy   # for deploy/ only
 cd ~/ifs-vhil-deploy
 cp deploy/.env.example deploy/.env && chmod 600 deploy/.env
 $EDITOR deploy/.env          # every variable is described there; no secrets in it
@@ -429,7 +429,7 @@ an issue): the App ID, the Client ID, a client secret, and the private key
 
 Until the App exists: `VHIL_AUTH=github` with an OAuth App for login (scope
 `read:org`) and a fine-grained token (contents + pull requests write on
-IFS_vHIL only) in `deploy/secrets/github_token` for pushes.
+IFS-vHIL only) in `deploy/secrets/github_token` for pushes.
 
 ## Upgrade
 

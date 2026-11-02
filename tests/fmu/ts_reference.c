@@ -7,7 +7,7 @@
  * this repo from the FMI 3.0 standard's function signatures (no header or
  * code copied); built by the tests with the host's C compiler.
  *
- * Three cells (M9 prep, isc-fs/IFS_vHIL#318) test the master's measurement
+ * Three cells (M9 prep, isc-fs/IFS-vHIL#318) test the master's measurement
  * chain mapping: v_cell[1..3] (an 18 Ah element each, OCV linear about
  * 3.6551 V at 50 %, R0 3.34 mOhm), carrying the pack current i_pack (the
  * inverter's while both AIRs are closed) and their bleed (cell_bleed[k],

@@ -1,6 +1,6 @@
 # M5: the shared web app — architecture
 
-Decision record for [#13](https://github.com/isc-fs/IFS_vHIL/issues/13).
+Decision record for [#13](https://github.com/isc-fs/IFS-vHIL/issues/13).
 Exit criterion: an engineer composes, runs and inspects a system from the
 browser, and the system file they produced runs identically in CI.
 

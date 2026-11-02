@@ -1,6 +1,6 @@
 # IFS_HIL test analysis → the native vHIL test set
 
-**Issue:** [#3](https://github.com/isc-fs/IFS_vHIL/issues/3) · **Date:** 2026-10-02
+**Issue:** [#3](https://github.com/isc-fs/IFS-vHIL/issues/3) · **Date:** 2026-10-02
 **Analysed:**
 - IFS_HIL `origin/dev` @ `fa11a25`
 - ECU firmware `dev` @ `544b651`
@@ -29,10 +29,10 @@ Blockers among the `virtual-needs` tests:
 
 | Needs | Tests | Notes |
 |---|---|---|
-| ADC3 model for the H73x ([#19](https://github.com/isc-fs/IFS_vHIL/issues/19)) | 32 | ECU pedals (21), AMS pack current (11). Biggest single unblocker |
-| CAN bootloader emulation ([#4](https://github.com/isc-fs/IFS_vHIL/issues/4)) | 13 | Flash, jump, discover, jump reason |
+| ADC3 model for the H73x ([#19](https://github.com/isc-fs/IFS-vHIL/issues/19)) | 32 | ECU pedals (21), AMS pack current (11). Biggest single unblocker |
+| CAN bootloader emulation ([#4](https://github.com/isc-fs/IFS-vHIL/issues/4)) | 13 | Flash, jump, discover, jump reason |
 | SDMMC IDMA model | 7 | AMS SD logger. Modelled (#21, `models/renode/Stm32H7Sdmmc.cs`): the AMS mounts a FAT32 card image, logs, and seals; `tests/sim/test_ams_sd.py` reads the card back |
-| ECU + AMS in one system (M3, [#11](https://github.com/isc-fs/IFS_vHIL/issues/11)) | 3 | ECU side of the real-AMS tests |
+| ECU + AMS in one system (M3, [#11](https://github.com/isc-fs/IFS-vHIL/issues/11)) | 3 | ECU side of the real-AMS tests |
 | FDCAN bus-off injection hook | 2 | AMS recovery logic; real error physics stays physical. Modelled (#22, `models/renode/Stm32H7Fdcan.cs`): bus-off, TX FIFO full, failed bring-up; `tests/sim/test_fdcan_faults.py`. Found IFS08-CE-AMS#604 |
 | RTC backup domain across warm reset | 2 | Error-latch persistence, HIL_CLEAR build. Kept across warm resets, wiped on power-on for boards without VBAT (#58, #65); `tests/sim/test_ams_reset.py` |
 | RCC reset-flag model | 1 | ECU reset cause. Modelled per RM0468 Table 52 (#23, `models/renode/VhilResetFlags.cs`); `tests/sim/test_reset_cause.py`. The ECU reports a power-on as Pin (it checks PINRSTF first): a firmware bug, pinned as a strict xfail |
@@ -100,7 +100,7 @@ Highlights; the full lists are in the appendices. These go straight into the nat
 Tests are grouped by **firmware behaviour and system**, not by IFS_HIL block. Each group is one suite, and each suite will get one issue.
 
 Conventions:
-- Assertions are in virtual time: exact cadences and debounce edges, not wall-clock windows (M4, [#12](https://github.com/isc-fs/IFS_vHIL/issues/12)).
+- Assertions are in virtual time: exact cadences and debounce edges, not wall-clock windows (M4, [#12](https://github.com/isc-fs/IFS-vHIL/issues/12)).
 - Stimulus goes through models: cells, temperatures, GPIO, CAN and fault injection.
 - Every suite checks the firmware **as it is today** and records the drift above as a finding, not as a test.
 
@@ -150,11 +150,11 @@ A-001 (carrier draw), M-01, M-04 and M-06 (bit timing, error counters), F-070 (c
 
 ## 5. Enablers, in order
 
-1. **Test API in virtual time (M4, [#12](https://github.com/isc-fs/IFS_vHIL/issues/12)).** CAN inject/observe with virtual timestamps, GPIO input set and output edge history, model calls, assertions on exact time. Every suite above uses it, and it replaces the 500 ms frame polling the current Robot suites use.
-2. **ADC3 for the H73x ([#19](https://github.com/isc-fs/IFS_vHIL/issues/19)).** Unblocks 32 tests and a healthy AMS Start.
-3. **ECU + AMS (M3, [#11](https://github.com/isc-fs/IFS_vHIL/issues/11)).** The AMS leaves VcuStale; `sys-ecu-ams` becomes possible.
+1. **Test API in virtual time (M4, [#12](https://github.com/isc-fs/IFS-vHIL/issues/12)).** CAN inject/observe with virtual timestamps, GPIO input set and output edge history, model calls, assertions on exact time. Every suite above uses it, and it replaces the 500 ms frame polling the current Robot suites use.
+2. **ADC3 for the H73x ([#19](https://github.com/isc-fs/IFS-vHIL/issues/19)).** Unblocks 32 tests and a healthy AMS Start.
+3. **ECU + AMS (M3, [#11](https://github.com/isc-fs/IFS-vHIL/issues/11)).** The AMS leaves VcuStale; `sys-ecu-ams` becomes possible.
 4. **Platform fidelity, filed as separate issues:** SDMMC IDMA; FDCAN bus-off and fault hooks; RCC reset flags and backup-domain retention across warm reset; LTC6811 open-wire.
-5. **Bootloader emulation ([#4](https://github.com/isc-fs/IFS_vHIL/issues/4)).**
-6. **Plants (M6, [#14](https://github.com/isc-fs/IFS_vHIL/issues/14)):** inverter, pedals; BMI088 model.
+5. **Bootloader emulation ([#4](https://github.com/isc-fs/IFS-vHIL/issues/4)).**
+6. **Plants (M6, [#14](https://github.com/isc-fs/IFS-vHIL/issues/14)):** inverter, pedals; BMI088 model.
 
 The Phase 1 compatibility run (IFS_HIL's ECU smoke over the virtual broker) stays as a regression check until `ecu-boot`, `ecu-ams-gate` and `ecu-diag` cover it.

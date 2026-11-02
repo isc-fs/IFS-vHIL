@@ -6,7 +6,7 @@
 #
 # Services:
 #   volume-owner one-shot: gives the volumes to the unprivileged user (10001)
-#   workspace  one-shot: clone/fetch the app's own IFS_vHIL clone, check out
+#   workspace  one-shot: clone/fetch the app's own IFS-vHIL clone, check out
 #              VHIL_WORKSPACE_REF (deploy/workspace.sh); the rest wait for it
 #   egress     the workers' only way out: CONNECT to an allowlist (GitHub)
 #   api        FastAPI (vhil.server): shell, systems, runs, auth
@@ -155,7 +155,7 @@ services:
       <<: *proxied
       HOME: /tmp
       VHIL_WORKSPACE: /workspace
-      VHIL_WORKSPACE_REMOTE: ${VHIL_WORKSPACE_REMOTE:-https://github.com/isc-fs/IFS_vHIL.git}
+      VHIL_WORKSPACE_REMOTE: ${VHIL_WORKSPACE_REMOTE:-https://github.com/isc-fs/IFS-vHIL.git}
       # A tag or a commit, not a branch: what runs changes only on purpose.
       VHIL_WORKSPACE_REF: ${VHIL_WORKSPACE_REF:?set VHIL_WORKSPACE_REF (a tag or commit) in deploy/.env}
       VHIL_GITHUB_TOKEN_FILE: /run/secrets/github_token
@@ -197,7 +197,7 @@ services:
       VHIL_GITHUB_APP_ID: ${VHIL_GITHUB_APP_ID:-}
       VHIL_GITHUB_APP_KEY_FILE: /run/secrets/github_app_key
       VHIL_GITHUB_TOKEN_FILE: /run/secrets/github_token
-      VHIL_GITHUB_REPO: ${VHIL_GITHUB_REPO:-isc-fs/IFS_vHIL}
+      VHIL_GITHUB_REPO: ${VHIL_GITHUB_REPO:-isc-fs/IFS-vHIL}
       VHIL_BASE_BRANCH: ${VHIL_BASE_BRANCH:-dev}
       # The firmware picker's active branches (docs/deploy.md, "Firmware").
       VHIL_FIRMWARE_ACTIVE_DAYS: ${VHIL_FIRMWARE_ACTIVE_DAYS:-30}
@@ -399,7 +399,7 @@ secrets:
     file: ${VHIL_SECRETS_DIR:-./secrets}/github_token
 
 volumes:
-  workspace:   # the app's IFS_vHIL clone; local branches = saved systems
+  workspace:   # the app's IFS-vHIL clone; local branches = saved systems
   db:          # vhil.db (WAL): run queue + history
   runs:        # per-run traces and artifacts
   fw:          # firmware sources and builds (vhil.system build), built.txt

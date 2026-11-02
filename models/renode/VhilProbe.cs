@@ -1,5 +1,5 @@
 //
-// Test probes for IFS_vHIL: what a test sees of a running system, stamped in
+// Test probes for IFS-vHIL: what a test sees of a running system, stamped in
 // virtual time. Compiled by Renode at load time (`include @models/renode/VhilProbe.cs`).
 //
 //   VhilCanProbe   one per CAN bus, attached to its hub as a tester. Records

@@ -29,7 +29,7 @@ import re
 import subprocess
 import sys
 
-REPO = "isc-fs/IFS_vHIL"
+REPO = "isc-fs/IFS-vHIL"
 DEV = "refs/heads/dev"
 BLOB_IDLE_DAYS = 3
 PR_REF = re.compile(r"refs/pull/(\d+)/merge")

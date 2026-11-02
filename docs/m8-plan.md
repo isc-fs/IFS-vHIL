@@ -1,6 +1,6 @@
 # M8: the car's electrical plant (tractive system)
 
-Plan for [#147](https://github.com/isc-fs/IFS_vHIL/issues/147), unparked on
+Plan for [#147](https://github.com/isc-fs/IFS-vHIL/issues/147), unparked on
 2026-10-16 once HIL parity and the speed work were done. The plant FMU is
 requested from IFSSIM in
 [isc-fs/IFSSIM#669](https://github.com/isc-fs/IFSSIM/issues/669); until it
@@ -350,7 +350,7 @@ circuit, and four are new:
 
 ## M9 prep: the measurement chain
 
-Tracked in [#318](https://github.com/isc-fs/IFS_vHIL/issues/318), done
+Tracked in [#318](https://github.com/isc-fs/IFS-vHIL/issues/318), done
 before IFSSIM's FMU so it swaps in on the same contract. With `pack: true`
 on the tractive-system plant (`ecu-ams`, `ecu-ams-udv`) the stand-in carries
 a per-cell pack (`vhil/plant_pack.py`) and drives the AMS's measurement
@@ -407,7 +407,7 @@ stand-in uses the VTC6 fit, and the FMU should say which it uses.
 | Scenario | Result |
 |---|---|
 | `discharge-to-under-voltage` | a 15 % pack, one weak element, 60 A from 11 s: the weak element crosses 2800 mV at 24.2 s, the AMS latches CellUnderVoltage (4) at 24.66 s (its 25-tick confirm plus a 200 ms poll), the AIRs open, the current stops; the plant's minimum never went under 2750 mV |
-| `current-sensor-reads-the-pack` | 100 A for 3 s: 0x135 follows up and back, sign and scale right; the AMS reads the true current through the AMS carrier's measured ADC3 transfer (gain 0.92, +6 codes; [#320](https://github.com/isc-fs/IFS_vHIL/issues/320)) |
+| `current-sensor-reads-the-pack` | 100 A for 3 s: 0x135 follows up and back, sign and scale right; the AMS reads the true current through the AMS carrier's measured ADC3 transfer (gain 0.92, +6 codes; [#320](https://github.com/isc-fs/IFS-vHIL/issues/320)) |
 | `balancing-only-in-start` | two elements +10 % SOC and 0x103 BALN: the AMS bleeds exactly those two (no neighbour, no low cell) in Start, and stops in Run |
 | `balancing-converges` | the same on 1000x smaller cells (an override): the high element bleeds down to within 20 mV of the floor and balancing stops |
 | `hot-cell-over-temperature` | a 65 C element in Run: the AMS reads it (0x4A2 max 64+) but never faults: `TempFaultsTrusted = false` ([IFS08-CE-AMS#639](https://github.com/isc-fs/IFS08-CE-AMS/issues/639)); the Error expects are strict expected failures |

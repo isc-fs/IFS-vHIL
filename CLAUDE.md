@@ -1,6 +1,6 @@
-# Claude operating model — IFS_vHIL
+# Claude operating model — IFS-vHIL
 
-You are working on **IFS_vHIL**, the virtual hardware-in-the-loop bench for
+You are working on **IFS-vHIL**, the virtual hardware-in-the-loop bench for
 ISC Racing Team's Formula Student firmware. It runs emulated ISC boards on the
 same images [IFS_HIL](https://github.com/isc-fs/IFS_HIL) flashes to the real
 ones, so HIL suites can run in CI without physical hardware. This file is the
@@ -10,7 +10,7 @@ architectural. For where the project is going, read
 [`docs/proposal.md`](docs/proposal.md).
 
 Author: Raul Moran (ISC Racing Team). Repo:
-[`isc-fs/IFS_vHIL`](https://github.com/isc-fs/IFS_vHIL), working branch
+[`isc-fs/IFS-vHIL`](https://github.com/isc-fs/IFS-vHIL), working branch
 `dev`. Work is tracked in issues: one per roadmap milestone (M1 #10, M2 #2,
 M3 #11 … M7 #15, plus #3 and #4), and bugs as they come.
 
