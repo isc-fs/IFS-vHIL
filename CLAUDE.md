@@ -12,7 +12,7 @@ architectural. For where the project is going, read
 Author: Raul Moran (ISC Racing Team). Repo:
 [`isc-fs/IFS-vHIL`](https://github.com/isc-fs/IFS-vHIL), working branch
 `dev`. Work is tracked in issues: one per roadmap milestone (M1 #10, M2 #2,
-M3 #11 … M7 #15, plus #3 and #4), and bugs as they come.
+M3 #11 … M7 #15, M8 #147, plus #3 and #4), and bugs as they come.
 
 **Current backend and platforms.** More MCUs, SoCs and emulation backends
 are planned; today there is one of each:
@@ -117,8 +117,8 @@ co-simulation port its file declares (`port:`), in lock-step virtual time:
 ```
 IFS_HIL recipe ─▶ ECU08.elf / AMS.elf  (same image the physical bench flashes)
         emulator (Renode): platforms/cpus/stm32h733.repl  +  scripts/<dut>.resc
-        FDCANn ─▶ CAN bus model per bus ─▶ (Phase 1) SocketCAN vcan
-        tests: tests/*.robot (Renode-native) · IFS_HIL pytest suites (Phase 1+)
+        FDCANn ─▶ CAN bus model per bus ─▶ SocketCAN vcan (wall-clock bench)
+        tests: tests/sim (vhil.sim) · tests/*.robot (smoke) · IFS_HIL pytest suites
 ```
 
 Every CAN bus is the vHIL's bus model (`models/renode/VhilCanBus.cs`,

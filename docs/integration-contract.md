@@ -1,7 +1,7 @@
 # Integration contract
 
 What an external simulation platform can rely on when it drives the virtual
-bench or reads its runs: the planned car electrical plant (M8, #147), the
+bench or reads its runs: the car electrical plant (M8, #147, in progress), the
 IFSSIM FMU integration (M9), MingoCIL, or any tool that writes scenarios and
 reads traces. This page lists the surfaces, says what is stable about each
 and how changes are versioned; each surface's own page is the reference, and

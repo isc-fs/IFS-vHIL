@@ -36,7 +36,7 @@ nRF24 telemetry radio.
 
 ## In the vHIL
 
-The ECU systems (`systems/ecu.yaml`, `ecu-bl.yaml`, `ecu-ams.yaml`) use these
+The ECU systems (`systems/ecu.yaml`, `ecu-ams.yaml`, `ecu-ams-udv.yaml`) use these
 pins:
 
 - `ecu.FDCAN1` on `can_inv`, `ecu.FDCAN2` on `can_acu`, and `ecu.FDCAN3` on

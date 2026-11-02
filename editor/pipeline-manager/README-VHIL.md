@@ -39,4 +39,5 @@ git diff v0.5.2 <new-tag> -- . ':!examples' ':!docs' ':!img' ':!.github' \
 ```
 
 then resolve conflicts against `CHANGELOG-VHIL.md`, and update the commit
-above and `PM_REF`/`PM_COMMIT` in `docker/editor.Dockerfile`.
+above and, in `docker/editor.Dockerfile`, `PM_VERSION` and the version and
+commit in its header comment.

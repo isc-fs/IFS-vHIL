@@ -59,7 +59,7 @@ the backplane.
 
 ## In the vHIL
 
-The AMS systems (`systems/ams.yaml`, `ams-bl.yaml`, `ecu-ams.yaml`) use these
+The AMS systems (`systems/ams.yaml`, `ecu-ams.yaml`, `ecu-ams-udv.yaml`) use these
 pins:
 
 - `ams.FDCAN1` on `can_acu`;
