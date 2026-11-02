@@ -48,7 +48,7 @@ _rates: list = []           # (nodeid, bench s, host s) per test
 
 
 def pytest_addoption(parser):
-    g = parser.getgroup("vhil", "virtual HIL bench (IFS_vHIL)")
+    g = parser.getgroup("vhil", "virtual HIL bench (IFS-vHIL)")
     g.addoption("--vhil-system", default=str(REPO / "systems" / "ecu.yaml"),
                 help="system file to run (systems/*.yaml)")
     g.addoption("--vhil-firmware", action="append", metavar="BOARD=ELF",

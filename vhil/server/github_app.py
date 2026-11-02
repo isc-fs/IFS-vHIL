@@ -5,7 +5,7 @@ system-file branches / PRs go through the isc-fs GitHub App instead:
 
     app = GitHubApp.from_env("isc-fs")                 # None when not configured
     app.token_for("isc-fs/IFS08-CE-ECU")                    # clone: contents read
-    app.token_for("isc-fs/IFS_vHIL", write=True)       # push a branch, open a PR
+    app.token_for("isc-fs/IFS-vHIL", write=True)       # push a branch, open a PR
 
 The App authenticates as itself with a short-lived RS256 JWT (app id + the
 private key file GitHub generated), looks up its installation in the org, and

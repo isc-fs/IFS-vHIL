@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/isc-fs/IFS_vHIL/schemas/vhil.schema.json",
-  "title": "IFS_vHIL catalogue and system documents",
+  "$id": "https://github.com/isc-fs/IFS-vHIL/schemas/vhil.schema.json",
+  "title": "IFS-vHIL catalogue and system documents",
   "description": "Platforms, boards, firmware sources and device models form the catalogue (catalog/); a system (systems/) places boards, gives each its firmware, attaches devices, and wires them together. Nothing above `platform` and `model` names an architecture or a backend.",
   "$defs": {
     "plant": {

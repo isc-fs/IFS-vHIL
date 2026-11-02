@@ -76,7 +76,7 @@ def repo_slug(workspace: Path) -> str:
     out = subprocess.run(["git", "-C", str(workspace), "remote", "get-url", "origin"],
                          capture_output=True, text=True)
     m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", out.stdout.strip())
-    return m.group(1) if m else "isc-fs/IFS_vHIL"
+    return m.group(1) if m else "isc-fs/IFS-vHIL"
 
 
 # -- pushing and PRs --------------------------------------------------------------

@@ -35,7 +35,7 @@ it. From a clone of upstream:
 
 ```sh
 git diff v0.5.2 <new-tag> -- . ':!examples' ':!docs' ':!img' ':!.github' \
-  | git -C <IFS_vHIL> apply -3 --directory=editor/pipeline-manager
+  | git -C <IFS-vHIL> apply -3 --directory=editor/pipeline-manager
 ```
 
 then resolve conflicts against `CHANGELOG-VHIL.md`, and update the commit

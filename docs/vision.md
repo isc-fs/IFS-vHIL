@@ -1,6 +1,6 @@
-# IFS_vHIL — vision
+# IFS-vHIL — vision
 
-**Status:** agreed direction, 2026-10-01. Phase 1 ([#1](https://github.com/isc-fs/IFS_vHIL/issues/1))
+**Status:** agreed direction, 2026-10-01. Phase 1 ([#1](https://github.com/isc-fs/IFS-vHIL/issues/1))
 proved the foundation: unmodified firmware on emulated silicon passes the
 physical bench's own tests. This document says where that foundation goes.
 The Phase 0/1 design and findings stay in [`proposal.md`](proposal.md).
@@ -12,7 +12,7 @@ one backplane PCB, four board slots, the stimulus that happens to be
 wired, and one bench that someone has to keep alive. The set of hardware and
 software combinations it can test is small and fixed.
 
-IFS_vHIL removes that bound. A *system* is data: which boards exist, which MCU
+IFS-vHIL removes that bound. A *system* is data: which boards exist, which MCU
 each one carries, which firmware each one runs (pulled from its own
 repository), and how they are wired together. Engineers compose systems in a
 **shared web app**, run them, watch and stimulate them, and test them. That
@@ -74,7 +74,7 @@ dynamics, motor load, tyres and EBS pneumatics belong to MingoCIL/IFSSIM.
 The physics of the accumulator and the powertrain is IFSSIM's in both cases.
 The vHIL runs it as an FMI 3.0 co-simulation FMU, as its master
 ([isc-fs/IFSSIM#669](https://github.com/isc-fs/IFSSIM/issues/669), M8
-[#147](https://github.com/isc-fs/IFS_vHIL/issues/147)). The vHIL's own Python
+[#147](https://github.com/isc-fs/IFS-vHIL/issues/147)). The vHIL's own Python
 plants are stand-ins for CI that implement the same contract, not a second
 battery model. Parameters are cited
 ([`catalog/plants/`](../catalog/plants/)), never tuned to a test and never
@@ -109,22 +109,22 @@ taken from a bench; an uncited one is reported as uncommissioned
   fix HANDOVER.md recommends for IFS_HIL's CI.
 - **IFS_HIL compatibility** stays. The virtual broker and pytest plugin keep
   the physical bench's suites running, and IFS_HIL can route runs here
-  ([#3](https://github.com/isc-fs/IFS_vHIL/issues/3)).
+  ([#3](https://github.com/isc-fs/IFS-vHIL/issues/3)).
 
 ## 5. Roadmap
 
 | Milestone | Deliverable | Done when |
 |---|---|---|
-| **M1: system description** ([#10](https://github.com/isc-fs/IFS_vHIL/issues/10)) | Schema for boards, firmware sources and nets; generator to Renode scripts | Today's ECU setup is *generated*, and IFS_HIL ECU smoke still gives 14 passed |
-| **M2: AMS chip model** ([#2](https://github.com/isc-fs/IFS_vHIL/issues/2)) | LTC6820/LTC6811 chain as the first catalogue chip model | AMS boots out of Error with seeded cells; AMS smoke passes |
-| **M3: multi-node systems** ([#11](https://github.com/isc-fs/IFS_vHIL/issues/11)) | ECU + AMS in one system on a shared ACU bus, no simulators | IFS_HIL's F-real-AMS tests leave `gaps.yaml` |
-| **M4: runtime API, virtual-time tests** ([#12](https://github.com/isc-fs/IFS_vHIL/issues/12)) | Start, step, inject, observe over an API; a test library in virtual time | A scenario runs deterministically at any emulation speed |
-| **M5: shared web app** ([#13](https://github.com/isc-fs/IFS_vHIL/issues/13)) | Workers, GitHub App, system editor, live views | An engineer composes, runs and inspects a system from the browser |
-| **M6: co-simulation port** ([#14](https://github.com/isc-fs/IFS_vHIL/issues/14)) | Time-synchronised signal port for plants; scripted plants first | A scripted plant drives the ECU's pedals and inverter in closed loop; MingoCIL can attach |
-| **M7: beyond STM32** ([#15](https://github.com/isc-fs/IFS_vHIL/issues/15)) | Platform abstraction exercised by a second MCU family, then a Linux SoC spike | A non-STM32 board runs in a system next to the `stm32h733` boards |
-| IFS_HIL routing ([#3](https://github.com/isc-fs/IFS_vHIL/issues/3)) | Virtual bench descriptor in IFS_HIL | A firmware PR gets a virtual verdict without bench-01 (after M1) |
-| Depth ([#4](https://github.com/isc-fs/IFS_vHIL/issues/4)) | Bootloader emulation, fault injection, coverage | A-003 and Block D run virtually |
-| **M8: electrical plant** ([#147](https://github.com/isc-fs/IFS_vHIL/issues/147)) | Tractive-system plant on the co-simulation port (a Python stand-in, then IFSSIM's FMU), fault and safety-gate scenarios | ecu-ams arms Start → Run on the plant's DC link with no scripted value; the fault scenarios give the firmware's state and reason deterministically ([`m8-plan.md`](m8-plan.md)) |
+| **M1: system description** ([#10](https://github.com/isc-fs/IFS-vHIL/issues/10)) | Schema for boards, firmware sources and nets; generator to Renode scripts | Today's ECU setup is *generated*, and IFS_HIL ECU smoke still gives 14 passed |
+| **M2: AMS chip model** ([#2](https://github.com/isc-fs/IFS-vHIL/issues/2)) | LTC6820/LTC6811 chain as the first catalogue chip model | AMS boots out of Error with seeded cells; AMS smoke passes |
+| **M3: multi-node systems** ([#11](https://github.com/isc-fs/IFS-vHIL/issues/11)) | ECU + AMS in one system on a shared ACU bus, no simulators | IFS_HIL's F-real-AMS tests leave `gaps.yaml` |
+| **M4: runtime API, virtual-time tests** ([#12](https://github.com/isc-fs/IFS-vHIL/issues/12)) | Start, step, inject, observe over an API; a test library in virtual time | A scenario runs deterministically at any emulation speed |
+| **M5: shared web app** ([#13](https://github.com/isc-fs/IFS-vHIL/issues/13)) | Workers, GitHub App, system editor, live views | An engineer composes, runs and inspects a system from the browser |
+| **M6: co-simulation port** ([#14](https://github.com/isc-fs/IFS-vHIL/issues/14)) | Time-synchronised signal port for plants; scripted plants first | A scripted plant drives the ECU's pedals and inverter in closed loop; MingoCIL can attach |
+| **M7: beyond STM32** ([#15](https://github.com/isc-fs/IFS-vHIL/issues/15)) | Platform abstraction exercised by a second MCU family, then a Linux SoC spike | A non-STM32 board runs in a system next to the `stm32h733` boards |
+| IFS_HIL routing ([#3](https://github.com/isc-fs/IFS-vHIL/issues/3)) | Virtual bench descriptor in IFS_HIL | A firmware PR gets a virtual verdict without bench-01 (after M1) |
+| Depth ([#4](https://github.com/isc-fs/IFS-vHIL/issues/4)) | Bootloader emulation, fault injection, coverage | A-003 and Block D run virtually |
+| **M8: electrical plant** ([#147](https://github.com/isc-fs/IFS-vHIL/issues/147)) | Tractive-system plant on the co-simulation port (a Python stand-in, then IFSSIM's FMU), fault and safety-gate scenarios | ecu-ams arms Start → Run on the plant's DC link with no scripted value; the fault scenarios give the firmware's state and reason deterministically ([`m8-plan.md`](m8-plan.md)) |
 
 M1 comes first because everything else plugs into it. The AMS model (M2) is
 the first test of how cheaply the catalogue grows. M5 waits for M1–M4,

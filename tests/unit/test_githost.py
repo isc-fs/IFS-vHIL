@@ -64,17 +64,17 @@ def test_git_itself_reads_the_header_from_the_environment(tmp_path):
 def test_push_keeps_the_token_off_the_command_line(tmp_path, monkeypatch):
     run = Recorder()
     monkeypatch.setattr(githost.subprocess, "run", run)
-    GitHubHost(TOKEN, "isc-fs/IFS_vHIL").push(tmp_path, "feat/x")
+    GitHubHost(TOKEN, "isc-fs/IFS-vHIL").push(tmp_path, "feat/x")
     (cmd, env), = run.calls
     assert not leaks(cmd)
-    assert "https://github.com/isc-fs/IFS_vHIL.git" in cmd
+    assert "https://github.com/isc-fs/IFS-vHIL.git" in cmd
     assert env["GIT_CONFIG_VALUE_" + str(int(env["GIT_CONFIG_COUNT"]) - 1)] == HEADER
 
 
 def test_a_minted_app_token_is_kept_off_the_command_line_too(tmp_path, monkeypatch):
     run = Recorder()
     monkeypatch.setattr(githost.subprocess, "run", run)
-    GitHubHost(lambda: TOKEN, "isc-fs/IFS_vHIL").push(tmp_path, "feat/x")
+    GitHubHost(lambda: TOKEN, "isc-fs/IFS-vHIL").push(tmp_path, "feat/x")
     (cmd, env), = run.calls
     assert not leaks(cmd) and HEADER in env.values()
 
@@ -83,7 +83,7 @@ def test_a_failed_push_does_not_echo_the_token(tmp_path, monkeypatch):
     monkeypatch.setattr(githost.subprocess, "run",
                         Recorder(1, stderr=f"fatal: bad credentials {TOKEN}"))
     with pytest.raises(HostError) as e:
-        GitHubHost(TOKEN, "isc-fs/IFS_vHIL").push(tmp_path, "feat/x")
+        GitHubHost(TOKEN, "isc-fs/IFS-vHIL").push(tmp_path, "feat/x")
     assert TOKEN not in str(e.value)
 
 
@@ -214,7 +214,7 @@ def test_the_push_token_is_read_from_its_file(tmp_path, monkeypatch):
     (tmp_path / "token").write_text(TOKEN)
     monkeypatch.delenv("VHIL_GITHUB_TOKEN", raising=False)
     monkeypatch.setenv("VHIL_GITHUB_TOKEN_FILE", str(tmp_path / "token"))
-    monkeypatch.setenv("VHIL_GITHUB_REPO", "isc-fs/IFS_vHIL")
+    monkeypatch.setenv("VHIL_GITHUB_REPO", "isc-fs/IFS-vHIL")
     state = SimpleNamespace(settings=SimpleNamespace(workspace=tmp_path), github_app=None)
     host = systems_write._host(SimpleNamespace(app=SimpleNamespace(state=state)))
     assert host.token == TOKEN

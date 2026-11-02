@@ -350,11 +350,11 @@ def test_tokens_are_narrowed_to_one_repo_and_the_access_asked_for(rsa_key):
     clock, issued = Clock(), []
     app = GitHubApp(1, pem(rsa_key), "isc-fs", clock=clock, transport=app_api(clock, issued))
     read = app.token_for("isc-fs/IFS08-CE-ECU")
-    write = app.token_for("isc-fs/IFS_vHIL", write=True)
-    assert read != write and app.token_for("IFS_vHIL") not in (read, write)
+    write = app.token_for("isc-fs/IFS-vHIL", write=True)
+    assert read != write and app.token_for("IFS-vHIL") not in (read, write)
     bodies = [json.loads(r.content) for r in issued]
     assert bodies[0] == {"repositories": ["IFS08-CE-ECU"], "permissions": {"contents": "read"}}
-    assert bodies[1] == {"repositories": ["IFS_vHIL"],
+    assert bodies[1] == {"repositories": ["IFS-vHIL"],
                          "permissions": {"contents": "write", "pull_requests": "write"}}
     assert bodies[2]["permissions"] == {"contents": "read"}
 

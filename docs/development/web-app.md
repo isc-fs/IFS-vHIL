@@ -68,7 +68,7 @@ starts. Never set it on a host.
   system-file pushes / PRs use the App, never a person's token.
   `app.state.github_app.token_for("isc-fs/IFS08-CE-ECU")` returns an
   installation token narrowed to that repository with contents read;
-  `token_for("isc-fs/IFS_vHIL", write=True)` one with contents + pull
+  `token_for("isc-fs/IFS-vHIL", write=True)` one with contents + pull
   requests write. Tokens (1 h) are cached and renewed 5 min before they
   expire. `app.state.github_app` is `None` when the App isn't configured.
 - **Firmware refs** (`GET /api/firmware/{id}/refs`, `vhil/server/githost.py`
@@ -141,9 +141,9 @@ GitHub App only needs the repository permissions.)
    during installation" off. **Webhook**: off (not used).
 3. Permissions:
    - Repository → **Contents: Read and write**. Tokens for firmware repos are
-     narrowed to read when issued; write is only ever requested for IFS_vHIL.
+     narrowed to read when issued; write is only ever requested for IFS-vHIL.
    - Repository → **Pull requests: Read and write** (system-file PRs on
-     IFS_vHIL).
+     IFS-vHIL).
    - Repository → **Metadata: Read** (mandatory).
    - Organization → **Members: Read** (the login's membership check).
 4. "Where can this GitHub App be installed?": **Only on this account**.
@@ -152,7 +152,7 @@ GitHub App only needs the repository permissions.)
    **Client ID** (`VHIL_GITHUB_CLIENT_ID`); **Generate a new client secret**
    (`VHIL_GITHUB_CLIENT_SECRET`); **Generate a private key** and store the
    `.pem` on the host (`VHIL_GITHUB_APP_KEY`).
-6. **Install App** → isc-fs → **Only select repositories**: IFS_vHIL and the
+6. **Install App** → isc-fs → **Only select repositories**: IFS-vHIL and the
    firmware repositories systems build from (today `IFS08-CE-ECU`,
    `IFS08-CE-AMS`, `stm32-can-bootloader`; see `systems/*.yaml` and
    `configs/firmware/`). Add a repository here when a system starts using it.

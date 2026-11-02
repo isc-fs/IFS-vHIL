@@ -137,7 +137,7 @@ reach worker 169.254.169.254 80 && fail "the worker reaches the metadata address
 reach worker 1.1.1.1 443 && fail "the worker has a route off the host"
 reach api editor 5000 && fail "the API reaches the editor directly"
 echo "  worker: no API, no editor, no metadata, no direct route out; api: no editor"
-in_svc worker git ls-remote -q https://github.com/isc-fs/IFS_vHIL.git HEAD >/dev/null \
+in_svc worker git ls-remote -q https://github.com/isc-fs/IFS-vHIL.git HEAD >/dev/null \
     || fail "the worker can't reach GitHub through the egress proxy"
 in_svc worker python -c "import urllib.request as u; u.urlopen('https://example.com', timeout=10)" \
     >/dev/null 2>&1 && fail "the egress proxy let the worker reach example.com"

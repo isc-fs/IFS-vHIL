@@ -14,7 +14,7 @@ _COVERAGE = pytest.StashKey[str]()
 
 
 def pytest_addoption(parser):
-    g = parser.getgroup("vhil-sim", "native tests in virtual time (IFS_vHIL)")
+    g = parser.getgroup("vhil-sim", "native tests in virtual time (IFS-vHIL)")
     for board in BOARDS:
         env = f"VHIL_{board.upper().replace('-', '_')}_ELF"
         g.addoption(f"--{board}-elf", default=os.environ.get(env),

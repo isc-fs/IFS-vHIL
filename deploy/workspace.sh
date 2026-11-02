@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The production API's own clone of IFS_vHIL (docs/deploy.md, "State").
+# The production API's own clone of IFS-vHIL (docs/deploy.md, "State").
 #
 # Run by the `workspace` one-shot service before api/worker/editor start:
 #
@@ -14,7 +14,7 @@
 # some possibly not pushed yet. Only HEAD and the working tree move, and the
 # working tree belongs to the deployment: nothing edits it in place.
 #
-# Credentials: IFS_vHIL is public, so clone and fetch need none. For a private
+# Credentials: IFS-vHIL is public, so clone and fetch need none. For a private
 # remote put a token in the file VHIL_GITHUB_TOKEN_FILE names (a compose
 # secret; or VHIL_GITHUB_TOKEN itself). It reaches git as an HTTP header
 # through git's environment (GIT_CONFIG_COUNT), for this run only: never on a
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 dir=${VHIL_WORKSPACE:-/workspace}
-remote=${VHIL_WORKSPACE_REMOTE:-https://github.com/isc-fs/IFS_vHIL.git}
+remote=${VHIL_WORKSPACE_REMOTE:-https://github.com/isc-fs/IFS-vHIL.git}
 ref=${VHIL_WORKSPACE_REF:?set VHIL_WORKSPACE_REF to the tag or commit to deploy}
 
 token=${VHIL_GITHUB_TOKEN:-}

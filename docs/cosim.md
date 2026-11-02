@@ -2,7 +2,7 @@
 
 How a **plant** (something outside the electronics: a driver, an inverter
 and motor, the vehicle) exchanges signals with a system on the virtual
-bench. This is the contract MingoCIL attaches through ([#14](https://github.com/isc-fs/IFS_vHIL/issues/14),
+bench. This is the contract MingoCIL attaches through ([#14](https://github.com/isc-fs/IFS-vHIL/issues/14),
 vision principle 6). It is engine-agnostic: the vHIL side is Renode today,
 and the plant side can be Python (`vhil/plants.py`) or an external engine.
 

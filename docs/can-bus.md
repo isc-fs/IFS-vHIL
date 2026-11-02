@@ -80,7 +80,7 @@ about 390 µs.
 identity fingerprint, the sim, smoke and native suites, the IFS_HIL virtual
 suites, every required check) sync every **500 µs**, so a cross-board effect
 is at most 500 µs late. A non-gate run may opt in to a **1 ms** quantum
-([#348](https://github.com/isc-fs/IFS_vHIL/issues/348)): about 12-25 % faster
+([#348](https://github.com/isc-fs/IFS-vHIL/issues/348)): about 12-25 % faster
 in steady state, and what a board sees of another (CAN included) can then lag
 by up to 1 ms. Only those two values are accepted
 (`vhil.system.quantum_us`). It is chosen per run: `Sim(..., quantum_us=1000)`,
@@ -96,7 +96,7 @@ reference.
 A quantum under the shortest frame (44 bit times, 88 µs at 500 kbit/s) would
 make them all exact. With two boards it costs 3x to 5x in wall time, and it
 slows the ECU's control loop, so the model doesn't do it. The spike numbers
-are on [#174](https://github.com/isc-fs/IFS_vHIL/issues/174).
+are on [#174](https://github.com/isc-fs/IFS-vHIL/issues/174).
 
 ### Determinism
 
