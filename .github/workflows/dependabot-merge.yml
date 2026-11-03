@@ -1,0 +1,120 @@
+name: Dependabot merge
+
+# Merges Dependabot's pull requests into dev once their required checks pass,
+# one at a time (docs/ci.md, "Dependabot"). dev requires branches to be up to
+# date, so each merge leaves the others behind: every run merges at most one
+# pull request that is ready (merge state CLEAN), and when none is ready and
+# none is still being checked, rebases the oldest one that is behind so CI
+# runs on it. A queue of N pull requests drains in N rounds of CI.
+#
+# Trust: this runs dev's copy of this file (schedule, workflow_run), never
+# code from a pull request, and checks nothing out. It only acts on pull
+# requests opened by dependabot[bot] from this repository whose every commit
+# is authored by dependabot[bot], so a push by anyone else to a Dependabot
+# branch takes it out of the queue. A single-package semver-major bump is
+# left for a person (label `dependabot-major`).
+#
+# Token: DEPENDABOT_MERGE_TOKEN, a fine-grained token limited to this
+# repository (Contents and Pull requests: read and write). It is needed for
+# the rebase: a push made with the workflow's own token starts no CI, so the
+# rebased pull request would never turn green. Without the secret, the run
+# still merges pull requests that are already ready and lists the ones that
+# need a rebase in its summary.
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_run:
+    workflows:
+      - Unit (host)
+      - Smoke (virtual)
+      - Native tests (virtual time)
+      - IFS_HIL ECU and AMS suites (virtual)
+      - Scenario tests (vHIL suite)
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: dependabot-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # merge
+  pull-requests: write   # merge, label
+
+jobs:
+  merge:
+    # workflow_run fires for every run of those workflows; only runs on a
+    # Dependabot branch (or the schedule and a manual run) need a look. The
+    # branch, not the actor: a rebased pull request's runs are the token
+    # owner's.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Merge one ready pull request, or rebase the next
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_MERGE_TOKEN || github.token }}
+          HAS_PAT: ${{ secrets.DEPENDABOT_MERGE_TOKEN != '' }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          say() { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+
+          # Oldest first. Draft and other-author pull requests are skipped.
+          prs=$(gh pr list -R "$REPO" --base dev --state open --author 'app/dependabot' \
+                  --json number,isDraft,headRepositoryOwner,title \
+                  -q 'sort_by(.number)|.[]|select(.isDraft|not)|select(.headRepositoryOwner.login=="'"${REPO%/*}"'")|"\(.number)\t\(.title)"')
+          [ -n "$prs" ] || { say "No Dependabot pull requests open."; exit 0; }
+
+          ready=() behind=() busy=0
+          while IFS=$'\t' read -r n title; do
+            # Every commit authored by Dependabot, else a person pushed to it.
+            others=$(gh api "repos/$REPO/pulls/$n/commits" --paginate \
+                       -q '.[]|select(.author.login!="dependabot[bot]")|.sha')
+            if [ -n "$others" ]; then say "#$n: has commits not by Dependabot, skipped."; continue; fi
+            # A single package moving to a new major version waits for a person.
+            if [[ "$title" =~ from\ v?([0-9]+)[^\ ]*\ to\ v?([0-9]+) ]] \
+               && [ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]; then
+              gh pr edit "$n" -R "$REPO" --add-label dependabot-major >/dev/null 2>&1 || true
+              say "#$n: major version bump, left for review."; continue
+            fi
+            # GitHub computes the merge state on demand: the first read after
+            # a change is often UNKNOWN. Ask again before believing it.
+            for _ in 1 2 3 4 5; do
+              state=$(gh pr view "$n" -R "$REPO" --json mergeStateStatus -q .mergeStateStatus)
+              [ "$state" != UNKNOWN ] && break
+              sleep 5
+            done
+            case "$state" in
+              CLEAN)   ready+=("$n") ;;
+              BEHIND)  behind+=("$n") ;;
+              BLOCKED|UNSTABLE|UNKNOWN|HAS_HOOKS)
+                # Checks still running, or failed: look at the head's checks.
+                if gh pr checks "$n" -R "$REPO" --required 2>/dev/null \
+                     | awk -F'\t' '{print $2}' | grep -qE 'pending|queued|in_progress'; then
+                  busy=1; say "#$n: checks running."
+                else
+                  say "#$n: $state, required checks not green; left alone."
+                fi ;;
+              *) say "#$n: $state, left alone." ;;
+            esac
+          done <<< "$prs"
+
+          if [ ${#ready[@]} -gt 0 ]; then
+            n=${ready[0]}
+            sha=$(gh pr view "$n" -R "$REPO" --json headRefOid -q .headRefOid)
+            gh pr merge "$n" -R "$REPO" --merge --match-head-commit "$sha"
+            say "#$n: merged ($sha)."
+          elif [ "$busy" = 0 ] && [ ${#behind[@]} -gt 0 ]; then
+            n=${behind[0]}
+            if [ "$HAS_PAT" = true ]; then
+              gh pr update-branch "$n" -R "$REPO" --rebase
+              say "#$n: rebased onto dev; merges when its checks pass."
+            else
+              say "#$n: behind dev. Set DEPENDABOT_MERGE_TOKEN to rebase it automatically."
+            fi
+          else
+            say "Nothing to merge yet."
+          fi
