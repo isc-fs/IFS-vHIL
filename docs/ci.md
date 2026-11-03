@@ -236,6 +236,26 @@ Check what it would delete with `python scripts/ci-cache-clean.py --dry-run`
 after a long pause in heavy runs), a dispatch of `smoke.yml` on dev restores
 it in about 10 runner-minutes.
 
+## Dependabot
+
+`dependabot-merge.yml` merges Dependabot's pull requests into dev without a
+person. It runs every 30 minutes, after each required workflow finishes on a
+Dependabot branch, and on dispatch.
+
+Each run does one of three things:
+- **Merge:** if a pull request's required checks have passed and it is up to date with dev, it merges that one, with a merge commit.
+- **Rebase:** if none is ready and none is still being checked, it rebases the oldest one that is behind dev.
+- **Wait:** otherwise it does nothing until the next run.
+
+dev requires pull requests to be up to date, so the queue drains one pull request per round of CI.
+
+**What it won't merge:**
+- a pull request with any commit not authored by Dependabot;
+- a single-package major-version bump, which gets the label `dependabot-major` and waits for review;
+- a pull request whose required checks failed.
+
+**Token:** the rebase needs `DEPENDABOT_MERGE_TOKEN`, a fine-grained token for this repository only, with Contents and Pull requests set to read and write. A push made with the workflow's own token starts no CI. Without the secret, the workflow still merges pull requests that are already ready, and it lists those that need a rebase in its run summary.
+
 ## Measuring
 
 Runner-minutes of a run: the sum of its jobs' durations,
