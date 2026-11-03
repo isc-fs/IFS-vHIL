@@ -80,7 +80,13 @@ jobs:
               gh pr edit "$n" -R "$REPO" --add-label dependabot-major >/dev/null 2>&1 || true
               say "#$n: major version bump, left for review."; continue
             fi
-            state=$(gh pr view "$n" -R "$REPO" --json mergeStateStatus -q .mergeStateStatus)
+            # GitHub computes the merge state on demand: the first read after
+            # a change is often UNKNOWN. Ask again before believing it.
+            for _ in 1 2 3 4 5; do
+              state=$(gh pr view "$n" -R "$REPO" --json mergeStateStatus -q .mergeStateStatus)
+              [ "$state" != UNKNOWN ] && break
+              sleep 5
+            done
             case "$state" in
               CLEAN)   ready+=("$n") ;;
               BEHIND)  behind+=("$n") ;;
