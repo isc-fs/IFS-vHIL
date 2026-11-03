@@ -46,7 +46,8 @@ scripts/vhil-docker.sh ifs-hil       # IFS_HIL's own suite against the virtual b
 scripts/vhil-docker.sh server        # the web app on http://localhost:8080
 ```
 
-Pinned tool versions, running without Docker, and every job the wrapper runs
+Every job the wrapper runs (the full list is the header of
+`scripts/vhil-docker.sh`), pinned tool versions and running without Docker
 are in [`docs/development/setup.md`](docs/development/setup.md). Deploying the
 web app for the team is in [`docs/deploy.md`](docs/deploy.md).
 
