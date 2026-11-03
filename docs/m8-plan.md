@@ -58,7 +58,7 @@ of scope). The sense floor is an unmeasured inverter behaviour, filed for the
 measurement.
 
 **Speed**: the plant costs +0.1 % host CPU per virtual s against a scripted
-0x466 of the same frames ([`performance.md`](performance.md#a-plant-on-the-co-simulation-port-m8-147)).
+0x466 of the same frames ([`performance.md`](performance/rounds.md#a-plant-on-the-co-simulation-port-m8-147)).
 The identity fingerprint of every system is unchanged.
 
 **#147's exit criteria**:
@@ -226,7 +226,7 @@ ecu-ams (a 10 ms 0x466 periodic took ecu-ams from 0.48 to 1.57 wall s per
 virtual s, CPU +20 %), and every scenario with a periodic stimulus paid it.
 Suspected to be Renode's `TimeSourceBase.WaitIfBlocked`, it was
 `Emulation.StartAll`'s 100 ms sleep, once per `RunFor` that sent a frame;
-fixed in #312 (performance.md, "A probe's frame"): scenarios ~3x faster in
+fixed in #312 (performance/rounds.md, "A probe's frame"): scenarios ~3x faster in
 wall time, traces unchanged.
 
 ## Where the plant runs
