@@ -17,7 +17,13 @@ python scripts/speed.py ecu=ECU08.elf ams=AMS.elf bootloader=CAN_BL.elf \
     [--baseline] [--repeat N] [--threads] [--profile DIR] [--setup "vhil_ff_{board} Enabled false"]
 ```
 
-A speed change must not change what a run computes: the identity
+A speed change must not change what a run computes. The reference is
+`ci/fingerprints.json`, which CI's guard checks every system against
+(`python scripts/fingerprint.py check ci/fingerprints.json`, 5 s from
+power-on, [`ci.md`](ci.md)); a pure speed change leaves it byte-identical,
+and a fidelity fix replaces it (since #294, patch set 1.17.0-vhil.11). The
+digests below are a dated log of the study's 10 s fingerprint and of the
+guard's, not the reference. The study's identity
 fingerprint ([`fingerprint.py`](proposals/renode-patches/tooling/fingerprint.py),
 in the image with the firmware from `VHIL_ECU_ELF`, `VHIL_AMS_ELF`,
 `VHIL_UDV_ELF` and `VHIL_CAN_BOOTLOADER_ELF`: `python

@@ -28,7 +28,7 @@ IDE (VS Code's activity bar and docks, Simulink's canvas plus scopes):
   navbar, the shell header, the "Editor" heading, the ed-bar and the Save/PR
   aside all go.
 
-What PM v0.5.2 (commit `04613679`, `PM_COMMIT` in `docker/editor.Dockerfile`)
+What PM v0.5.2 (commit `04613679`, `PM_VERSION` in `docker/editor.Dockerfile`)
 offers without changes, checked against its
 `resources/schemas/metadata_schema.json`: `metadata.interfaces`
 (`interfaceColor`, `interfaceConnectionColor`, `interfaceConnectionPattern`),

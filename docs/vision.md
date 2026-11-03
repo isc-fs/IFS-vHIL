@@ -43,8 +43,7 @@ testable on their own, and shared.
 
 1. **The system file is the source of truth, not the UI.** The web app edits
    it, CI runs it, a PR can change it. Emulator scripts are *generated* from it.
-   Today's hand-written `scripts/ecu.resc` and `configs/vbench.yaml` are the
-   first things to generate.
+   Every `.resc` script and the broker's wiring now are (`vhil/system.py`).
 2. **Virtual time is the contract.** One Cortex-M7 runs at about real time on a
    desktop; a full car will not, and SoCs are far slower. New tests and the
    UI's timelines speak virtual time, so a run is deterministic whether it
