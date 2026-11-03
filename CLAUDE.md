@@ -27,11 +27,9 @@ Where this file names Renode, the STM32H733 or the MainLite, the rule is
 specific to that backend, platform or board.
 
 How fast the emulated core runs firmware code (virtual-time fidelity of
-busy-waits, ISR and task CPU time; not #154's wall-clock speed) is each
-firmware's `cpu.mips` in the catalogue, not the platform's: the H733 runs
-the ECU and the uDV with their caches off, from flash, the AMS with its
-I-cache on since IFS08-CE-AMS#637
-([`docs/cpu-timing.md`](docs/cpu-timing.md), #246).
+busy-waits, ISR and task CPU time; not wall-clock speed) is each firmware's
+`cpu.mips` in the catalogue, not the platform's
+([`docs/cpu-timing.md`](docs/cpu-timing.md)).
 
 ---
 
@@ -239,30 +237,31 @@ as CI ([`docs/development/setup.md`](docs/development/setup.md#docker-any-host-n
 
 Pinned versions: Renode **1.17.0** (the current backend), Arm GNU
 **14.2.Rel1**. Bump deliberately, in their own PR. The image and CI build
-Renode from the release's source with the patches in `docker/renode/`
-(speed, which computes the same as the release package, plus fidelity
-fixes such as 0007, STM32 timers' ARR + 1 period, #292, and 0012,
-SysTick's RELOAD + 1 period, #294; a log's
-first line names the build, `vhil: renode 1.17.0 ... + vhil patches ...`);
-a new release means rebasing them ([`docker/renode/README.md`](docker/renode/README.md)).
+Renode from source with the patch queue in `docker/renode/` (current set in
+`pins.env`; what each patch does and the rebase recipe in its
+[README](docker/renode/README.md)). A Renode log's first line names the build
+(`vhil: renode 1.17.0 ... + vhil patches ...`).
 
 ## CI policy
 
-Heavy CI runs only in special cases ([`docs/ci.md`](docs/ci.md)). Every PR
-runs `unit`. A PR labelled **`full-ci`** runs the tests its changed paths
-select ([`ci/impact.yaml`](ci/impact.yaml), `scripts/ci-select.py`) plus the
-guard (every system's identity fingerprint against `ci/fingerprints.json`, the
-two-board determinism test); **`full-ci-all`**, a release PR into `main`, the
-nightly on `dev` and a dispatch run everything. An unmapped path selects
-everything. Required checks on `dev` (`unit`, `smoke (ecu)`, `smoke (ams)`,
-`sim`, `ecu`, `scenarios`) always report: a job not selected is skipped (or,
-for the smoke legs, its steps are), a failed selection fails them. A new
-tests/sim file needs its `pytestmark` (boards, systems, subsystem; strict
-markers in `pytest.ini`); a new model or module, a rule in `ci/impact.yaml`.
-A fingerprint change on purpose: commit the guard's `fingerprint` artifact as
-`ci/fingerprints.json`. The nightly impact audit (`impact-audit.yml`) reports
-nightly failures a merged PR's selection skipped. Lint workflow changes with
-actionlint: a bad expression yields no check run at all.
+Heavy CI runs only in special cases; the detail is in [`docs/ci.md`](docs/ci.md).
+
+- Every PR runs `unit`. A PR labelled **`full-ci`** runs the tests its
+  changed paths select ([`ci/impact.yaml`](ci/impact.yaml),
+  `scripts/ci-select.py`) plus the guard (every system's identity
+  fingerprint against `ci/fingerprints.json`, the two-board determinism
+  test). **`full-ci-all`**, a release PR into `main`, the nightly on `dev`
+  and a dispatch run everything. An unmapped path selects everything.
+- Required checks on `dev` (`unit`, `smoke (ecu)`, `smoke (ams)`, `sim`,
+  `ecu`, `scenarios`) always report: a job not selected is skipped, a failed
+  selection fails them.
+- A new tests/sim file needs its `pytestmark` (boards, systems, subsystem;
+  strict markers in `pytest.ini`); a new model or module, a rule in
+  `ci/impact.yaml`.
+- A fingerprint change on purpose: commit the guard's `fingerprint`
+  artifact as `ci/fingerprints.json`.
+- Lint workflow changes with actionlint: a bad expression yields no check
+  run at all.
 
 ## Style
 
