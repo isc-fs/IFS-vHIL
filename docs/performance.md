@@ -31,6 +31,9 @@ one GitHub runner (x86, 4 vCPU), median of 3, 2026-10-30, patch set
   model, and an M-series host under Colima by about ±20 % run to run. The
   same round on the M-series host (4 vCPU, sim, steady): ecu-ams-udv 1.11x,
   ecu-ams 2.19x, ams 5.17x, ecu 4.03x.
+- **ecu and ams on the bench path** were last timed at patch set vhil.5
+  (#288, #289; two runners, steady +8 s): ecu 5.74-6.18x, ams 3.18-3.28x
+  ([rounds](performance/rounds.md#several-boards-the-slaves-on-the-masters-thread-the-cyccnt-waits-260)).
 - **Not re-measured since.** Patch 0012 (vhil.11, #294) is a fidelity fix
   that adds no work per period; nothing has timed vhil.11 itself.
 - **The gate's 500 us quantum.** A run that opts in to 1 ms (#348) is
