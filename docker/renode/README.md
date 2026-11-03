@@ -38,6 +38,23 @@ were measured:
 | 0011 | — | `TranslationCPU.OnMemoryAccess` asked tlib to translate every reported access's address (a P/Invoke under the execution lock) to give the memory-access hook a physical address. A core can say it never translates (`AddressesAreUntranslated`; `CortexM` does: tlib's `get_phys_addr` sets phys = address on every M-profile path, and a failed translation passed the address unchanged too), and the hook then gets the virtual address, unless an external MMU is enabled with a window whose addend was set nonzero (a window translates by adding its addend, 0 when acquired; the vHIL's execute-never windows, `VhilExecuteNever.cs`, set none). The fast-forward's armed detector is that hook: 2.5 % of the uDV's CPU thread (#260) | Not submitted |
 | 0012 | — | **Fidelity fix.** `NVIC`'s SysTick counts RELOAD + 1 clocks per period, as the core does (ARMv7-M ARM B3.3, SYST_RVR "Calculating the RELOAD value": the counter counts RELOAD to 0 and loads RELOAD on the next clock), so its exception comes every RELOAD + 1 clocks; stock Renode's descending clock entry fired on reaching 0 and was given RELOAD, one clock short. Every image's 1 ms tick (RELOAD = 527999 at 528 MHz: the CAN bootloader's HAL tick, each app's FreeRTOS tick) was 999 999 ns, 1 ppm fast. The entry is loaded with RELOAD + 1 (its limit is 2^24) and holds that value for the clock the counter holds 0: `SYST_CVR` reads RELOAD..0 (it never read 0 while counting); a write to it clears it and COUNTFLAG and the counter loads RELOAD on the next clock; a RELOAD written while the counter is at 0 is the one it loads (FreeRTOS's port writes `SYST_CVR` before `SYST_RVR`), and RELOAD = 0 written then stops it at 0 without a 1 -> 0 step. COUNTFLAG, RELOAD = 0 stopping the counter at its wrap and CLKSOURCE (reads 1, the processor clock) are unchanged (#294, `tests/sim/test_systick.py`) | Candidate, beside 0007 (not prepared, not submitted) |
 
+**Patch sets.** `VHIL_PATCH_SET` in `pins.env` names the queue a build
+carries; it goes up by one whenever a patch is added or changed:
+
+| Patch set | Date | Change |
+|---|---|---|
+| 1.17.0-vhil.1 | 2026-10-13 | 0001-0003 (the study's P2, P3, P5) |
+| vhil.2 | 2026-10-14 | 0004, first form (timer update events) |
+| vhil.3 | 2026-10-14 | 0005 + tlib/0001 |
+| vhil.4 | 2026-10-15 | 0004 and tlib/0001 reworked to match upstream PRs 08 and 10 |
+| vhil.5 | 2026-10-15 | 0006 |
+| vhil.6 | 2026-10-15 | 0007 (fidelity: ARR + 1, new identity reference) |
+| vhil.7 | 2026-10-15 | tlib/0002 |
+| vhil.8 | 2026-10-15 | 0008 |
+| vhil.9 | 2026-10-15 | 0009 |
+| vhil.10 | 2026-10-30 | 0010, 0011 |
+| vhil.11 | 2026-10-30 | 0012 (fidelity: RELOAD + 1, new identity reference) |
+
 The study's P1 (blocking instead of spinning at the lock-step barrier) is
 slower on 4 cores and P4 (aarch64 inline TLB) not worth it; neither is here.
 When upstream takes a patch, the next release carries it: drop it from the
