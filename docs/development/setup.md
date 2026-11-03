@@ -9,14 +9,17 @@ runs each CI job in it; firmware and the IFS_HIL checkout live in the
 
 ```sh
 scripts/vhil-docker.sh vm          # macOS: Colima VM `vhil` with vcan (once; needs colima)
-scripts/vhil-docker.sh fw          # build ECU + AMS from their systems
+scripts/vhil-docker.sh image       # (re)build the images (once, and after docker/ changes)
+scripts/vhil-docker.sh fw          # build ECU + AMS from their systems (or: fw ecu ams udv)
 scripts/vhil-docker.sh unit
 scripts/vhil-docker.sh smoke ecu   # or ams
 scripts/vhil-docker.sh sim
+scripts/vhil-docker.sh scenarios   # every committed scenario (tests/scenarios)
 scripts/vhil-docker.sh coverage   # firmware coverage of tests/sim (below)
 scripts/vhil-docker.sh speed --baseline  # real-time factor per system and path (below)
 scripts/vhil-docker.sh ifs-hil     # IFS_HIL's ECU smoke suite over vcan can0..can2
 scripts/vhil-docker.sh editor      # system editor on http://localhost:8080/editor/
+scripts/vhil-docker.sh server      # the web app (API + shell) on http://localhost:8080
 scripts/vhil-docker.sh shell
 ```
 
@@ -46,6 +49,13 @@ directory: `$VHIL_CARD_DIR` (`:`-separated; default `build/cards`). A relative
 image is looked up in the first; `..`, absolute paths elsewhere and symlinks
 out are refused. A test passes its own temp directory with
 `Sim(..., card_dirs=[tmp])`.
+
+A reset or power cut ends an SD transfer in flight, as on the chip (RM0468
+60.5.4): an IDMA write the firmware queued before it moves nothing
+(`models/renode/Stm32H7Sdmmc.cs`, #325; held by
+`tests/sim/test_ams_sd.py::test_a_reset_drops_an_idma_write_in_flight`).
+Before #325 such a write could read the address space from 0 without end and
+stop the board's virtual time.
 
 Everything a system file or a run scenario names reaches the emulator only
 through `vhil.renode`'s encoders, behind the schema and `System`'s checks: names are
@@ -143,6 +153,9 @@ scripts/vhil-docker.sh coverage 'test_ecu_*'                  # results/coverage
 python -m vhil.coverage cov-ams/ cov-ecu/ -o cov/            # merge runs (their raw/ logs)
 genhtml results/coverage/ECU08.info -o results/coverage/html  # lcov's HTML, if installed
 ```
+
+The last full report, per firmware and subsystem, with what no test covers:
+[`test-coverage.md`](../test-coverage.md) (dated; re-run before relying on it).
 
 ## Environment
 
