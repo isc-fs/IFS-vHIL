@@ -6,8 +6,9 @@ run in CI without physical hardware.
 The emulated boards run the same firmware images
 [IFS_HIL](https://github.com/isc-fs/IFS_HIL) flashes to the real ones,
 bootloader included. A test that passes here has run the car's software, not a
-special build. Every push gets HIL-style testing, in parallel, with no hardware
-attached. Work that needs real physics stays on the physical bench: analog
+special build. Every PR runs the host-only checks; the HIL suites run in
+parallel, with no hardware attached, on a `full-ci` label, every night and on
+release ([`docs/ci.md`](docs/ci.md)). Work that needs real physics stays on the physical bench: analog
 accuracy, real power, flash wear and bus electrics.
 
 **What it does today**
@@ -68,6 +69,7 @@ catalog/platforms/        Emulated MCUs
 catalog/boards/           Boards: a platform, its connectors and pins, and the roles it can take
 catalog/firmware/         Firmware sources: repo, default ref, build recipe
 catalog/models/           Devices that attach to a board: battery monitors, sensors, SD cards
+ci/                       CI's test selection map and identity fingerprints
 schemas/                  The schema every catalogue entry and system is validated against
 platforms/, models/       The emulator-side descriptions of those MCUs and devices
 vhil/                     Generator, simulation API, virtual broker, web app server and worker
@@ -76,6 +78,7 @@ tests/sim/                Native test suites, run in virtual time
 tests/*_smoke.robot       Smoke checks per system
 configs/gaps.yaml         IFS_HIL tests the virtual bench can't pass yet, and why
 configs/peripherals.yaml  Hardware the firmware may touch that isn't modelled, and why
+editor/                   The system editor's frontend (vendored Pipeline Manager)
 scripts/                  Docker wrapper and helpers
 docker/, deploy/          Images, local stack, and the deployment of the web app
 docs/                     Vision, design, development, deployment, backplane references
