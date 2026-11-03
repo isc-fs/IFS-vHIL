@@ -10,7 +10,10 @@ image builds Renode with, maintained in [`docker/renode/`](../../docker/renode/)
 (its README: pins, what each patch does, the rebase recipe). Upstreaming is a
 separate decision. The study's tooling and every measurement stay here
 ([`renode-patches/`](renode-patches/), with the dropped P1); the patches that
-were here are `docker/renode/patches/0001-0003`.
+were here are `docker/renode/patches/0001-0003`. The queue has grown since
+(0001-0012 and tlib/0001-0002 at patch set 1.17.0-vhil.11, 2026-10-30): the
+[patch-set table](../../docker/renode/README.md#the-patches) is current; this
+study is the 2026-10-13 decision.
 
 ## Recommendation
 
