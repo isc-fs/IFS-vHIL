@@ -339,14 +339,10 @@ costs a stop per AMS_OK edge (two a run: the boot grace and an Error).
 
 **Scenarios** (`systems/ecu-ams.scenarios/`, beyond-bench): every ecu-ams
 scenario now presses RST_EXT at 5.4 s and sets TSMS at 5.5 s on the
-circuit, and four are new:
-
-| Scenario | Expect |
-|---|---|
-| `sdc-needs-a-reset-after-power-on` | TSMS on but no press: PF9 low, a DASH_CHG press refused; RST_EXT closes both latches and the next press arms Precharge |
-| `sdc-opens-in-run` | a shutdown button in Run (any unlatched element): contacts open on the lost coil supply, the AMS drops to Start unlatched, the bleed takes the link; released, the circuit re-closes with no reset and the AMS waits for a press |
-| `imd-latch-holds-the-sdc-open` | IMD_OK falls in Run: K4 drops, Start; IMD_OK back leaves the circuit open until RST_EXT |
-| `ams-ok-opens-the-sdc` | an AMS Error (over-current) drops AMS_OK, K5 and AIR+_VCC; an RST_EXT press with AMS_OK low is refused |
+circuit, and four are new: `sdc-needs-a-reset-after-power-on`,
+`sdc-opens-in-run`, `imd-latch-holds-the-sdc-open` and `ams-ok-opens-the-sdc`
+(what each expects: [`scenarios.md`](scenarios.md#the-suite); what the firmware did:
+[Status](#status-2026-10-18)).
 
 ## M9 prep: the measurement chain
 
