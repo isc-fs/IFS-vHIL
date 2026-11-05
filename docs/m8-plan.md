@@ -416,7 +416,7 @@ Fit quality: R2 0.947, residual 25 mV rms per element (hold-out on the
 drive's last 40 %: 33 mV); the quick fit without the skew and the OCV drift
 gives the 3.9 mOhm, R2 0.85, first estimated. Not fitted: capacity, the OCV
 table, the thermal parameters. The `ecu-ams` load-sag scenarios
-(AMS#641) run on this set at the log's end state (SoC 0.584, 21.9 C).
+(AMS#644) run on this set at the log's end state (SoC 0.584, 21.9 C).
 
 IFSSIM's `ifs08.m` OCV table is a generic NMC curve labelled SECONDARY; the
 stand-in uses the VTC6 fit, and the FMU should say which it uses.

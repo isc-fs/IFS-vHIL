@@ -18,7 +18,18 @@
 //
 // Protocol facts (framing, PEC15, NTC table, mux decode) are ported from
 // IFS_HIL's Pico emulator, minus its known quirks (IFS_HIL#135).
-// Conversions complete instantly: firmware only waits fixed delays.
+// Conversions take the datasheet's time (Table 5 for MD/ADCOPT): ADCV and
+// ADOW sample cell pair k (C<k+1> and C<k+7>) at the middle of the k-th sixth
+// of the scan, at the cells' values then, as the chip's one ADC per six
+// channels does; a read returns what the scan has latched so far. Each cell
+// input has the BMS's filter, R28 100 ohm in series and C23 10 nF to the
+// module ground: with ADOW's pull current on, a connected tap's pin moves by
+// I R (the same on every pin, so no connected cell reading changes) and an
+// open tap's capacitor slews at I / C, 10 mV/us, until it meets a neighbour's
+// pin; between ADOW scans it holds, and ADCV reads what it holds. An optional
+// per-cell offset on the pull-up result (SetAdowOffset) stands for the
+// healthy-pack ADOW offset measured on the car's modules (AMS #512: the top
+// cell of an upper LTC reads ~127 mV low under pull-up), cause unmodelled.
 //
 // Cell source: what each chip converts (SetCell / SetAllCells, SetTemperature
 // / SetAllTemperatures, SetAuxRaw) is the battery's state, not the chip's.
@@ -272,6 +283,33 @@ namespace Antmicro.Renode.Peripherals.SPI
             return (ulong)clockMachine.ElapsedVirtualTime.TimeElapsed.TotalMicroseconds;
         }
 
+        // Virtual time in us to within the instruction: a conversion's
+        // channels are sampled at their own instants (Ltc6811.Settle), and a
+        // sync quantum (0.5 ms on ecu-ams) is a fifth of the 7 kHz cell scan.
+        private double PreciseNow()
+        {
+            if(clockMachine.SystemBus.TryGetCurrentCPU(out var cpu))
+            {
+                cpu.SyncTime();
+            }
+            return clockMachine.ElapsedVirtualTime.TimeElapsed.TotalMicroseconds;
+        }
+
+        // Armed with an opcode (e.g. 0x328, ADOW pull-down at 7 kHz): the
+        // next time the chip nearest the bridge decodes it, the run's trigger
+        // goes off once (VhilRunner.cs), so a test can place a plant
+        // transient between two conversions. -1: disarmed.
+        public int CommandTrigger { get; set; } = -1;
+
+        private void OnCommand(ushort opcode)
+        {
+            if(CommandTrigger == opcode)
+            {
+                CommandTrigger = -1;
+                RunTrigger()?.SetValue(null, true);
+            }
+        }
+
         private void OnDischargeStarted()
         {
             if(BleedTrigger)
@@ -312,6 +350,8 @@ namespace Antmicro.Renode.Peripherals.SPI
                 chain[i].Downstream = i + 1 < chain.Count ? chain[i + 1] : null;
                 chain[i].Clock = Now;
                 chain[i].DischargeStarted = OnDischargeStarted;
+                chain[i].PreciseClock = PreciseNow;
+                chain[i].CommandSeen = i == 0 ? OnCommand : (Action<ushort>)null;
             }
         }
 
@@ -372,6 +412,9 @@ namespace Antmicro.Renode.Peripherals.SPI
             CorruptConfigWrites = false;
             corruptConfigNext = 0;
             commandCounts.Clear();
+            convKind = ConvNone;
+            convPair = Pairs;
+            history.Clear();
             badCommandPec = badWritePec = wakes = adcvWhileDischarging = adowWhileDischarging = 0;
             rx.Clear();
             relayed.Clear();
@@ -533,11 +576,13 @@ namespace Antmicro.Renode.Peripherals.SPI
         public void SetCell(int cell, int millivolts)
         {
             CheckRange(cell, CellsPerIc, "cell");
+            Settle(PreciseTime());
             cells[cell] = ToLtc(millivolts);
         }
 
         public void SetAllCells(int millivolts)
         {
+            Settle(PreciseTime());
             for(var c = 0; c < CellsPerIc; c++)
             {
                 cells[c] = ToLtc(millivolts);
@@ -550,7 +595,33 @@ namespace Antmicro.Renode.Peripherals.SPI
         public void OpenWire(int conductor, bool open)
         {
             CheckRange(conductor, CellsPerIc + 1, "conductor");
+            var now = PreciseTime();
+            Settle(now);
+            if(open && !openWires[conductor])
+            {
+                // The capacitor starts where the wire left it.
+                tapV[conductor] = Nodes()[conductor];
+                tapAt = Math.Max(tapAt, now);
+            }
             openWires[conductor] = open;
+        }
+
+        // Added to cell<cell>'s ADOW pull-up result, mV (0 = none): the
+        // healthy-pack offset (AMS #512: -127 mV on the top cell of an upper
+        // LTC, +48 mV on cell 1), a measurement whose cause is not modelled.
+        public void SetAdowOffset(int cell, int millivolts)
+        {
+            CheckRange(cell, CellsPerIc, "cell");
+            adowOffset[cell] = millivolts * 10;
+        }
+
+        // The last conversions this chip completed (or that a new command cut
+        // short), oldest first, one per line:
+        // "<ADCV|ADOWUP|ADOWDOWN>,<start us>,<cell1>,...,<cell12>" (100 uV).
+        public string ConversionHistory()
+        {
+            Settle(PreciseTime());
+            return string.Join("\n", history);
         }
 
         public int CellMillivolts(int cell)
@@ -600,11 +671,18 @@ namespace Antmicro.Renode.Peripherals.SPI
         public Func<ulong> Clock { get; set; }
         public Action DischargeStarted { get; set; }
 
+        // Virtual time in us, to the instruction (conversion timing), and
+        // what to tell of each command decoded (the bridge's CommandTrigger;
+        // set on the chip nearest the bridge only).
+        public Func<double> PreciseClock { get; set; }
+        public Action<ushort> CommandSeen { get; set; }
+
         // A plant drives this chip's cells and NTCs: an AMS reset keeps them.
         public bool PlantHeld { get; private set; }
 
         public void SetPlantCells(string[] raw100uV, int offset)
         {
+            Settle(PreciseTime());
             for(var c = 0; c < CellsPerIc; c++)
             {
                 cells[c] = (ushort)Math.Max(0, Math.Min(0xFFFF, int.Parse(raw100uV[offset + c])));
@@ -716,6 +794,7 @@ namespace Antmicro.Renode.Peripherals.SPI
             }
             command = opcode;
             commandCounts[opcode] = CommandCount(opcode) + 1;
+            CommandSeen?.Invoke(opcode);
 
             if(IsAdcv(opcode))
             {
@@ -723,7 +802,7 @@ namespace Antmicro.Renode.Peripherals.SPI
                 {
                     adcvWhileDischarging++;   // the conversion sees the balance load
                 }
-                Array.Copy(cells, cellResults, CellsPerIc);
+                StartConversion(ConvAdcv, opcode);
                 return;
             }
             if(IsAdow(opcode))
@@ -732,13 +811,17 @@ namespace Antmicro.Renode.Peripherals.SPI
                 {
                     adowWhileDischarging++;
                 }
-                ConvertOpenWire(pullUp: (opcode & AdowPup) != 0);
+                StartConversion((opcode & AdowPup) != 0 ? ConvAdowUp : ConvAdowDown, opcode);
                 return;
             }
             if(IsAdax(opcode))
             {
                 gpio1Result = aux[muxChannel];
                 return;
+            }
+            if(opcode == RDCVA || opcode == RDCVB || opcode == RDCVC || opcode == RDCVD)
+            {
+                Settle(PreciseTime());
             }
             switch(opcode)
             {
@@ -802,43 +885,167 @@ namespace Antmicro.Renode.Peripherals.SPI
             return data6.Concat(new[] { (byte)(pec >> 8), (byte)pec }).ToArray();
         }
 
-        // ADOW: the cells converted with a test current on every C pin, up
-        // (PUP = 1) or down. A connected conductor holds its pin; an open one
-        // follows the current to its neighbour, C<n+1> pulled up or C<n-1>
-        // pulled down, so the cell below it and the one above see the sum or
-        // nothing, the ADC saturating. That is the datasheet's open-wire
-        // signature ("Open Wire Check (ADOW Command)"): an interior C<n> gives
-        // CELL<n+1>(PU) - CELL<n+1>(PD) < -400 mV, C0 gives CELL1(PU) = 0 and
-        // the top conductor CELL<N>(PD) = 0. A simplification of the physics,
-        // exact at the endpoints where silicon may read a few mV.
-        private void ConvertOpenWire(bool pullUp)
+        // -- conversions (ADCV, ADOW) --------------------------------------------
+
+        private double PreciseTime()
         {
-            var pin = new int[CellsPerIc + 1];        // C0..C12 potentials, 100 uV
+            return PreciseClock?.Invoke() ?? 0;
+        }
+
+        // A conversion command: whatever scan is running stops where it is
+        // (its channels not yet sampled keep their old results), and a new
+        // one starts now.
+        private void StartConversion(int kind, ushort opcode)
+        {
+            var now = PreciseTime();
+            Settle(now);
+            if(convKind != ConvNone)
+            {
+                AdvanceTaps(now);
+                Record();
+            }
+            convKind = kind;
+            convStart = now;
+            convLength = PreciseClock == null ? 0 : ScanMicroseconds((opcode >> 7) & 3, (config[0] & 1) != 0);
+            convPair = 0;
+        }
+
+        // Latch every channel pair whose sample instant is not after `now`,
+        // at the cells as they are (callers settle before the cells change).
+        private void Settle(double now)
+        {
+            if(convKind == ConvNone)
+            {
+                return;
+            }
+            for(; convPair < Pairs; convPair++)
+            {
+                var t = convStart + (convPair + 0.5) * convLength / Pairs;
+                if(t > now)
+                {
+                    break;
+                }
+                var level = Levels(t);
+                foreach(var c in new[] { convPair, convPair + Pairs })
+                {
+                    var v = level[c + 1] - level[c] + (convKind == ConvAdowUp ? adowOffset[c] : 0);
+                    cellResults[c] = (ushort)Math.Max(0, Math.Min(0xFFFF, v));
+                }
+            }
+            if(convPair == Pairs && now >= convStart + convLength)
+            {
+                AdvanceTaps(convStart + convLength);
+                Record();
+                convKind = ConvNone;
+            }
+        }
+
+        private void Record()
+        {
+            var name = convKind == ConvAdcv ? "ADCV" : convKind == ConvAdowUp ? "ADOWUP" : "ADOWDOWN";
+            history.Add($"{name},{convStart:F1},{string.Join(",", cellResults)}");
+            if(history.Count > HistoryLength)
+            {
+                history.RemoveAt(0);
+            }
+        }
+
+        // C0..C12 battery-side node potentials, 100 uV, C0 = 0.
+        private int[] Nodes()
+        {
+            var node = new int[CellsPerIc + 1];
             for(var n = 1; n <= CellsPerIc; n++)
             {
-                pin[n] = pin[n - 1] + cells[n - 1];
+                node[n] = node[n - 1] + cells[n - 1];
             }
-            var level = (int[])pin.Clone();
+            return node;
+        }
+
+        // ADOW's pull current on the pins now: +1 up, -1 down, 0 none.
+        private int PullAt(double t)
+        {
+            if(convKind != ConvAdowUp && convKind != ConvAdowDown)
+            {
+                return 0;
+            }
+            if(t < convStart || t > convStart + convLength)
+            {
+                return 0;
+            }
+            return convKind == ConvAdowUp ? 1 : -1;
+        }
+
+        // The C pins' potentials at t (100 uV): a connected pin is its node,
+        // moved by the pull current through R28; an open one is its
+        // capacitor, advanced to t.
+        private int[] Levels(double t)
+        {
+            AdvanceTaps(t);
+            var node = Nodes();
+            var shift = PullAt(t) * PullIrDrop;
+            var level = new int[CellsPerIc + 1];
+            for(var n = 0; n <= CellsPerIc; n++)
+            {
+                level[n] = openWires[n] ? (int)Math.Round(tapV[n]) : node[n] + shift;
+            }
+            return level;
+        }
+
+        // Each open tap's capacitor from tapAt to t: charged at I / C while
+        // the current scan pulls, held otherwise, never past a neighbour's pin
+        // (its own end of the chip for C0 and C12): an open conductor
+        // saturates against the next one, the existing simplification, exact
+        // at the endpoints where silicon may read a few mV.
+        private void AdvanceTaps(double t)
+        {
+            if(t <= tapAt)
+            {
+                return;
+            }
+            var node = Nodes();
+            var end = convStart + convLength;
+            var on = convKind == ConvAdowUp || convKind == ConvAdowDown;
+            var overlap = on ? Math.Max(0, Math.Min(t, end) - Math.Max(tapAt, convStart)) : 0;
+            var dir = convKind == ConvAdowUp ? 1 : -1;
+            var shift = on && t <= end ? dir * PullIrDrop : 0;
+            Func<int, int> pin = m => openWires[m] ? node[m] : node[m] + shift;
             for(var n = 0; n <= CellsPerIc; n++)
             {
                 if(!openWires[n])
                 {
                     continue;
                 }
-                if(pullUp && n < CellsPerIc)
-                {
-                    level[n] = pin[n + 1];
-                }
-                else if(!pullUp && n > 0)
-                {
-                    level[n] = pin[n - 1];
-                }
+                var lo = n > 0 ? pin(n - 1) : 0;
+                var hi = n < CellsPerIc ? pin(n + 1) : node[CellsPerIc];
+                var v = tapV[n] + dir * SlewPer100uVPerUs * overlap;
+                tapV[n] = Math.Max(Math.Min(lo, hi), Math.Min(Math.Max(lo, hi), v));
             }
-            for(var c = 0; c < CellsPerIc; c++)
+            tapAt = t;
+        }
+
+        // All-cell scan time, us (LTC6811 datasheet Table 5, ADCV / ADOW, all
+        // 12 cells): MD 01/10/11/00 = 27 kHz / 7 kHz / 26 Hz / 422 Hz with
+        // ADCOPT 0, 14 kHz / 3 kHz / 2 kHz / 1 kHz with ADCOPT 1 (the 14 kHz
+        // and 1 kHz times unverified: no firmware here sets ADCOPT). The AMS
+        // converts at 7 kHz (IFS08-CE-AMS ams_config.hpp:997, AdcMode = 2).
+        private static double ScanMicroseconds(int md, bool adcopt)
+        {
+            switch(md)
             {
-                cellResults[c] = (ushort)Math.Max(0, Math.Min(0xFFFF, level[c + 1] - level[c]));
+                case 1: return adcopt ? 1288 : 1113;
+                case 2: return adcopt ? 3033 : 2335;
+                case 3: return adcopt ? 4407 : 201317;
+                default: return adcopt ? 7140 : 12807;
             }
         }
+
+        private const int ConvNone = 0, ConvAdcv = 1, ConvAdowUp = 2, ConvAdowDown = 3;
+        private const int Pairs = 6;                   // one ADC, C1/C7 ... C6/C12
+        private const int HistoryLength = 16;
+        // ADOW pull current 100 uA (datasheet "Open Wire Check"), BMS filter
+        // R28 100 ohm and C23 10 nF per cell input (BMS_LITE schematic).
+        private const int PullIrDrop = 100;            // 100 uA x 100 ohm = 10 mV, 100 uV units
+        private const double SlewPer100uVPerUs = 100;  // 100 uA / 10 nF = 10 mV/us
 
         // Fixed bits per the LTC6811 command table; MD, DCP/PUP and CH/CHG
         // vary (AMS: ADCV 0x360, ADOW 0x368/0x328, ADAX 0x561).
@@ -965,6 +1172,14 @@ namespace Antmicro.Renode.Peripherals.SPI
         private readonly byte[] comm = new byte[6];
         private readonly ushort[] cells = new ushort[CellsPerIc];
         private readonly bool[] openWires = new bool[CellsPerIc + 1];
+        private readonly double[] tapV = new double[CellsPerIc + 1];   // open taps' C23, 100 uV
+        private double tapAt;
+        private readonly int[] adowOffset = new int[CellsPerIc];
+        private readonly List<string> history = new List<string>();
+        private int convKind;
+        private double convStart;
+        private double convLength;
+        private int convPair;
         private readonly ushort[] cellResults = new ushort[CellsPerIc];
         private readonly ushort[] aux = new ushort[MuxChannels];
         private readonly ulong[] bleedUs = new ulong[CellsPerIc];

@@ -1,6 +1,6 @@
 kind: scenario
 system: ecu-ams
-description: "Control for load-peak-sag-is-not-a-lost-cell: the same car-fitted pack (parameter set car-log0077, at LOG0077's end state: SoC 0.584, 21.9 C) armed to Run takes a 173 A peak for 1 s from 11 s: the highest current in LOG0077 (I_raw 173.1 A at 136.75 s), which the car carried with no fault. The lowest element (c3_0) sags by i R0 to ~2.97 V and ~2.94 V after 1 s with its RC, above CellUnderVoltageMv (2800, IFS08-CE-AMS ams_config.hpp:22) and ~45 A under the ~217 A this pack trips at; the AMS reads the current and stays in Run, and neither the range path nor ADOW (CellOpenWire, 16) fires, on the step up or on the lift-off."
+description: "Control for load-peak-sag-is-not-a-lost-cell: the same car-fitted pack (parameter set car-log0077, at LOG0077's end state: SoC 0.584, 21.9 C) armed to Run takes a 173 A peak for 1 s from 11 s: the highest current in LOG0077 (I_raw 173.1 A at 136.75 s), which the car carried with no fault. The lowest element (c3_0) sags by i R0 to ~2.97 V and ~2.94 V after 1 s with its RC, above CellUnderVoltageMv (2800, IFS08-CE-AMS ams_config.hpp:22) and ~45 A under the ~217 A this pack trips at; the AMS reads the current and stays in Run, and neither the range path nor ADOW (CellOpenWire, 16) fires, on the step up or on the lift-off. The lift-off misses the ~6 ms between the ADOW pull-up and pull-down scans; one inside it latches CellOpenWire (IFS08-CE-AMS#641, tests/sim/test_ams_open_wire_transient.py)."
 virtual_ms: 14000
 tags: [beyond-bench]
 stimuli:

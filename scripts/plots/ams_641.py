@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Figures of isc-fs/IFS08-CE-AMS#641 (a healthy cell's load sag latches
-CellUnderVoltage and opens AIR+), from vHIL runs, into docs/analysis/ams-641/.
+"""Figures of isc-fs/IFS08-CE-AMS#641 (a load transient between the two ADOW
+scans latches CellOpenWire on a healthy pack, figures 6-7) and of the
+load-sag path to CellUnderVoltage (figures 1-5, isc-fs/IFS08-CE-AMS#644), from
+vHIL runs, into docs/analysis/ams-641/.
 
-Two stages:
+Figures 6-7 (reason 16), from the runs tests/sim/test_ams_open_wire_transient.py
+writes (results/ams-641/open-wire-*.json, trimmed into docs/analysis/ams-641/
+data/open-wire-*.json):
+
+    scripts/vhil-docker.sh sim tests/sim/test_ams_open_wire_transient.py
+    python scripts/plots/ams_641.py openwire --data docs/analysis/ams-641/data
+
+Figures 1-5, in stages:
 
     # 1. In the container (Renode + the built ECU/AMS images): run the two
     #    scenarios from power-on as the suite does and keep each trace and the
@@ -727,6 +736,167 @@ def plot(data: Path, out: Path) -> None:
     print(json.dumps(facts, indent=1))
 
 
+# -- figures 6-7: CellOpenWire (16) on a load release (AMS#641) ------------------------
+
+OW_MV = 400            # CellOpenWireDeltaMv, AMS ams_config.hpp:43
+OW_OFFSET_MV = -127    # healthy ADOW offset, top cell of an upper LTC (AMS #512)
+SCAN_US = 2335         # LTC6811 7 kHz all-cell scan (datasheet Table 5)
+CAR_PASS_MS = (10.7, 12.6)   # PU->PD on the car: 2 x osDelay(3) (2-3 ms) + 5 x 84 B at 515.625 kHz
+
+
+def fig6(plt, th, cut, path):
+    """Timeline of the vHIL repro: 180 A cut to 0 in 2 ms between the pull-up
+    and pull-down scans; c0_10 (chip 1 input 1) sampled by each."""
+    rel = cut["trace"][-1]["t_us"]
+    i0 = cut["trace"][-2]["set"]["i_inverter_dc"]
+    ramp_us = cut["trace"][-1]["set"]["i_ramp_ms"] * 1000
+    pu, pd1, pd2 = cut["scans"]
+    pair = 1                                         # cell index 1 -> pair 1 (C2/C8)
+    at = lambda scan: (scan["start_us"] + (pair + 0.5) * SCAN_US / 6 - rel) / 1e3
+    v_pu, v_pd1, v_pd2 = (sc["cells_mV"][pair] for sc in (pu, pd1, pd2))
+    r = (v_pd2 - v_pu) / i0                          # mOhm, as the scans see it
+    # The plant's staircase (vhil/plant_ts.py RAMP_STEP_US = 250 us)
+    ts = [-8.0, 0.0]
+    cur = [i0, i0]
+    for k in range(1, int(ramp_us // 250) + 1):
+        ts += [k * 0.25, k * 0.25]
+        cur += [cur[-1], i0 * (1 - k * 250 / ramp_us)]
+    ts.append(30.0)
+    cur.append(0.0)
+    vt = [v_pd2 - c * r for c in cur]
+    tl = [(q["t_us"] - rel) / 1e3 for q in cut["timeline"]]
+    err = next(t for t, q in zip(tl, cut["timeline"]) if q["state"] == 5)
+    air = next(t for t, q in zip(tl, cut["timeline"]) if not q["air_pos"])
+
+    fig, axs = plt.subplots(3, 1, figsize=(9, 7.2), sharex=True,
+                            gridspec_kw=dict(height_ratios=[1, 1.7, 0.75]))
+    fig.subplots_adjust(left=0.1, right=0.97, top=0.86, bottom=0.08, hspace=0.18)
+    fig.suptitle("A torque cut between the ADOW scans latches CellOpenWire (16)",
+                 x=0.1, ha="left", fontsize=12.5, fontweight="bold", color=th["ink"])
+    fig.text(0.1, 0.895, f"vHIL, ecu-ams on the car-fitted pack (car-log0077, SoC 0.584, 21.9 °C), AMS dev: "
+             f"{i0:.0f} A → 0 in {ramp_us / 1e3:.0f} ms right after the pull-up scan.\n"
+             "The AMS compares cell c0_10's pull-up reading with its pull-down one; the cut moved the cell by "
+             "I·R in between.", fontsize=8.5, color=th["ink2"], linespacing=1.4)
+    win = (at(pu), at(pd2))
+    for ax in axs:
+        ax.axvspan(*win, color=th["band"], lw=0, zorder=0)
+    a = axs[0]
+    a.plot(ts, cur, color=th["s1"], drawstyle="default")
+    a.set_ylabel("Pack current (A)")
+    a.set_ylim(-10, i0 * 1.25)
+    a.text(win[0] + 0.15, i0 * 1.08, f"PU → PD: {win[1] - win[0]:.1f} ms in the vHIL, "
+           f"~{CAR_PASS_MS[0]:.0f}–{CAR_PASS_MS[1]:.0f} ms on the car", fontsize=8, color=th["ink2"])
+    a = axs[1]
+    a.plot(ts, vt, color=th["s1"], lw=1.6, label="c0_10 terminal voltage (plant)")
+    a.plot([at(pu)], [v_pu], "o", ms=9, color=th["s2"], mec=th["surface"], mew=2, zorder=5,
+           label="pull-up scan sample (CELL_PU)")
+    a.plot([at(pd1)], [v_pd1], "o", ms=8, mfc=th["surface"], mec=th["muted"], mew=1.5, zorder=5,
+           label="first pull-down scan (settling, discarded)")
+    a.plot([at(pd2)], [v_pd2], "s", ms=8, color=th["s3"], mec=th["surface"], mew=2, zorder=5,
+           label="pull-down scan sample (CELL_PD)")
+    a.annotate(f"PU − PD = {v_pu:.0f} − {v_pd2:.0f} = {v_pu - v_pd2:.0f} mV\n< −{OW_MV} mV: "
+               "conductor 1 of chip 1 'open'", xy=(at(pd2), v_pd2), xytext=(at(pd2) + 4, v_pd2 - 260),
+               fontsize=9, color=th["ink"], arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    a.set_ylabel("Cell c0_10 (mV)")
+    a.legend(loc="lower right", fontsize=7.5)
+    a = axs[2]
+    tt = [-8.0] + tl
+    run_ = [1] + [1 if q["state"] == 3 else 0 for q in cut["timeline"]]
+    airc = [1] + [q["air_pos"] for q in cut["timeline"]]
+    a.step(tt, [v + 0.04 for v in run_], where="post", color=th["crit"], lw=1.8, label="AMS in Run")
+    a.step(tt, airc, where="post", color=th["ink2"], lw=1.8, ls=(0, (4, 2)), label="AIR+ closed")
+    a.set_yticks([0, 1])
+    a.set_yticklabels(["no", "yes"])
+    a.set_ylim(-0.25, 1.35)
+    a.text(err + 0.4, 0.45, f"Error, reason 16: +{err:.0f} ms", fontsize=8.5, color=th["ink"])
+    a.text(air - 0.4, 0.12, f"AIR+ opens: +{air:.0f} ms", ha="right", fontsize=8.5, color=th["ink"])
+    a.legend(loc="upper right", fontsize=7.5, ncol=2)
+    a.set_xlabel("Time from the start of the cut (ms)")
+    a.set_xlim(-8, 30)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return dict(pu_mV=v_pu, pd_mV=v_pd2, delta_mV=v_pu - v_pd2, r_mohm=r, window_ms=win[1] - win[0],
+                error_ms=err, air_open_ms=air)
+
+
+def fig7(plt, th, sweep, path):
+    """Trip map: current fall between the scans against element resistance."""
+    p = cell_params()
+    n = int(p["cells_series"])
+    rs = [r_elem(p, CAR_T_C, 0.0, k) * 1e3 for k in range(n)]
+    # Which elements the interior rule checks: chip-local cell index >= 1.
+    upper = 9
+    top = {k for k in range(n) if k % 19 in (upper - 1, 18)}
+    checked = [k for k in range(n) if k % 19 not in (0, upper)]
+    fig, ax = plt.subplots(figsize=(9, 5.6))
+    fig.subplots_adjust(left=0.1, right=0.97, top=0.83, bottom=0.11)
+    fig.suptitle("Trip map: how much current may fall between the ADOW scans", x=0.1, ha="left",
+                 fontsize=12.5, fontweight="bold", color=th["ink"])
+    fig.text(0.1, 0.865, "PU − PD = −R·ΔI for a healthy element whose current falls by ΔI between the "
+             "pull-up and the pull-down scan;\nthe AMS faults below −400 mV. R per 6P element from the car "
+             "fit (car-log0077, 21.9 °C). Dots: vHIL sweeps.", fontsize=8.5, color=th["ink2"], linespacing=1.4)
+    di = [x for x in range(0, 301, 2)]
+    rmin, rmax = 3.0, 5.0
+    i400 = [OW_MV / x for x in [rmin + (rmax - rmin) * j / 200 for j in range(201)]]
+    i273 = [(OW_MV + OW_OFFSET_MV) / x for x in [rmin + (rmax - rmin) * j / 200 for j in range(201)]]
+    rr = [rmin + (rmax - rmin) * j / 200 for j in range(201)]
+    ax.fill_betweenx(rr, i400, [300] * len(rr), color=th["crit"], alpha=0.14, lw=0)
+    ax.plot(i400, rr, color=th["crit"], label="trips: ΔI·R = 400 mV")
+    ax.plot(i273, rr, color=th["crit"], ls=(0, (5, 3)),
+            label="trips on a top cell with the healthy −127 mV offset: ΔI·R = 273 mV")
+    # the pack's elements, as ticks at the left
+    for k in checked:
+        ax.plot([2, 8], [rs[k]] * 2, color=th["s2"] if k in top else th["s1"], lw=1, alpha=0.8)
+    ax.text(10, max(rs) + 0.03, "c0_10, 4.56 mΩ", fontsize=8, color=th["ink2"])
+    ax.text(10, 3.05, f"ticks: the {len(checked)} elements\nthe interior rule checks\n"
+            "(orange: an LTC's top cell)", fontsize=8, color=th["ink2"], linespacing=1.3)
+    no = next(t for t in sweep["no-offset"] if t["error"])
+    of = next(t for t in sweep["offset"] if t["error"])
+    rk = rs[10]
+    rt = max(rs[k] for k in top)
+    ax.plot([no["di_a"]], [rk], "o", ms=9, color=th["crit"], mec=th["surface"], mew=2, zorder=5)
+    ax.annotate(f"vHIL: first trip at ΔI = {no['di_a']} A (c0_10)", xy=(no["di_a"], rk),
+                xytext=(no["di_a"] + 30, rk - 0.25), fontsize=9, color=th["ink"],
+                arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    ax.plot([of["di_a"]], [rt], "o", ms=9, mfc=th["surface"], mec=th["crit"], mew=2, zorder=5)
+    ax.annotate(f"with the offset: {of['di_a']} A (a top cell)", xy=(of["di_a"], rt),
+                xytext=(of["di_a"] + 30, rt - 0.35), fontsize=9, color=th["ink"],
+                arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    # car transients, as the current fall the scans can capture
+    bands = [((0, 30), "slow pedal\nlift (~2 A/ms\n× ~12 ms)"),
+             ((150, 180), "torque cut from a\nLOG0077-size peak (173 A)"),
+             ((200, 300), "cut from a launch,\nor into regen")]
+    for (a0, a1), label in bands:
+        ax.axvspan(a0, a1, ymin=0.9, ymax=1.0, color=th["band"], lw=0)
+        ax.text(max(a0 + 2, (a0 + a1) / 2) if a0 else a0 + 2, 4.93, label,
+                ha="center" if a0 else "left", va="top", fontsize=7.5, color=th["ink2"])
+    ax.set_xlim(0, 300)
+    ax.set_ylim(rmin, rmax)
+    ax.set_xlabel("Current fall between the pull-up and the pull-down scan, ΔI (A)")
+    ax.set_ylabel("Element resistance R (mΩ)")
+    ax.legend(loc="lower right", fontsize=7.5)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return dict(trip_no_offset_a=no["di_a"], trip_offset_a=of["di_a"], r_c0_10=rk, r_top_max=rt,
+                predicted_no_offset_a=OW_MV / rk, predicted_offset_a=(OW_MV + OW_OFFSET_MV) / rt)
+
+
+def openwire(data: Path, out: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    cut = json.loads((data / "open-wire-cut-180a.json").read_text())
+    sweep = json.loads((data / "open-wire-sweep.json").read_text())
+    out.mkdir(parents=True, exist_ok=True)
+    facts = {}
+    for mode, th in THEMES.items():
+        plt.rcdefaults()
+        style(plt, th)
+        facts["fig6"] = fig6(plt, th, cut, out / f"fig6-open-wire-timeline-{mode}.png")
+        facts["fig7"] = fig7(plt, th, sweep, out / f"fig7-open-wire-trip-map-{mode}.png")
+    print(json.dumps(facts, indent=1))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -738,8 +908,13 @@ def main() -> None:
     c = sub.add_parser("car", help="figure 5 from the car's AMS SD logs (not in this repo)")
     c.add_argument("--logs", type=Path, required=True, help="directory holding LOG0077.CSV")
     c.add_argument("--out", type=Path, default=OUT)
+    ow = sub.add_parser("openwire", help="figures 6-7 (CellOpenWire) from the open-wire runs")
+    ow.add_argument("--data", type=Path, default=OUT / "data")
+    ow.add_argument("--out", type=Path, default=OUT)
     a = ap.parse_args()
-    if a.cmd == "run":
+    if a.cmd == "openwire":
+        openwire(a.data, a.out)
+    elif a.cmd == "run":
         run(a.out)
     elif a.cmd == "car":
         car(a.logs, a.out)

@@ -55,6 +55,16 @@ FAULTS = ("welded_air_pos", "welded_air_neg", "pre_open_circuit", "air_external_
 # charger's DC current (A, + = discharge / + = into the pack) and the ambient
 # temperature (K).
 SCRIPTED = ("i_inverter_dc", "i_charger", "t_ambient")
+# A row's i_inverter_dc change as a linear ramp over this many ms (0 or absent:
+# a step), e.g. a torque cut the inverter's current loop takes a few ms over.
+RAMP = "i_ramp_ms"
+# While a ramp runs, the pack is exchanged (cells and current sensor) at most
+# this far apart. The AMS's open-wire check (ADOW) compares two scans ~6-13 ms
+# apart (IFS08-CE-AMS bms_poll_task.cpp:434-497), each sampling a cell pair in
+# a ~0.4 ms slot of its 2.3 ms 7 kHz scan: a 0.25 ms staircase puts a ramp's
+# current within slope x 0.25 ms of the line at any sample (5 A on a 200 A /
+# 10 ms cut), well under the ~100 A the check needs to trip.
+RAMP_STEP_US = 250
 # Pack parameters a run may override (a row): the pack is rebuilt from them.
 PACK_STATE = ("cells_series", "cells_parallel", "cell_capacity", "cell_ocv_soc", "cell_ocv",
               "cell_r0", "cell_r0_alpha", "cell_r1", "cell_tau1", "cell_mass", "cell_cp",
@@ -460,6 +470,7 @@ class TsPlant(PortInputs):
         self.pack_records: list = []
         self._last_rec: dict = {}
         self.exchange_due = False
+        self.ramp: Optional[tuple] = None   # (t0, i0, t1, i1) of i_inverter_dc
 
     @property
     def params(self) -> dict:
@@ -492,6 +503,12 @@ class TsPlant(PortInputs):
         """The pack current for the circuit as it is now, and the circuit's
         v_pack for the pack as it is now."""
         pack, ts = self.pack, self.ts
+        if self.ramp is not None:
+            t0, i0, t1, i1 = self.ramp
+            self.scripted["i_inverter_dc"] = (
+                i1 if t_us >= t1 else i0 + (i1 - i0) * (t_us - t0) / (t1 - t0))
+            if t_us >= t1:
+                self.ramp = None
         i = self._pack_current()
         if i != pack.i_pack:
             pack.i_pack = i
@@ -548,6 +565,9 @@ class TsPlant(PortInputs):
             self.pack_next = None           # settled: under one LSB in 10 min
         else:
             self.pack_next = t_us + max(_us(p("cell_exchange_min")), _us(dt))
+        if self.ramp is not None:
+            step = t_us + RAMP_STEP_US
+            self.pack_next = step if self.pack_next is None else min(self.pack_next, step)
         if (self.scripted["i_inverter_dc"] or self.scripted["i_charger"]) and self.ts.pending:
             # A contact move that starts or stops the current: be there.
             at = self.ts.pending[0][0]
@@ -574,7 +594,17 @@ class TsPlant(PortInputs):
         of the run."""
         ts = self.ts
         self._to(t_us)
+        values = dict(values)
+        ramp_ms = float(values.pop(RAMP, 0) or 0)
         for name, value in values.items():
+            if name == "i_inverter_dc" and ramp_ms > 0 and self.pack is not None:
+                # From where the current is now to `value`, linearly.
+                self.ramp = (t_us, self.scripted["i_inverter_dc"], t_us + _us(ramp_ms / 1000),
+                             float(value))
+                ts.set(name, value, t_us)
+                continue
+            if name == "i_inverter_dc":
+                self.ramp = None
             if name in FAULTS:
                 ts.fault(name, value, t_us)
             elif name in SCRIPTED:
@@ -727,7 +757,7 @@ def settable(plant: str = "tractive-system") -> set[str]:
         from vhil.plant_sdc import settable as sdc_settable
         return sdc_settable(plant)
     from vhil.plant_pack import Pack
-    return set(FAULTS) | set(SCRIPTED) | set(Pack.FAULTS) | set(load_parameters(plant))
+    return set(FAULTS) | set(SCRIPTED) | {RAMP} | set(Pack.FAULTS) | set(load_parameters(plant))
 
 
 def _pack_parts(system, spec: dict, params: dict, sim) -> dict:
