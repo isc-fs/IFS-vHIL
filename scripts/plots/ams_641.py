@@ -17,6 +17,11 @@ Two stages:
     #    (docs/analysis/ams-641/data/ holds the ones the committed figures use).
     python scripts/plots/ams_641.py plot --data docs/analysis/ams-641/data
 
+    # 3. Figure 5, from the car's own AMS SD log (LOG0077.CSV, kept out of this
+    #    public repo); writes the PNGs and the derived numbers it uses
+    #    (docs/analysis/ams-641/data/car-log0077.json).
+    python scripts/plots/ams_641.py car --logs <dir with LOG0077.CSV>
+
 Figure 3 is derived, not run: the catalogue's VTC6 cell model
 (catalog/plants/tractive-system.yaml, the same the plant runs), evaluated for a
 1 s constant-current peak. Every cell parameter is derived from published VTC6
@@ -226,7 +231,7 @@ def fig1(plt, th, sag, path):
                                   gridspec_kw={"height_ratios": [1, 1.6, 0.8], "hspace": 0.3})
     fig.subplots_adjust(left=0.12, right=0.97, top=0.865, bottom=0.07)
     fig.suptitle("AMS latches Error on a healthy pack's load sag (vHIL, 240 A peak at 40 % SoC)",
-                 x=0.12, ha="left", y=0.975, fontsize=12.5, fontweight="bold", color=th["ink"])
+                 x=0.12, ha="left", y=0.98, fontsize=12.5, fontweight="bold", color=th["ink"])
     fig.text(0.12, 0.905, "Real ECU + AMS images (AMS dev 94b59a9) on the vHIL, per-cell 95S6P VTC6 plant.\n"
              "Cell parameters derived from published VTC6 data, not car-measured.",
              fontsize=8.5, color=th["ink2"], linespacing=1.4)
@@ -479,6 +484,196 @@ def filter_numbers() -> dict:
     )
 
 
+# -- the car's SD log (figure 5) --------------------------------------------------------
+#
+# LOG0077.CSV, the AMS's own 4 Hz SD log of the 2026-09-29 drive (AMS around
+# v3.0.2). The raw logs are not in this repo; `car --logs <dir>` reads them and
+# writes the figure plus the derived numbers (data/car-log0077.json).
+
+CAR_LOG = "LOG0077.CSV"
+CAR_RUN = 3           # fsm::State::Run (state_machine.hpp)
+CAR_REST_A = 3.0      # |I_raw| below this, on a row and the row before it, is "at rest"
+CAR_ZOOM_S = 30.0
+
+
+def car_rows(logs: Path) -> list[dict]:
+    import csv
+    with open(logs / CAR_LOG, newline="") as f:
+        return [{k: float(v) for k, v in row.items() if v not in ("", None)} for row in csv.DictReader(f)]
+
+
+def lsq(x, y):
+    """y = a + b x by least squares; returns (a, b, r2)."""
+    n = len(x)
+    mx, my = sum(x) / n, sum(y) / n
+    sxx = sum((u - mx) ** 2 for u in x)
+    sxy = sum((u - mx) * (v - my) for u, v in zip(x, y))
+    syy = sum((v - my) ** 2 for v in y)
+    b = sxy / sxx
+    return my - b * mx, b, sxy * sxy / (sxx * syy)
+
+
+def car_numbers(rows: list[dict]) -> dict:
+    cells = [k for k in rows[0] if k[0] == "c" and k[1].isdigit()]
+    run = [r for r in rows if r["fsm"] == CAR_RUN]
+    t = [r["tick_ms"] / 1e3 for r in run]
+    i = [r["I_raw_mA"] / 1e3 for r in run]
+    # The cell row lags the current row by about one 250 ms sample (the
+    # voltage poll and the current read are not simultaneous): fit each
+    # voltage against the current one row earlier.
+    pack = lsq(i[:-1], [r["pack_mV"] / 1e3 for r in run[1:]])
+    vmin = lsq(i[:-1], [r["vmin_mV"] for r in run[1:]])
+    weak = min(cells, key=lambda c: sorted(r[c] for r in run)[len(run) // 2])
+    weak_fit = lsq(i[:-1], [r[weak] for r in run[1:]])
+    rest = [run[k] for k in range(1, len(run)) if abs(i[k]) < CAR_REST_A and abs(i[k - 1]) < CAR_REST_A]
+    late = [r for r in rest if r["tick_ms"] / 1e3 >= t[-1] - CAR_ZOOM_S]
+    med = lambda xs: sorted(xs)[len(xs) // 2]
+    avg = lambda r: sum(r[c] for c in cells) / len(cells)
+    spread = [max(r[c] for c in cells) - min(r[c] for c in cells) for r in rest]
+    late_spread = [max(r[c] for c in cells) - min(r[c] for c in cells) for r in late]
+    offsets = {c: round(med([r[c] - avg(r) for r in late]), 1) for c in cells}
+    weak_rest = med([r[weak] for r in late])
+    k_mv_a = -vmin[1]
+    is_min = sum(1 for r in run if r[weak] == r["vmin_mV"])
+    deep = min(run, key=lambda r: r[weak])
+    peak = max(run, key=lambda r: r["I_raw_mA"])
+    return dict(
+        log=CAR_LOG, rows=len(rows), run_rows=len(run), run_from_s=t[0], log_end_s=rows[-1]["tick_ms"] / 1e3,
+        run_s=t[-1] - t[0], temp_C=[min(r["tmin_C"] for r in run), max(r["tmax_C"] for r in run)],
+        i_raw_peak_A=peak["I_raw_mA"] / 1e3, i_raw_peak_s=peak["tick_ms"] / 1e3,
+        i_filt_peak_A=max(r["I_filt_mA"] for r in run) / 1e3,
+        pack_fit=dict(v0_V=pack[0], mv_per_A=-pack[1] * 1e3, r_element_mohm=-pack[1] / len(cells) * 1e3,
+                      r2=pack[2], lag_rows=1),
+        vmin_fit=dict(v0_mV=vmin[0], mv_per_A=k_mv_a, r2=vmin[2], lag_rows=1),
+        weak_cell=weak, weak_is_min_rows=is_min, weak_fit=dict(v0_mV=weak_fit[0], mv_per_A=-weak_fit[1],
+                                                               r2=weak_fit[2]),
+        weak_deepest_mV=deep[weak], weak_deepest_s=deep["tick_ms"] / 1e3,
+        weak_rest_late_mV=weak_rest, avg_rest_late_mV=med([avg(r) for r in late]),
+        rest_spread_mV=[min(spread), max(spread)], rest_spread_late_mV=[min(late_spread), max(late_spread)],
+        crossing_A=(weak_rest - UV_MV) / k_mv_a,
+        rest_offsets_late_mV=dict(sorted(offsets.items(), key=lambda kv: kv[1])),
+        last_rows=[dict(t_s=r["tick_ms"] / 1e3, i_raw_A=r["I_raw_mA"] / 1e3, weak_mV=r[weak]) for r in rows[-4:]],
+        cells=cells,
+    )
+
+
+def fig5(plt, th, rows, n, path):
+    run = [r for r in rows if r["fsm"] == CAR_RUN]
+    weak, cells, k = n["weak_cell"], n["cells"], n["vmin_fit"]["mv_per_A"]
+    T = [r["tick_ms"] / 1e3 for r in rows]
+    end = n["log_end_s"]
+    z0 = end - CAR_ZOOM_S
+
+    fig = plt.figure(figsize=(9, 10.6))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1, 1.25, 1.3], width_ratios=[1.55, 1], hspace=0.42, wspace=0.26)
+    a = fig.add_subplot(gs[0, :])
+    b = fig.add_subplot(gs[1, :], sharex=a)
+    c = fig.add_subplot(gs[2, 0])
+    d = fig.add_subplot(gs[2, 1])
+    fig.subplots_adjust(left=0.09, right=0.97, top=0.865, bottom=0.055)
+    fig.suptitle("Car SD log: the weakest cell sags toward 2800 mV under ordinary peaks", x=0.09, ha="left",
+                 y=0.98, fontsize=12.5, fontweight="bold", color=th["ink"])
+    fig.text(0.09, 0.9, f"AMS LOG0077.CSV (2026-09-29 drive, AMS around v3.0.2), 4 Hz rows, {n['run_s']:.0f} s in Run, "
+             f"{n['temp_C'][0]:.0f}–{n['temp_C'][1]:.0f} °C.\nThe file ends at {end:.2f} s with no fault row; "
+             "the next file boots straight into a latched Error with reason 0\n(a warm reset: the latch lives in the "
+             "backup domain, which an LV power-cycle clears on this board).",
+             fontsize=8.5, color=th["ink2"], linespacing=1.4)
+
+    # (a) current
+    a.plot(T, [r["I_raw_mA"] / 1e3 for r in rows], color=th["s1"], lw=1.3, label="I_raw (per 250 ms row)")
+    a.plot(T, [r["I_filt_mA"] / 1e3 for r in rows], color=th["s2"], lw=1.6, label="I_filt (the overcurrent check's input)")
+    a.axhline(OC_A, color=th["muted"], lw=1, ls=(0, (4, 3)))
+    a.text(4, OC_A + 6, "AMS overcurrent trip 185 A (on I_filt)", fontsize=8, color=th["ink2"], va="bottom")
+    a.annotate(f"{n['i_raw_peak_A']:.0f} A", xy=(n["i_raw_peak_s"], n["i_raw_peak_A"]),
+               xytext=(n["i_raw_peak_s"] - 14, n["i_raw_peak_A"] + 8), fontsize=8, color=th["ink"],
+               arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    a.set_ylim(-20, 230)
+    a.set_ylabel("Pack current (A)")
+    a.set_title("(a) Pack current", color=th["ink"])
+    a.legend(loc="upper left", fontsize=8.5, ncol=2, bbox_to_anchor=(0.0, 0.84))
+
+    # (b) cells
+    avg = [sum(r[c_] for c_ in cells) / len(cells) / 1e3 for r in rows]
+    b.plot(T, avg, color=th["s3"], lw=1.4, label="Pack-average cell")
+    b.plot(T, [r["vmin_mV"] / 1e3 for r in rows], color=th["s2"], lw=3.4, alpha=0.45,
+           label=f"Min cell (vmin; is {weak} in {n['weak_is_min_rows']} of {n['run_rows']} Run rows)")
+    b.plot(T, [r[weak] / 1e3 for r in rows], color=th["s1"], lw=1.2, label=f"{weak} (weakest cell)")
+    b.axhline(UV_MV / 1e3, color=th["crit"], lw=1.2, ls=(0, (5, 3)))
+    b.text(4, UV_MV / 1e3 + 0.02, "CellUnderVoltageMv 2800 mV (AMS trip)", fontsize=8.5, color=th["ink"])
+    b.annotate(f"deepest logged: {n['weak_deepest_mV']:.0f} mV", xy=(n["weak_deepest_s"], n["weak_deepest_mV"] / 1e3),
+               xytext=(n["weak_deepest_s"] - 40, 2.93), fontsize=8.5, color=th["ink"],
+               arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    b.set_ylim(2.7, 4.0)
+    b.set_ylabel("Cell voltage (V)")
+    b.set_title("(b) Cells: pack average, min cell and the weakest cell", color=th["ink"])
+    b.legend(loc="lower left", fontsize=8.5, ncol=1, bbox_to_anchor=(0.0, 0.12))
+    for ax in (a, b):
+        ax.axvspan(z0, end, color=th["band"], lw=0, zorder=0)
+        ax.axvline(end, color=th["muted"], lw=0.8, ls=":")
+    b.set_xlabel("Time since AMS boot (s)")
+    a.set_xlim(0, end + 4)
+    plt.setp(a.get_xticklabels(), visible=False)
+
+    # (c) last 30 s: measured weak cell vs the I·R projection from rest
+    zr = [r for r in rows if r["tick_ms"] / 1e3 >= z0 - 0.25]
+    zt = [r["tick_ms"] / 1e3 for r in zr]
+    vrest = n["weak_rest_late_mV"]
+    proj = [vrest - k * max(0.0, zr[j - 1]["I_raw_mA"] / 1e3) for j in range(1, len(zr))]
+    c.axhline(UV_MV / 1e3, color=th["crit"], lw=1.2, ls=(0, (5, 3)))
+    c.plot(zt[1:], [v / 1e3 for v in proj], color=th["s2"], lw=1.4, ls=(0, (3, 2)),
+           label=f"Projected: {vrest / 1e3:.2f} V − {k:.2f} mV/A × I_raw")
+    c.plot(zt, [r[weak] / 1e3 for r in zr], color=th["s1"], lw=1.6, label=f"{weak} measured")
+    c.axvline(end, color=th["muted"], lw=0.8, ls=":")
+    c.text(end - 0.3, 3.88, f"log ends\n{end:.2f} s", ha="right", va="top", fontsize=8, color=th["ink2"])
+    c.text(end - 0.3, UV_MV / 1e3 + 0.02, f"2800 mV needs ≈{n['crossing_A']:.0f} A", ha="right", fontsize=8.5,
+           color=th["ink"])
+    c.set_xlim(z0, end + 1.5)
+    c.set_ylim(2.7, 4.0)
+    c.set_xlabel("Time since AMS boot (s)")
+    c.set_ylabel("Cell voltage (V)")
+    c.set_title(f"(c) Last {CAR_ZOOM_S:.0f} s, {weak}", color=th["ink"])
+    c.legend(loc="upper left", fontsize=7.5)
+
+    # (d) min-cell sag against current
+    xi = [r["I_raw_mA"] / 1e3 for r in run[:-1]]
+    yv = [r["vmin_mV"] / 1e3 for r in run[1:]]
+    d.scatter(xi, yv, s=9, color=th["s1"], alpha=0.45, lw=0, label="Run rows (vmin vs I_raw a row earlier)")
+    v0 = n["vmin_fit"]["v0_mV"]
+    xs = [0, 260]
+    d.plot(xs, [(v0 - k * x) / 1e3 for x in xs], color=th["ink2"], lw=1.2,
+           label=f"fit: −{k:.2f} mV/A, R² {n['vmin_fit']['r2']:.2f}")
+    d.plot(xs, [(vrest - k * x) / 1e3 for x in xs], color=th["s2"], lw=1.4, ls=(0, (3, 2)),
+           label=f"from {weak}'s late rest {vrest / 1e3:.2f} V")
+    d.axhline(UV_MV / 1e3, color=th["crit"], lw=1.2, ls=(0, (5, 3)))
+    d.plot([n["crossing_A"]], [UV_MV / 1e3], "o", ms=8, mfc=th["surface"], mec=th["crit"], mew=2)
+    d.annotate(f"≈{n['crossing_A']:.0f} A", xy=(n["crossing_A"], UV_MV / 1e3), xytext=(n["crossing_A"] - 50, 2.74),
+               fontsize=8.5, color=th["ink"], arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    d.set_xlim(-10, 260)
+    d.set_ylim(2.7, 4.0)
+    d.set_xlabel("I_raw (A)")
+    d.set_title("(d) Min cell vs current", color=th["ink"])
+    d.legend(loc="upper right", fontsize=7.2)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def car(logs: Path, out: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    rows = car_rows(logs)
+    n = car_numbers(rows)
+    out.mkdir(parents=True, exist_ok=True)
+    for mode, th in THEMES.items():
+        plt.rcdefaults()
+        style(plt, th)
+        fig5(plt, th, rows, n, out / f"fig5-car-log0077-{mode}.png")
+    keep = {k: v for k, v in n.items() if k != "cells"}
+    (out / "data").mkdir(exist_ok=True)
+    (out / "data" / "car-log0077.json").write_text(json.dumps(keep, indent=1) + "\n")
+    print(json.dumps({k: v for k, v in keep.items() if k != "rest_offsets_late_mV"}, indent=1))
+
+
 def plot(data: Path, out: Path) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -505,8 +700,16 @@ def main() -> None:
     pl = sub.add_parser("plot", help="the PNGs from the decoded series")
     pl.add_argument("--data", type=Path, default=OUT / "data")
     pl.add_argument("--out", type=Path, default=OUT)
+    c = sub.add_parser("car", help="figure 5 from the car's AMS SD logs (not in this repo)")
+    c.add_argument("--logs", type=Path, required=True, help="directory holding LOG0077.CSV")
+    c.add_argument("--out", type=Path, default=OUT)
     a = ap.parse_args()
-    run(a.out) if a.cmd == "run" else plot(a.data, a.out)
+    if a.cmd == "run":
+        run(a.out)
+    elif a.cmd == "car":
+        car(a.logs, a.out)
+    else:
+        plot(a.data, a.out)
 
 
 if __name__ == "__main__":
