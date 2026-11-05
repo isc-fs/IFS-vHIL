@@ -1,0 +1,26 @@
+kind: scenario
+system: ecu-ams
+description: "Control for load-peak-sag-is-not-a-lost-cell: the same 40 % pack armed to Run takes a normal 100 A peak for 1 s from 11 s. Each element sags by i R0 (3.34 mOhm, VTC6 6P, derived) to ~3.22 V, well above CellUnderVoltageMv (2800, IFS08-CE-AMS ams_config.hpp:22); the AMS reads the current and stays in Run, and neither the range path nor ADOW (CellOpenWire, 16) fires, on the step up or on the lift-off."
+virtual_ms: 14000
+tags: [beyond-bench]
+stimuli:
+  - {kind: plant, name: pack-at-40-percent, at_ms: 0, plant: ts, set: {soc_init: 0.4}}
+  - {kind: plant, name: sdc-reset, at_ms: 5400, plant: sdc, set: {reset: true}}
+  - {kind: plant, name: sdc-reset-release, at_ms: 5450, plant: sdc, set: {reset: false}}
+  - {kind: plant, name: tsms-on, at_ms: 5500, plant: sdc, set: {tsms: true}}
+  - {kind: gpio, name: dash-press, at_ms: 5600, board: ams, pin: PF10, level: true}
+  - {kind: gpio, name: dash-release, at_ms: 5650, board: ams, pin: PF10, level: false}
+  - {kind: plant, name: peak-100a, at_ms: 11000, plant: ts, set: {i_inverter_dc: 100}}
+  - {kind: plant, name: lift-off, at_ms: 12000, plant: ts, set: {i_inverter_dc: 0}}
+watch:
+  - {kind: symbol, board: ams, name: g_state_telemetry, size: 1, period_ms: 10}
+  - {kind: symbol, board: ams, name: g_fault_reason_telemetry, size: 1, period_ms: 10}
+expect:
+  - {check: eventually, name: ams-run, at_ms: 5600, until_ms: 10600, signal: "symbol:ams.g_state_telemetry", value: 3}
+  - {check: eventually, name: the-pack-carries-100a, at_ms: 11000, until_ms: 11100, signal: "plant:ts.i_pack", value: 100}
+  - {check: eventually, name: cells-sag, at_ms: 11000, until_ms: 11100, signal: "plant:ts.v_cell_min", op: "<", value: 3.3}
+  - {check: never, name: cells-stay-over-3v, at_ms: 0, signal: "plant:ts.v_cell_min", op: "<", value: 3.0}
+  - {check: eventually, name: the-ams-reads-the-load, at_ms: 11000, until_ms: 12000, signal: "frame:can_acu.ACU_currents.current_accu_dA", op: ">", value: 50}
+  - {check: never, name: no-error, at_ms: 0, signal: "symbol:ams.g_state_telemetry", value: 5}
+  - {check: always, name: still-in-run, at_ms: 13500, signal: "symbol:ams.g_state_telemetry", value: 3}
+  - {check: never, name: air-plus-stays-closed, at_ms: 11000, signal: "plant:ts.air_pos_closed", value: 0}
