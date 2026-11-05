@@ -1,9 +1,10 @@
 """Controls for the load-sag scenarios (systems/ecu-ams.scenarios/
 load-peak-sag-is-not-a-lost-cell.yaml, normal-load-peak-rides-through.yaml):
 whatever stops a healthy cell under load from reading as lost must not slow a
-genuine loss down. Under a normal 100 A load in Run, on the pack plant
-(vhil/plant_pack.py), a real measurement loss still opens the shutdown
-circuit in under 500 ms (FS rule: the AMS opens the SDC when any cell
+genuine loss down. Under the ride-through control's 173 A load in Run, on
+the pack plant (vhil/plant_pack.py) fitted to the car (parameter set
+car-log0077, at LOG0077's end state), a real measurement loss still opens
+the shutdown circuit in under 500 ms (FS rule: the AMS opens the SDC when any cell
 voltage measurement is lost; AMS #501/#502/#505/#506/#508/#512).
 
 Firmware (IFS08-CE-AMS dev):
@@ -29,12 +30,15 @@ RUN, ERROR = 3, 5
 CELL_OPEN_WIRE, MODULE_OFFLINE, BMS_STALE = 16, 2, 3
 GPIOF, DASH_CHG = "sysbus.gpioPortF", 10
 FS_LOSS_MS = 500                 # FS: a lost measurement opens the SDC within 500 ms
-LOAD_A = 100                     # normal-load-peak-rides-through's peak
+LOAD_A = 173                     # normal-load-peak-rides-through's peak (LOG0077's highest)
+# The car-fitted pack at the state LOG0077 ends in (catalog/plants/
+# tractive-system.yaml parameter_sets, scripts/fit_pack.py), as the scenarios.
+CAR_PACK = {"parameter_set": "car-log0077", "soc_init": 0.584, "t_init": 295.05}
 SYSTEM = REPO / "systems" / "ecu-ams.yaml"
 
 
 def _loss_under_load(images, inject):
-    """Arm ecu-ams to Run on a 40 % pack, carry LOAD_A for 1 s, then
+    """Arm ecu-ams to Run on the car-fitted pack, carry LOAD_A for 1 s, then
     `inject(sim)` a genuine measurement loss. Returns (ms from the loss to
     Error or None, the fault reason, whether the SDC opened)."""
     with Sim(SYSTEM, images("ecu-ams")) as sim:
@@ -46,7 +50,7 @@ def _loss_under_load(images, inject):
         def at_now(plant, values):
             plant.apply(values, sim.now_us())
 
-        at_now(ts, {"soc_init": 0.4})
+        at_now(ts, CAR_PACK)
         # As the scenarios: the RST_EXT press once AMS_OK is up (past the
         # AMS's 2 s boot grace, ams_config.hpp:216), at 5.4 s from power-on.
         port.run(steps, max(0, 5400 - sim.now_us() / 1000))
@@ -84,7 +88,7 @@ def _loss_under_load(images, inject):
 
 def test_an_open_cell_wire_under_load_still_opens_the_sdc_in_time(images):
     """An interior cell-sense conductor (C4 of chip 3, module 1) opens while
-    the pack carries 100 A: ADOW sees it within one voltage poll."""
+    the pack carries LOAD_A: ADOW sees it within one voltage poll."""
     ms, reason, opened = _loss_under_load(
         images, lambda sim: sim.monitor("sysbus.spi1.isospi.cells3 OpenWire 4 true", board="ams"))
     print(f"open wire under load: Error after {ms} ms, reason {reason}")
@@ -96,7 +100,7 @@ def test_an_open_cell_wire_under_load_still_opens_the_sdc_in_time(images):
 
 def test_a_silent_module_under_load_still_opens_the_sdc_in_time(images):
     """Module 2's two LTC6811s (chain 4 and 5) stop answering while the pack
-    carries 100 A: every cell of the module is lost."""
+    carries LOAD_A: every cell of the module is lost."""
     ms, reason, opened = _loss_under_load(
         images, lambda sim: sim.monitor("sysbus.spi1.isospi StopReply 0x30", board="ams"))
     print(f"silent module under load: Error after {ms} ms, reason {reason}")

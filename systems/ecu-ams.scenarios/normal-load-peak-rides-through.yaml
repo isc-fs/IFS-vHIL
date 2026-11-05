@@ -1,25 +1,25 @@
 kind: scenario
 system: ecu-ams
-description: "Control for load-peak-sag-is-not-a-lost-cell: the same 40 % pack armed to Run takes a normal 100 A peak for 1 s from 11 s. Each element sags by i R0 (3.34 mOhm, VTC6 6P, derived) to ~3.22 V, well above CellUnderVoltageMv (2800, IFS08-CE-AMS ams_config.hpp:22); the AMS reads the current and stays in Run, and neither the range path nor ADOW (CellOpenWire, 16) fires, on the step up or on the lift-off."
+description: "Control for load-peak-sag-is-not-a-lost-cell: the same car-fitted pack (parameter set car-log0077, at LOG0077's end state: SoC 0.584, 21.9 C) armed to Run takes a 173 A peak for 1 s from 11 s: the highest current in LOG0077 (I_raw 173.1 A at 136.75 s), which the car carried with no fault. The lowest element (c3_0) sags by i R0 to ~2.97 V and ~2.94 V after 1 s with its RC, above CellUnderVoltageMv (2800, IFS08-CE-AMS ams_config.hpp:22) and ~45 A under the ~217 A this pack trips at; the AMS reads the current and stays in Run, and neither the range path nor ADOW (CellOpenWire, 16) fires, on the step up or on the lift-off."
 virtual_ms: 14000
 tags: [beyond-bench]
 stimuli:
-  - {kind: plant, name: pack-at-40-percent, at_ms: 0, plant: ts, set: {soc_init: 0.4}}
+  - {kind: plant, name: car-pack-at-log0077-end, at_ms: 0, plant: ts, set: {parameter_set: car-log0077, soc_init: 0.584, t_init: 295.05}}
   - {kind: plant, name: sdc-reset, at_ms: 5400, plant: sdc, set: {reset: true}}
   - {kind: plant, name: sdc-reset-release, at_ms: 5450, plant: sdc, set: {reset: false}}
   - {kind: plant, name: tsms-on, at_ms: 5500, plant: sdc, set: {tsms: true}}
   - {kind: gpio, name: dash-press, at_ms: 5600, board: ams, pin: PF10, level: true}
   - {kind: gpio, name: dash-release, at_ms: 5650, board: ams, pin: PF10, level: false}
-  - {kind: plant, name: peak-100a, at_ms: 11000, plant: ts, set: {i_inverter_dc: 100}}
+  - {kind: plant, name: peak-173a, at_ms: 11000, plant: ts, set: {i_inverter_dc: 173}}
   - {kind: plant, name: lift-off, at_ms: 12000, plant: ts, set: {i_inverter_dc: 0}}
 watch:
   - {kind: symbol, board: ams, name: g_state_telemetry, size: 1, period_ms: 10}
   - {kind: symbol, board: ams, name: g_fault_reason_telemetry, size: 1, period_ms: 10}
 expect:
   - {check: eventually, name: ams-run, at_ms: 5600, until_ms: 10600, signal: "symbol:ams.g_state_telemetry", value: 3}
-  - {check: eventually, name: the-pack-carries-100a, at_ms: 11000, until_ms: 11100, signal: "plant:ts.i_pack", value: 100}
-  - {check: eventually, name: cells-sag, at_ms: 11000, until_ms: 11100, signal: "plant:ts.v_cell_min", op: "<", value: 3.3}
-  - {check: never, name: cells-stay-over-3v, at_ms: 0, signal: "plant:ts.v_cell_min", op: "<", value: 3.0}
+  - {check: eventually, name: the-pack-carries-173a, at_ms: 11000, until_ms: 11100, signal: "plant:ts.i_pack", value: 173}
+  - {check: eventually, name: cells-sag, at_ms: 11000, until_ms: 11100, signal: "plant:ts.v_cell_min", op: "<", value: 3.1}
+  - {check: never, name: cells-stay-over-2v9, at_ms: 0, signal: "plant:ts.v_cell_min", op: "<", value: 2.9}
   - {check: eventually, name: the-ams-reads-the-load, at_ms: 11000, until_ms: 12000, signal: "frame:can_acu.ACU_currents.current_accu_dA", op: ">", value: 50}
   - {check: never, name: no-error, at_ms: 0, signal: "symbol:ams.g_state_telemetry", value: 5}
   - {check: always, name: still-in-run, at_ms: 13500, signal: "symbol:ams.g_state_telemetry", value: 3}
