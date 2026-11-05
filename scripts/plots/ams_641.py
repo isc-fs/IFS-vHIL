@@ -22,10 +22,12 @@ Two stages:
     #    (docs/analysis/ams-641/data/car-log0077.json).
     python scripts/plots/ams_641.py car --logs <dir with LOG0077.CSV>
 
-Figure 3 is derived, not run: the catalogue's VTC6 cell model
-(catalog/plants/tractive-system.yaml, the same the plant runs), evaluated for a
-1 s constant-current peak. Every cell parameter is derived from published VTC6
-data, not measured on the car.
+The runs and figure 3 use the pack fitted to the car (catalog/plants/
+tractive-system.yaml parameter set car-log0077, from car SD log LOG0077 by
+scripts/fit_pack.py: per-element R0 and OCV offsets, one RC), at the state the
+log ends in. Figure 3 is derived, not run: that cell model, the same the plant
+runs, evaluated for a 1 s constant-current peak on its first element to
+cross.
 """
 from __future__ import annotations
 
@@ -127,10 +129,21 @@ def run(out: Path) -> None:
 
 # -- the cell model (figure 3) ---------------------------------------------------------
 
-def cell_params() -> dict:
-    import yaml
-    doc = yaml.safe_load((REPO / "catalog/plants/tractive-system.yaml").read_text())
-    return {k: v["value"] for k, v in doc["parameters"].items()}
+CAR_SET = "car-log0077"   # the pack fitted to the car (catalog/plants/tractive-system.yaml)
+CAR_SOC, CAR_T_C = 0.584, 21.9   # LOG0077's end state, as the scenarios set it
+
+
+def cell_params(parameter_set=CAR_SET) -> dict:
+    """The catalogue's pack parameters with the named set put over them
+    (vhil/plant_ts.py load_parameters), with per-element lists filled in."""
+    sys.path.insert(0, str(REPO))
+    from vhil.plant_ts import load_parameters
+    p = {k: v.value for k, v in load_parameters(
+        overrides={"parameter_set": parameter_set} if parameter_set else None).items()}
+    n = int(p["cells_series"])
+    p["cell_ocv_offset"] = p["cell_ocv_offset"] or [0.0] * n
+    p["cell_r0_scale"] = p["cell_r0_scale"] or [1.0] * n
+    return p
 
 
 def ocv(p: dict, soc: float) -> float:
@@ -142,23 +155,30 @@ def ocv(p: dict, soc: float) -> float:
     return ys[-1]
 
 
-def r_elem(p: dict, t_c: float, t_s: float = 1.0) -> float:
+def r_elem(p: dict, t_c: float, t_s: float = 1.0, k=None) -> float:
     """Element resistance seen by a constant-current step after t_s:
-    R0(T) + R1 (1 - exp(-t/tau)), per 6P element (plant_pack.py's model)."""
+    R0(T) x its scale + R1 (1 - exp(-t/tau)), per 6P element (plant_pack.py's
+    model); k None = the pack mean."""
     par = p["cells_parallel"]
-    r0 = p["cell_r0"] / par * max(1 + p["cell_r0_alpha"] * (t_c - 25), 0.4)
+    sc = sum(p["cell_r0_scale"]) / len(p["cell_r0_scale"]) if k is None else p["cell_r0_scale"][k]
+    r0 = p["cell_r0"] / par * sc * max(1 + p["cell_r0_alpha"] * (t_c - 25), 0.4)
     return r0 + p["cell_r1"] / par * (1 - math.exp(-t_s / p["cell_tau1"]))
 
 
-def i_to(p: dict, soc: float, t_c: float, v: float) -> float:
-    """Current at which a healthy element at soc, t_c reads v after 1 s."""
-    return max(0.0, (ocv(p, soc) - v) / r_elem(p, t_c))
+def i_to(p: dict, soc: float, t_c: float, v: float, t_s: float = 1.0) -> float:
+    """Current at which the pack's first element (each at OCV(soc) + its
+    offset, with its own R) reads v after t_s."""
+    return max(0.0, min((ocv(p, soc) + p["cell_ocv_offset"][k] - v) / r_elem(p, t_c, t_s, k)
+                        for k in range(int(p["cells_series"]))))
 
 
 def i_power(p: dict, soc: float, t_c: float, watts: float) -> float:
-    """Current of a constant-power draw on the sagged pack: I n (OCV - I R) = P."""
-    n, e, r = p["cells_series"], ocv(p, soc), r_elem(p, t_c)
-    disc = e * e - 4 * r * watts / n
+    """Current of a constant-power draw on the sagged pack: I (E - I R) = P,
+    E and R the sums over the elements."""
+    n = int(p["cells_series"])
+    e = sum(ocv(p, soc) + p["cell_ocv_offset"][k] for k in range(n))
+    r = sum(r_elem(p, t_c, 1.0, k) for k in range(n))
+    disc = e * e - 4 * r * watts
     return (e - math.sqrt(disc)) / (2 * r) if disc >= 0 else float("nan")
 
 
@@ -230,10 +250,10 @@ def fig1(plt, th, sag, path):
     fig, (a, b, c) = plt.subplots(3, 1, figsize=(9, 8.4), sharex=True,
                                   gridspec_kw={"height_ratios": [1, 1.6, 0.8], "hspace": 0.3})
     fig.subplots_adjust(left=0.12, right=0.97, top=0.865, bottom=0.07)
-    fig.suptitle("AMS latches Error on a healthy pack's load sag (vHIL, 240 A peak at 40 % SoC)",
+    fig.suptitle(f"AMS latches Error on a healthy pack's load sag (vHIL, 240 A peak at {CAR_SOC:.0%} SoC)",
                  x=0.12, ha="left", y=0.98, fontsize=12.5, fontweight="bold", color=th["ink"])
     fig.text(0.12, 0.905, "Real ECU + AMS images (AMS dev 94b59a9) on the vHIL, per-cell 95S6P VTC6 plant.\n"
-             "Cell parameters derived from published VTC6 data, not car-measured.",
+             "Pack fitted to car SD log LOG0077 (per-element R0 and OCV offsets, one RC), at the log's end state.",
              fontsize=8.5, color=th["ink2"], linespacing=1.4)
 
     # (a) current
@@ -320,12 +340,13 @@ def fig2(plt, th, sag, ride, path):
     t0, t1 = 10.6, 12.6
     fig, ax = plt.subplots(figsize=(9, 4.6))
     fig.subplots_adjust(left=0.1, right=0.97, top=0.83, bottom=0.12)
-    fig.suptitle("Same pack, two peaks: 100 A rides through, 240 A trips", x=0.1, ha="left",
+    fig.suptitle("Same pack, two peaks: 173 A rides through, 240 A trips", x=0.1, ha="left",
                  fontsize=12.5, fontweight="bold", color=th["ink"])
-    fig.text(0.1, 0.875, "AMS-reported min cell (0x12C) and plant truth, 40 % SoC, 25 °C, 1 s peak from 11.0 s. "
-             "Cell parameters derived, not car-measured.", fontsize=8.5, color=th["ink2"])
+    fig.text(0.1, 0.875, f"AMS-reported min cell (0x12C) and plant truth, car-fitted pack (LOG0077) at {CAR_SOC:.0%} SoC, "
+             f"{CAR_T_C:.0f} °C, 1 s peak from 11.0 s.\n173 A is the highest peak in LOG0077, which the car carried "
+             "with no fault.", fontsize=8.5, color=th["ink2"], linespacing=1.4)
     ax.axhspan(2.3, CUTOFF_V, color=th["band"], lw=0)
-    for doc, col, name in ((ride, th["s3"], "100 A"), (sag, th["s1"], "240 A")):
+    for doc, col, name in ((ride, th["s3"], "173 A"), (sag, th["s1"], "240 A")):
         x, y = xy(doc, "plant.ts.v_cell_min", t0 * 1e3, t1 * 1e3)
         ax.step([v / 1e3 for v in x], y, where="post", color=col, lw=1.2, alpha=0.55)
         x, y = xy(doc, "frame.ACU_v_cell_min.min_cell_mV", t0 * 1e3, t1 * 1e3)
@@ -339,7 +360,7 @@ def fig2(plt, th, sag, ride, path):
     ax.axhline(CUTOFF_V, color=th["ink2"], lw=1.2)
     ax.text(t1 - 0.01, CUTOFF_V + 0.015, "2.5 V cell cut-off", ha="right", fontsize=8.5, color=th["ink"])
     r_v = min(v for t, v in ride["series"]["plant.ts.v_cell_min"] if 10500 < t < 12500)
-    ax.text(11.5, r_v + 0.09, f"100 A: min {r_v:.2f} V, stays in Run" + ("" if not ride_err else " (ERROR?)"),
+    ax.text(11.5, r_v + 0.09, f"173 A: min {r_v:.2f} V, stays in Run" + ("" if not ride_err else " (ERROR?)"),
             fontsize=9, color=th["ink"], ha="center")
     if err:
         ax.axvline(err / 1e3, color=th["muted"], lw=0.8, ls=":")
@@ -356,62 +377,73 @@ def fig2(plt, th, sag, ride, path):
 
 
 def fig3(plt, th, path):
-    p = cell_params()
+    p, ds = cell_params(), cell_params(None)
+    tc, soc0, x0 = CAR_T_C, CAR_SOC, CAR_SOC * 100
     socs = [s / 100 for s in range(10, 101)]
     fig, ax = plt.subplots(figsize=(9, 5.6))
     fig.subplots_adjust(left=0.1, right=0.97, top=0.83, bottom=0.11)
     fig.suptitle("Trip map: which 1 s peaks falsely latch CellUnderVoltage on a healthy pack", x=0.1,
                  ha="left", fontsize=12.5, fontweight="bold", color=th["ink"])
-    fig.text(0.1, 0.865, "Derived from published VTC6 data, not car-measured: V = OCV(SoC) − I·R0(T) − RC term at 1 s,\n"
-             "per 6P element (catalog/plants/tractive-system.yaml). Healthy, balanced pack.",
-             fontsize=8.5, color=th["ink2"], linespacing=1.4)
+    fig.text(0.1, 0.865, "Derived from the pack fitted to car SD log LOG0077: V = OCV(SoC) + offset − I·R0(T) − RC term "
+             "at 1 s,\nper 6P element, each with its own R0 and offset; the first element to cross sets the line "
+             "(catalog/plants/tractive-system.yaml).", fontsize=8.5, color=th["ink2"], linespacing=1.4)
     pct = [s * 100 for s in socs]
-    i28_25 = [i_to(p, s, 25, UV_MV / 1e3) for s in socs]
+    i28 = [i_to(p, s, tc, UV_MV / 1e3) for s in socs]
     i28_10 = [i_to(p, s, 10, UV_MV / 1e3) for s in socs]
-    i25_25 = [i_to(p, s, 25, CUTOFF_V) for s in socs]
+    i25 = [i_to(p, s, tc, CUTOFF_V) for s in socs]
     i25_10 = [i_to(p, s, 10, CUTOFF_V) for s in socs]
-    ip = [i_power(p, s, 25, P_ECU_W) for s in socs]
+    i28_ds = [i_to(ds, s, 25, UV_MV / 1e3) for s in socs]
+    ip = [i_power(p, s, tc, P_ECU_W) for s in socs]
     top = 600
-    # false-trip region at 25 C: above the 2800 mV line, below the 2.5 V line
-    ax.fill_between(pct, i28_25, [min(top, v) for v in i25_25], color=th["crit"], alpha=0.14, lw=0)
-    ax.fill_between(pct, [min(top, v) for v in i25_25], [top] * len(pct), color=th["band"], lw=0)
-    ax.plot(pct, i28_25, color=th["crit"], label="AMS trips (2800 mV), 25 °C")
+    # false-trip region at the car's temperature: above the 2800 mV line, below the 2.5 V line
+    ax.fill_between(pct, i28, [min(top, v) for v in i25], color=th["crit"], alpha=0.14, lw=0)
+    ax.fill_between(pct, [min(top, v) for v in i25], [top] * len(pct), color=th["band"], lw=0)
+    ax.plot(pct, i28, color=th["crit"], label=f"AMS trips (2800 mV), {tc:.0f} °C")
     ax.plot(pct, i28_10, color=th["crit"], ls=(0, (5, 3)), label="AMS trips (2800 mV), 10 °C")
-    ax.plot(pct, i25_25, color=th["ink2"], label="Cell really at 2.5 V, 25 °C")
+    ax.plot(pct, i25, color=th["ink2"], label=f"Cell really at 2.5 V, {tc:.0f} °C")
     ax.plot(pct, i25_10, color=th["ink2"], ls=(0, (5, 3)), label="Cell really at 2.5 V, 10 °C")
+    ax.plot(pct, i28_ds, color=th["muted"], lw=1, ls=(0, (1, 2)),
+            label="AMS trips, datasheet pack (uniform, balanced), 25 °C")
     ax.plot(pct, ip, color=th["s1"], lw=1.6, label="ECU 76 kW limit at full power (current on the sagged pack)")
     ax.axhline(OC_A, color=th["s2"], lw=1.4, ls=(0, (2, 2)))
     ax.text(99, OC_A + 6, "AMS overcurrent 185 A (filtered, ~0.8 s; a 1 s 240 A peak reads ~172 A)",
             ha="right", fontsize=8, color=th["ink2"])
-    ax.text(80, 372, "false trip: cell healthy,\nAMS opens AIR+", fontsize=9, color=th["ink"], ha="center",
-            va="center")
+    ax.annotate("shaded: false trip, cell healthy,\nAMS opens AIR+", xy=(78, 275), xytext=(66, 120),
+                fontsize=8.5, color=th["ink"], arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
     ax.text(14, 560, "cell below 2.5 V", fontsize=8.5, color=th["ink2"])
-    ax.plot([40], [240], "o", ms=9, color=th["crit"], mec=th["surface"], mew=2, zorder=5)
-    ax.annotate("vHIL repro: 40 %, 240 A → Error", xy=(40, 240), xytext=(46, 300), fontsize=9,
-                color=th["ink"], arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
-    ax.plot([40], [100], "o", ms=9, color=th["s3"], mec=th["surface"], mew=2, zorder=5)
-    ax.annotate("control: 40 %, 100 A → no fault", xy=(40, 100), xytext=(46, 60), fontsize=9,
-                color=th["ink"], arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    ax.axvline(x0, color=th["muted"], lw=0.8, ls=":")
+    ax.plot([x0], [240], "o", ms=9, color=th["crit"], mec=th["surface"], mew=2, zorder=5)
+    ax.annotate(f"vHIL repro: {x0:.0f} % (LOG0077's end), 240 A → Error", xy=(x0, 240), xytext=(14, 440),
+                fontsize=9, color=th["ink"], arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
+    ax.plot([x0], [173], "o", ms=9, color=th["s3"], mec=th["surface"], mew=2, zorder=5)
+    ax.annotate("control: 173 A (the car's highest peak in\nLOG0077, no fault) → no fault", xy=(x0, 173),
+                xytext=(x0 + 4, 30), fontsize=9, color=th["ink"],
+                arrowprops=dict(arrowstyle="-", color=th["ink2"], lw=0.8))
     ax.set_xlim(10, 100)
     ax.set_ylim(0, top)
     ax.set_xlabel("State of charge (%)")
     ax.set_ylabel("Peak pack current, 1 s (A)")
-    ax.legend(loc="upper right", fontsize=8, ncol=1)
+    ax.legend(loc="upper right", fontsize=7.5, ncol=1)
     fig.savefig(path, dpi=160)
     plt.close(fig)
-    i50 = i_to(p, 0.5, 25, UV_MV / 1e3)
-    i40 = i_to(p, 0.4, 25, UV_MV / 1e3)
-    i40c = i_to(p, 0.4, 10, UV_MV / 1e3)
-    return dict(i_trip_40_25=i40, i_trip_50_25=i50, i_trip_40_10=i40c,
-                i_76kw_40=i_power(p, 0.4, 25, P_ECU_W), r_elem_25=r_elem(p, 25), r_elem_10=r_elem(p, 10))
+    n = int(p["cells_series"])
+    first_k = min(range(n), key=lambda k: (ocv(p, soc0) + p["cell_ocv_offset"][k] - UV_MV / 1e3)
+                  / r_elem(p, tc, 1.0, k))
+    return dict(i_trip_car=i_to(p, soc0, tc, UV_MV / 1e3), i_trip_car_instant=i_to(p, soc0, tc, UV_MV / 1e3, 0.0),
+                i_trip_car_10=i_to(p, soc0, 10, UV_MV / 1e3), i_25v_car=i_to(p, soc0, tc, CUTOFF_V),
+                first_element=f"c{first_k // 19}_{first_k % 19}",
+                i_trip_datasheet_25=i_to(ds, soc0, 25, UV_MV / 1e3), i_76kw_car=i_power(p, soc0, tc, P_ECU_W),
+                r_elem_mean=r_elem(p, tc), r_elem_first=r_elem(p, tc, 1.0, first_k))
 
 
 def fig4(plt, th, sag, path):
     """Illustration of fix direction 1: V + I R_element, each reading paired
     with the current at the same instant (what the AMS's conversion-synchronised
-    current window gives), R_element = R0 at 25 C; the RC branch is left in."""
+    current window gives), R_element = the pack's mean R0 at the run's
+    temperature (one number for every cell, as a firmware would use); the RC
+    branch is left in."""
     p = cell_params()
-    r = p["cell_r0"] / p["cells_parallel"]
+    r = r_elem(p, CAR_T_C, 0.0)
     t0, t1 = 10.6, 12.4
 
     def held(name, t):
@@ -429,12 +461,12 @@ def fig4(plt, th, sag, path):
     err = first(sag, "symbol.g_state_telemetry", lambda x: x == 5, 10500)
     air = first(sag, "plant.ts.air_pos_closed", lambda x: x == 0, 10500)
     fig, ax = plt.subplots(figsize=(9, 4.6))
-    fig.subplots_adjust(left=0.1, right=0.97, top=0.8, bottom=0.12)
+    fig.subplots_adjust(left=0.1, right=0.97, top=0.76, bottom=0.12)
     fig.suptitle("Illustration: the same 240 A run, load-compensated (V + I·R_element)", x=0.1, ha="left",
-                 fontsize=12.5, fontweight="bold", color=th["ink"])
-    fig.text(0.1, 0.86, f"Lowest cell and pack current at the same instant (the vHIL plant; on the car, the current "
-             f"window synchronised\nto the conversion, not 0x135's filtered value), R_element = R0 = {r * 1e3:.2f} mΩ "
-             "at 25 °C. One fix direction; the choice is the AMS team's.",
+                 y=0.98, fontsize=12.5, fontweight="bold", color=th["ink"])
+    fig.text(0.1, 0.81, f"Lowest cell and pack current at the same instant (the vHIL plant; on the car, the current "
+             f"window synchronised\nto the conversion, not 0x135's filtered value), R_element = the car-fitted pack's "
+             f"mean R0 = {r * 1e3:.2f} mΩ at {CAR_T_C:.0f} °C.\nOne fix direction; the choice is the AMS team's.",
              fontsize=8.5, color=th["ink2"], linespacing=1.4)
     T = [t / 1e3 for t in grid]
     ax.plot(T, v, color=th["s2"], label="Raw lowest cell (what the AMS compares today)", drawstyle="steps-post")
@@ -442,9 +474,12 @@ def fig4(plt, th, sag, path):
     ax.axhline(UV_MV / 1e3, color=th["crit"], lw=1.2, ls=(0, (5, 3)))
     ax.text(t1 - 0.01, UV_MV / 1e3 + 0.015, "2800 mV threshold", ha="right", fontsize=8.5, color=th["ink"])
     under = [c for t, c in zip(grid, comp) if 11000 <= t < air]
-    ax.text(11.33, 3.5, f"compensated: min {min(under):.3f} V under 240 A,\n"
-            f"{(min(under) - UV_MV / 1e3) * 1e3:.0f} mV above the threshold.\nFlat by construction (the plant is the same R0 model);\n"
-            "on the car, what is left is the R_element estimate's error\n(temperature, ageing, interconnects).", fontsize=8.5, color=th["ink"], va="top")
+    rest = [c for t, c in zip(grid, comp) if t < 11000]
+    ax.text(11.33, 3.48, f"compensated: min {min(under):.3f} V under 240 A,\n"
+            f"{(min(under) - UV_MV / 1e3) * 1e3:.0f} mV above the threshold. Nearly flat: under load the\n"
+            f"lowest element is another one (higher R0): {(min(rest) - min(under)) * 1e3:.0f} mV under rest.\n"
+            "One R_element for every cell leaves that, plus the estimate's\nerror (temperature, ageing).",
+            fontsize=8.5, color=th["ink"], va="top")
     ax.axvline(air / 1e3, color=th["muted"], lw=0.8, ls=":")
     ax.text(air / 1e3 + 0.02, 2.66, f"raw reading latched Error ({err / 1e3:.3f} s);\n"
             f"AIR+ opens {air / 1e3:.3f} s, the current stops", fontsize=8.5, color=th["ink2"])
@@ -455,7 +490,7 @@ def fig4(plt, th, sag, path):
     ax.legend(loc="upper right", fontsize=8.5)
     fig.savefig(path, dpi=160)
     plt.close(fig)
-    return dict(comp_min_under_load=min(under))
+    return dict(comp_min_under_load=min(under), comp_rest=min(rest), r_element=r)
 
 
 def filter_numbers() -> dict:
@@ -466,7 +501,7 @@ def filter_numbers() -> dict:
     r, c = 100.0, 10e-9
     tau = r * c
     p = cell_params()
-    step = 240 * r_elem(p, 25, 0.0)                     # the element's i R0 step, V
+    step = 240 * r_elem(p, CAR_T_C, 0.0)                # the element's i R0 step (pack mean), V
     lsb = 100e-6
     cm_top = 10 * step                                  # 10 cells on an LTC: the top tap's CM step
     return dict(
@@ -479,8 +514,8 @@ def filter_numbers() -> dict:
         adow_open_v_per_conv=100e-6 / c * 144e-6,       # pulled while its channel pair converts
         adow_cmds_needed=1 + math.ceil(round(c / 10e-9, 6)),
         adow_cmds_needed_c11n=1 + math.ceil(11e-9 / 10e-9),
-        drop_a_trip_no_offset=0.4 / (p["cell_r0"] / p["cells_parallel"]),
-        drop_a_trip_130=(0.4 - 0.13) / (p["cell_r0"] / p["cells_parallel"]),
+        drop_a_trip_no_offset=0.4 / r_elem(p, CAR_T_C, 0.0),
+        drop_a_trip_130=(0.4 - 0.13) / r_elem(p, CAR_T_C, 0.0),
     )
 
 

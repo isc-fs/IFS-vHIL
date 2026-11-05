@@ -23,6 +23,34 @@
         "description": {
           "type": "string"
         },
+        "parameter_sets": {
+          "type": "object",
+          "description": "Named sets put over `parameters` when a run selects one (the `parameter_set` parameter, vhil/plant_ts.py load_parameters): e.g. a pack fitted to a car log beside the datasheet-derived one. Each set parameter is one of `parameters`, with its own source and validation.",
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "description",
+              "parameters"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parameters": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": {
+                  "$ref": "#/$defs/plant/properties/parameters/additionalProperties"
+                }
+              }
+            }
+          }
+        },
         "parameters": {
           "type": "object",
           "minProperties": 1,

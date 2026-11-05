@@ -905,10 +905,14 @@ class System:
             path = CATALOG / "plants" / f"{spec['plant']}.yaml"
             if not path.is_file():
                 raise SystemError(f"plant '{name}': no catalog/plants/{spec['plant']}.yaml")
-            params = yaml.safe_load(path.read_text())["parameters"]
+            plant_doc = yaml.safe_load(path.read_text())
+            params = plant_doc["parameters"]
             for p in spec.get("params", {}):
                 if p not in params:
                     raise SystemError(f"plant '{name}': {spec['plant']} has no parameter '{p}'")
+            chosen = spec.get("params", {}).get("parameter_set")
+            if chosen is not None and chosen not in (plant_doc.get("parameter_sets") or {}):
+                raise SystemError(f"plant '{name}': {spec['plant']} has no parameter set '{chosen}'")
             cells = spec.get("cells")
             if spec["plant"] == "shutdown-circuit":
                 if cells is not None:

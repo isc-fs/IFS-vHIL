@@ -201,3 +201,42 @@ def test_settable_covers_the_pack_s_inputs_and_faults():
     s = settable("tractive-system")
     assert {"i_inverter_dc", "i_charger", "t_ambient", "weak_cell", "hot_cell", "imbalance_soc",
             "soc_init", "bleed_r"} <= s
+
+
+def test_a_parameter_set_puts_per_element_offsets_and_resistances_over_the_datasheet_pack():
+    """The car-fitted set (catalog/plants/tractive-system.yaml parameter_sets,
+    scripts/fit_pack.py): each element at OCV + its offset, with its own R0;
+    each set parameter keeps its own source, and the listed pack is intact."""
+    ds = load_parameters()
+    assert ds["parameter_set"].value is None and ds["cell_ocv_offset"].value is None
+    car = load_parameters(overrides={"parameter_set": "car-log0077", "soc_init": 0.584})
+    assert car["cell_r0"].validated_against.startswith("car SD log LOG0077")
+    assert car["cell_r0"].status == "cited" and car["parameter_set"].status == "override"
+    p = Pack(car)
+    off, sc = car["cell_ocv_offset"].value, car["cell_r0_scale"].value
+    assert len(off) == len(sc) == 95
+    k = min(range(95), key=off.__getitem__)
+    assert (k // 19, k % 19) == (3, 0), "c3_0 is the weakest at rest"
+    assert p.v_cell(k) == pytest.approx(p.ocv(0.584) + off[k])
+    p.i_pack = 100.0
+    r0 = car["cell_r0"].value / 6 * max(1 + car["cell_r0_alpha"].value * (298.15 - 273.15 - 25), 0.4)
+    assert p.v_cell(k) == pytest.approx(p.ocv(0.584) + off[k] - 100.0 * r0 * sc[k])
+    # A weak-cell fault multiplies the element's own scale, and lifting it restores it.
+    faults = {}
+    p.fault("weak_cell", k, faults)
+    p.fault("weak_cell_r0", 2.0, faults)
+    assert p.r0_scale[k] == pytest.approx(2 * sc[k])
+    p.fault("weak_cell", 0, faults)
+    assert p.r0_scale[k] == pytest.approx(sc[k])
+    with pytest.raises(KeyError):
+        load_parameters(overrides={"parameter_set": "no-such-set"})
+
+
+def test_a_row_selects_a_parameter_set_and_rebuilds_the_pack():
+    plant, _ = _plant()
+    plant.apply({"parameter_set": "car-log0077", "soc_init": 0.584}, 0)
+    off = plant.ts.params["cell_ocv_offset"].value
+    assert plant.pack.v_cell(57) == pytest.approx(plant.pack.ocv(0.584) + off[57])
+    plant.apply({"parameter_set": None}, 1_000)
+    assert plant.ts.params["cell_ocv_offset"].value is None
+    assert plant.pack.v_cell(57) == pytest.approx(plant.pack.ocv(0.584)), "back to the listed pack"
