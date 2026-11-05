@@ -58,7 +58,8 @@ SCRIPTED = ("i_inverter_dc", "i_charger", "t_ambient")
 # Pack parameters a run may override (a row): the pack is rebuilt from them.
 PACK_STATE = ("cells_series", "cells_parallel", "cell_capacity", "cell_ocv_soc", "cell_ocv",
               "cell_r0", "cell_r0_alpha", "cell_r1", "cell_tau1", "cell_mass", "cell_cp",
-              "cell_r_th", "t_init", "soc_init", "soc_spread", "capacity_spread", "spread_seed")
+              "cell_r_th", "t_init", "soc_init", "soc_spread", "capacity_spread", "spread_seed",
+              "cell_ocv_offset", "cell_r0_scale", "parameter_set")
 CONTACTS = ("air_pos", "air_neg", "pre")
 # Each fault input's value with no fault, which is also its type for the
 # editor's controls (the system contract's `plants`, vhil/server/decode.py).
@@ -76,15 +77,40 @@ class Parameter:
     validated_against: Optional[str]
 
 
+def _parameter(name: str, p: dict) -> Parameter:
+    return Parameter(name, p["value"], p["unit"], p["status"], p["source"], p["validated_against"])
+
+
+def parameter_set(plant: str, name: Optional[str]) -> dict[str, Parameter]:
+    """The parameters a named set of the plant's catalogue (`parameter_sets`)
+    puts over the listed ones, each with its own status, source and
+    validation; {} for null (the parameters as listed)."""
+    if name is None:
+        return {}
+    doc = yaml.safe_load((CATALOG / f"{plant}.yaml").read_text())
+    sets = doc.get("parameter_sets") or {}
+    if name not in sets:
+        raise KeyError(f"no parameter set '{name}' in {plant} (sets: {', '.join(sorted(sets)) or 'none'})")
+    out = {n: _parameter(n, p) for n, p in sets[name]["parameters"].items()}
+    unknown = set(out) - set(doc["parameters"])
+    if unknown:
+        raise KeyError(f"parameter set '{name}' of {plant}: no parameter {', '.join(sorted(unknown))}")
+    return out
+
+
 def load_parameters(plant: str = "tractive-system", overrides: Optional[dict] = None
                     ) -> dict[str, Parameter]:
     """A plant's parameters from the catalogue; `overrides` (name -> value)
     replace values for one run and mark them `override` (a test's choice:
-    neither cited nor commissioned)."""
+    neither cited nor commissioned). An override of `parameter_set` puts that
+    named set (catalogue `parameter_sets`) over the listed parameters first,
+    each set parameter keeping its own source."""
     doc = yaml.safe_load((CATALOG / f"{plant}.yaml").read_text())
-    out = {n: Parameter(n, p["value"], p["unit"], p["status"], p["source"], p["validated_against"])
-           for n, p in doc["parameters"].items()}
-    for name, value in (overrides or {}).items():
+    out = {n: _parameter(n, p) for n, p in doc["parameters"].items()}
+    overrides = dict(overrides or {})
+    if "parameter_set" in overrides and "parameter_set" in out:
+        out.update(parameter_set(plant, overrides["parameter_set"]))
+    for name, value in overrides.items():
         if name not in out:
             raise KeyError(f"no parameter '{name}' in {plant}")
         out[name] = Parameter(name, value, out[name].unit, "override",
@@ -563,7 +589,13 @@ class TsPlant(PortInputs):
                 self.pack.fault(name, value, self.pack_faults)
             elif name in ts.params:
                 old = ts.params[name]
-                ts.params = {**ts.params, name: Parameter(
+                chosen = {}
+                if name == "parameter_set":
+                    # The previous set's parameters back to the listed ones, then this set's.
+                    listed = load_parameters()
+                    chosen = {n: listed[n] for n in parameter_set("tractive-system", old.value)}
+                    chosen.update(parameter_set("tractive-system", value))
+                ts.params = {**ts.params, **chosen, name: Parameter(
                     name, value, old.unit, "override", f"set by the run (catalogue: {old.value!r})",
                     None)}
                 ts._resegment(t_us)

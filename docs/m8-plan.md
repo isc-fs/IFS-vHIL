@@ -394,6 +394,29 @@ by a trigger, and while a switch is on the plant reads the on-time every
 | `soc_init`, `soc_spread`, `capacity_spread`, `spread_seed`, `t_init` | 0.5, 0, 0, 1, 298.15 K | uncommissioned | a run's choice; no pack measurement |
 | `ntc_map` | proportional | uncommissioned | no NTC placement document |
 | `cell_exchange_min`, `bleed_poll` | 0.1 s, 5 s | uncommissioned | co-simulation settings, not physics |
+| `cell_ocv_offset`, `cell_r0_scale` | null (uniform) | uncommissioned | per element (95, chain order); only a set fitted to a car log gives them |
+| `parameter_set` | null | cited | which of `parameter_sets` a run puts over these (a row or a system's `params`) |
+
+**Parameter sets.** The listed parameters are the datasheet-derived pack;
+`parameter_sets` holds named sets put over them, each parameter with its own
+source and validation (`set: {parameter_set: <name>}` in a row). One today,
+`car-log0077`: fitted to car SD log LOG0077 (2026-09-29, a 163 s drive at
+4 Hz, ~22 C) by [`scripts/fit_pack.py`](../scripts/fit_pack.py), which
+takes the log directory (the logs stay out of the repository) and reports
+the fit:
+
+| Parameter | Car (LOG0077) | Datasheet set | How |
+|---|---|---|---|
+| R0 per element | 3.70 +- 0.04 mOhm at 21.9 C (3.49 at 25 C; 20.92 mOhm per cell) | 3.34 mOhm at 25 C | pack voltage on I_raw with two lag taps for the cell poll's skew (184 ms), OCV drift at the table's slope |
+| R0 per element, spread | 3.46-4.57 mOhm (sd 0.19, 4.8x its standard error) | uniform | even cells of a module 3.56, odd 3.86 mOhm: the taps' share of the busbars |
+| RC | 2.46 mOhm / 10 s per element | 1.33 mOhm / 30 s | best hold-out on a tau grid; 10-20 s fit alike |
+| OCV offset | -141.5 mV (c3_0) to +135 mV (c0_10) | none | rest rows of the log's last 30 s, medians |
+
+Fit quality: R2 0.947, residual 25 mV rms per element (hold-out on the
+drive's last 40 %: 33 mV); the quick fit without the skew and the OCV drift
+gives the 3.9 mOhm, R2 0.85, first estimated. Not fitted: capacity, the OCV
+table, the thermal parameters. The `ecu-ams` load-sag scenarios
+(AMS#641) run on this set at the log's end state (SoC 0.584, 21.9 C).
 
 IFSSIM's `ifs08.m` OCV table is a generic NMC curve labelled SECONDARY; the
 stand-in uses the VTC6 fit, and the FMU should say which it uses.

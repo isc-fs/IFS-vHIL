@@ -227,6 +227,35 @@ parameters:
     status: uncommissioned
     source: The seed of the spreads' generator (Python's random.Random, the same on every host).
     validated_against: null
+  cell_ocv_offset:
+    value: null
+    unit: V
+    status: uncommissioned
+    source: >-
+      Each series element's static offset from the pack's OCV (95 values, in
+      chain order: module m = k // 19, its cell k % 19), added to OCV(soc);
+      null = none (a uniform pack). Only a parameter set fitted to a car log
+      gives one (parameter_sets, scripts/fit_pack.py).
+    validated_against: null
+  cell_r0_scale:
+    value: null
+    unit: '1'
+    status: uncommissioned
+    source: >-
+      Each series element's R0 as a multiple of cell_r0 (95 values, chain
+      order); null = uniform. A weak_cell_r0 fault multiplies it. Only a
+      parameter set fitted to a car log gives one.
+    validated_against: null
+  parameter_set:
+    value: null
+    unit: null
+    status: cited
+    source: >-
+      Which set of parameter_sets (below) is put over these parameters; null
+      = these, the datasheet-derived pack. A run selects one with a row
+      (`set: {parameter_set: <name>}`) or a system's `params`; each set
+      parameter keeps its own source and validation.
+    validated_against: null
   bleed_r:
     value: 23.5
     unit: ohm
@@ -302,6 +331,86 @@ parameters:
       or `silent` (no 0x466: the ECU marks the link invalid after
       InvDcBusStaleMs, ECU ecu_config.hpp:509). Unmeasured; see sense_floor.
     validated_against: null
+# -- parameter sets ----------------------------------------------------------------
+# Named sets put over `parameters` (parameter_set above, vhil/plant_ts.py
+# load_parameters). The listed parameters stay the datasheet-derived pack.
+parameter_sets:
+  car-log0077:
+    description: >-
+      The pack fitted to car SD log LOG0077, 2026-09-29, ~22 C (NTC mean
+      21.9 C over the drive, 21-24 C): a 163 s drive at 4 Hz, 0.84 Ah drawn,
+      peaks to 173 A (scripts/fit_pack.py, which reports the fit; the log
+      itself is not in the repository). Per element: R0 and one RC on the
+      pack voltage with the cell poll's skew to the logged current fitted
+      explicitly (two lag taps: 184 ms), the OCV drift fixed at the
+      catalogue table's slope; the static OCV offsets from the rest rows.
+      Pack fit: R2 0.947, residual 25 mV rms per element (hold-out 33 mV),
+      R0 3.70 +- 0.04 mOhm per element at 21.9 C. The datasheet set's
+      3.34 mOhm is 4 % under it at 25 C. Not fitted: capacity, OCV table,
+      thermal (the datasheet set's).
+    parameters:
+      cell_r0:
+        value: 0.02092
+        unit: ohm
+        status: cited
+        source: >-
+          Pack R0 per element 3.703 mOhm at 21.9 C (lag taps 0.975 + 2.728),
+          x 6P, referred to 25 C with cell_r0_alpha: 20.92 mOhm per cell
+          (datasheet set 20.06). Includes the interconnects in each tap's
+          sense path.
+        validated_against: car SD log LOG0077, 2026-09-29 (firmware commit not in the log)
+      cell_r0_scale:
+        value: [
+        0.937, 1.051, 0.949, 1.042, 0.946, 1.035, 0.942, 1.018, 0.958, 1.028, 1.233, 1.021, 0.970, 1.035, 0.976, 1.047, 0.985, 1.080, 0.983,   # module 0
+        0.985, 1.072, 0.964, 1.051, 0.956, 1.037, 0.974, 1.033, 0.969, 1.060, 0.962, 1.047, 0.948, 1.045, 0.953, 1.060, 0.962, 1.064, 0.973,   # module 1
+        0.960, 1.046, 0.948, 1.031, 0.941, 1.027, 0.943, 1.037, 0.943, 1.042, 0.946, 1.040, 0.935, 1.035, 0.943, 1.038, 0.948, 1.047, 0.951,   # module 2
+        0.965, 1.045, 0.948, 1.031, 0.942, 1.029, 0.946, 1.034, 0.939, 1.018, 0.945, 1.018, 0.934, 1.015, 0.934, 1.038, 0.938, 1.036, 0.949,   # module 3
+        0.993, 1.057, 0.972, 1.052, 0.975, 1.042, 0.973, 1.055, 0.946, 1.053, 0.944, 1.093, 0.944, 1.049, 0.950, 1.073, 0.951, 1.054, 0.976   # module 4
+      ]
+        unit: '1'
+        status: cited
+        source: >-
+          Per-element R0 / the mean (3.703 mOhm), each fitted on the pack's
+          skew and RC: spread 0.194 mOhm sd against a 0.040 mOhm standard
+          error (4.8x), so kept per element. Alternates with the cell's
+          position in the module (even cells 3.56, odd 3.86 mOhm: the sense
+          taps' share of the busbars); c0_10 4.57 mOhm is the outlier.
+        validated_against: car SD log LOG0077, 2026-09-29 (firmware commit not in the log)
+      cell_r1:
+        value: 0.01477
+        unit: ohm
+        status: cited
+        source: >-
+          RC branch 2.46 mOhm per element x 6P. Weakly identified at 4 Hz
+          over 163 s: tau 10-20 s fit alike (hold-out 33.2-33.5 mV, R1
+          2.5-2.7 mOhm); without it the hold-out is 48 mV.
+        validated_against: car SD log LOG0077, 2026-09-29 (firmware commit not in the log)
+      cell_tau1:
+        value: 10.0
+        unit: s
+        status: cited
+        source: The RC time constant with the best hold-out on a 2-120 s grid (see cell_r1).
+        validated_against: car SD log LOG0077, 2026-09-29 (firmware commit not in the log)
+      cell_ocv_offset:
+        value: [
+        -0.0016, -0.0169, 0.0357, -0.0394, 0.0356, -0.0115, 0.0359, 0.0109, -0.0386, 0.0114, 0.1354, 0.0139, 0.0826, 0.0137, 0.0799, 0.0151, 0.0825, 0.0805, 0.0663,   # module 0
+        0.0304, 0.1055, 0.0742, 0.0976, 0.0746, 0.0969, 0.1099, 0.0212, 0.1074, 0.0924, 0.0742, 0.0969, 0.0726, 0.0936, 0.0744, 0.0955, 0.0737, 0.1075, 0.0816,   # module 1
+        -0.1145, -0.0421, -0.0806, -0.0436, -0.0426, -0.0405, -0.0839, -0.0409, -0.0846, -0.0454, -0.0844, -0.0426, -0.0796, -0.0476, -0.0824, -0.0425, -0.0864, -0.0434, -0.0711,   # module 2
+        -0.1415, -0.0411, -0.1151, -0.0405, -0.0556, -0.0466, -0.1096, -0.0409, -0.1166, 0.0014, -0.0631, 0.0055, -0.0596, -0.0004, -0.0374, -0.0235, 0.0057, -0.0574, -0.0244,   # module 3
+        0.0324, 0.0065, 0.0672, -0.0404, 0.0766, 0.0077, 0.0685, -0.0075, 0.0082, -0.0744, 0.0162, -0.0525, 0.0166, -0.0501, 0.0259, -0.0565, 0.0262, -0.0015, 0.0144   # module 4
+      ]
+        unit: V
+        status: cited
+        source: >-
+          Each element's difference from the pack mean at rest (|I| < 5 A on
+          the row and the one before), medians over the rest rows of the
+          log's last 30 s (23 rows, the pack's state at the log's end, 3.734 V
+          mean): -141.5 mV (c3_0, the weakest: 3.592 V) to +135 mV (c0_10).
+          Over the whole log's 176 rest rows the same offsets drift by up to
+          34 mV (c3_0 -151 mV), hence the late ones. Mostly by module (module
+          1 high, 2 and 3 low), so an SoC imbalance as much as a cell one:
+          modelled as a static voltage offset.
+        validated_against: car SD log LOG0077, 2026-09-29 (firmware commit not in the log)
 # Topology (cited facts, not parameters):
 #   - Coil drive: AMS PB5/PB6/PB7 (MainLite pads 7/8/9) switch the low side of
 #     AIR+, AIR- and PRECHARGE through Q2/Q1/Q3 DMN6075S (1k gate, 2k2

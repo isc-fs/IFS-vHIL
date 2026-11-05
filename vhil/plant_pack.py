@@ -11,11 +11,14 @@ balance switch). Every parameter is the catalogue's
 Each series element is cells_parallel cells in parallel, one equivalent cell
 (capacity x P, resistances / P):
 
-    v = OCV(soc) - i * R0(T) - v_rc
+    v = OCV(soc) + dv - i * R0(T) * r_scale - v_rc
     d soc / dt = -i / (3600 * Q),  d v_rc / dt = (i * R1 - v_rc) / tau1
     m cp dT/dt = i^2 R0 + i v_rc - (T - T_amb) / R_th
 
-with i the pack current plus the element's bleed (V / bleed_r while its
+with dv and r_scale the element's static OCV offset and R0 scale (the
+catalogue's cell_ocv_offset / cell_r0_scale, one per element: a set fitted to
+a car log, scripts/fit_pack.py; null = none), and i the pack current plus the
+element's bleed (V / bleed_r while its
 switch is on, as the on-time the LTC6811 model accounts). Over an interval
 of constant current every term is closed form (soc linear, v_rc and T
 first-order), so how often the plant is advanced does not change the result
@@ -87,7 +90,11 @@ class Pack:
         soc0 = float(p("soc_init"))
         self.soc = [min(1.0, max(0.0, soc0 + soc_spread * (2 * rng.random() - 1)))
                     for _ in range(self.n)]
-        self.r0_scale = [1.0] * self.n
+        # Per element, from the catalogue (null = uniform): the static OCV
+        # offset (V) and the R0 scale a fault multiplies.
+        self.ocv_offset = self._per_element("cell_ocv_offset", 0.0)
+        self.r0_base = self._per_element("cell_r0_scale", 1.0)
+        self.r0_scale = list(self.r0_base)
         self.r0 = float(p("cell_r0")) / par
         self.r1 = float(p("cell_r1")) / par
         self.tau1 = float(p("cell_tau1"))
@@ -107,6 +114,14 @@ class Pack:
 
     def p(self, name):
         return self.params[name].value
+
+    def _per_element(self, name: str, default: float) -> list[float]:
+        v = self.params[name].value if name in self.params else None
+        if v is None:
+            return [default] * self.n
+        if len(v) != self.n:
+            raise ValueError(f"{name}: {len(v)} values for {self.n} elements")
+        return [float(x) for x in v]
 
     # -- the cell --------------------------------------------------------------
 
@@ -130,7 +145,8 @@ class Pack:
         return self.i_pack + self.bleed_i[k]
 
     def v_cell(self, k: int) -> float:
-        return self.ocv(self.soc[k]) - self.current(k) * self.r0_at(k) - self.v_rc[k]
+        return (self.ocv(self.soc[k]) + self.ocv_offset[k] - self.current(k) * self.r0_at(k)
+                - self.v_rc[k])
 
     def t_cell(self, k: int) -> float:
         return self.temp[k] + self.hot.get(k, 0.0)
@@ -204,10 +220,10 @@ class Pack:
             k = int(w)
             base = float(self.p("cell_capacity")) * int(self.p("cells_parallel"))
             if self.weak != k and 0 <= self.weak < self.n:
-                self.r0_scale[self.weak] = 1.0
+                self.r0_scale[self.weak] = self.r0_base[self.weak]
             self.weak = k
             self.capacity[k] = base * float(faults.get("weak_cell_capacity") or 1.0)
-            self.r0_scale[k] = float(faults.get("weak_cell_r0") or 1.0)
+            self.r0_scale[k] = self.r0_base[k] * float(faults.get("weak_cell_r0") or 1.0)
         if name in ("hot_cell", "hot_cell_dt"):
             self.hot = {}
             h = faults.get("hot_cell")
