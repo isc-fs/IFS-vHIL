@@ -110,8 +110,9 @@ class Car:
     def after_pull_up_scan(self, timeout_ms=1000):
         """Run to the end of a poll's second ADOW pull-up scan (the one the
         pull-up result comes from): returns its start (us). The pull-down
-        scans follow ~3 and ~6 ms after it in the emulation (bms_poll_task.cpp
-        :441-447: osDelay(3) after each ADOW)."""
+        scans follow ~9 and ~12 ms after it (bms_poll_task.cpp:441-447:
+        osDelay(3) after each ADOW, then the pass's five 84-byte reads at
+        515.625 kHz, #368)."""
         for _ in range(2):              # the settling scan, then the measured one
             self.sim.call(self.chain.path, "CommandTrigger", ADOW_UP, board=self.chain.board)
             deadline = self.sim.now_us() + timeout_ms * 1000
@@ -210,6 +211,25 @@ def test_a_load_step_up_between_the_scans_rides_through(images):
         car.apply(car.ts, {"i_inverter_dc": 0})
         print(f"0 -> 180 A: Error={error} reason={reason}")
         assert not error, f"Error, reason {reason}"
+
+
+def test_the_pull_up_and_pull_down_samples_are_as_far_apart_as_on_the_car(images):
+    """The firmware compares the second pull-up scan with the second
+    pull-down scan, one adow_pass apart: the pass's second osDelay(3), its
+    RDCFGA + RDCVA..D (5 x 84 bytes, 1.30 ms each at 515.625 kHz), then the
+    pull-down pass's first ADOW and osDelay(3) (bms_poll_task.cpp:434-468).
+    osDelay(3) waits 2-3 ticks: ~10.7-12.6 ms on the car. Before SPI1 took
+    its transfer time (#368) this was 6.0 ms. The width of the window a
+    current fall must land in (#641)."""
+    with Sim(SYSTEM, images("ecu-ams")) as sim:
+        car = Car(sim)
+        pu_start = car.after_pull_up_scan()
+        car.run_ms(30)
+        scans = [s for s in car.adow_scans(1) if s["start_us"] >= pu_start][:3]
+        assert [s["kind"] for s in scans] == ["ADOWUP", "ADOWDOWN", "ADOWDOWN"], scans
+        gap_ms = (scans[2]["start_us"] - scans[0]["start_us"]) / 1000
+        print(f"ADOW pull-up to pull-down: {gap_ms:.2f} ms")
+        assert 10.0 <= gap_ms <= 13.5, f"{gap_ms:.2f} ms"
 
 
 @pytest.mark.parametrize("offset", [False, True], ids=["no-offset", "healthy-offset"])
