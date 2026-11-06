@@ -27,6 +27,7 @@ pytestmark = [pytest.mark.ams, pytest.mark.system_ams, pytest.mark.isospi]
 BAL = 0x103
 BALM = 0x104
 UPDATE_MS = 2000            # two mask updates, whatever the phase
+DCC_LOOK_MS = 25
 
 
 @pytest.fixture
@@ -42,12 +43,14 @@ def _chip(ams, k, command):
 
 
 def _dcc(ams, k):
-    """DCC bits of chip k. The firmware clears them for ~2 ms around each
-    ADCV, so take the widest of a few looks a few ms apart."""
+    """DCC bits of chip k, the widest of three looks: the firmware clears them for each voltage poll's ADCV and open-wire scan
+    (bms_poll_task.cpp quiesce_balancing .. restore_balancing), ~37 ms in
+    200 with the isoSPI transfers timed (#368): looks 25 ms apart span 50 ms,
+    so one always falls outside it."""
     seen = 0
     for _ in range(3):
         seen |= int(_chip(ams, k, "DischargeBits"), 0)
-        ams.run_for(ms=7)
+        ams.run_for(ms=DCC_LOOK_MS)
     return seen
 
 

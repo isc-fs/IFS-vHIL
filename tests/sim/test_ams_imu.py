@@ -226,8 +226,15 @@ def test_the_card_holds_the_imu_log_with_its_crc(run, imu_log):
 def test_the_logged_rows_carry_what_the_sensor_measured(run, imu_log):
     rows = imu_log.records
     ticks = [r["tick_ms"] for r in rows]
-    assert ticks == sorted(ticks) and set(b - a for a, b in zip(ticks, ticks[1:])) == {10}, \
-        "records every 10 ms with none missing"
+    # One record per 10 ms slot, none missing, none a whole period late.
+    # ImuTask runs at osPriorityLow1, below BmsPollTask (imu_task.h:6), which
+    # busy-waits through its isoSPI transfers (HAL polling, now timed, #368):
+    # the samples due during a voltage poll or a temperature sweep come a few
+    # ms late, as on the car, and the next ones are back on the grid
+    # (osDelayUntil, imu_task.cpp:212).
+    slots = [(t - ticks[0]) // 10 for t in ticks]
+    assert ticks == sorted(ticks) and slots == list(range(len(ticks))), \
+        "a record every 10 ms slot with none missing"
     assert imu_log.open_tick_ms <= ticks[0]
     switch = run["switch_ms"]
     before = {tuple(r["a"] + r["g"]) for r in rows if r["tick_ms"] < switch}
