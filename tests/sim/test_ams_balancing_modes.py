@@ -62,14 +62,16 @@ def _command(car, magic: bytes):
 
 
 def _dcc(car):
-    """DCC bits of every chip, the widest of a few looks a few ms apart (the
-    firmware clears them for ~2 ms around each ADCV)."""
+    """DCC bits of every chip, the widest of three looks: the firmware clears them for each voltage poll's ADCV and open-wire scan
+    (bms_poll_task.cpp quiesce_balancing .. restore_balancing), ~37 ms in
+    200 with the isoSPI transfers timed (#368): looks 25 ms apart span 50 ms,
+    so one always falls outside it."""
     seen = [0] * 10
     for _ in range(3):
         for k in range(10):
             seen[k] |= int(car.sim.monitor(f"sysbus.spi1.isospi.cells{k} DischargeBits",
                                            board="ams").strip(), 0)
-        car.sim.run_for(ms=7)
+        car.sim.run_for(ms=25)
     return seen
 
 
