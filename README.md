@@ -27,8 +27,10 @@ modelled, not by a PCB. See [`docs/vision.md`](docs/vision.md) for the roadmap.
 
 **Contributing:** `dev` is the trunk and `main` is release-only. Branch
 `feat/` `fix/` `docs/` `chore/` `test/` off `dev` and open a PR back into it.
-See [`docs/development/setup.md`](docs/development/setup.md), and
-[`CLAUDE.md`](CLAUDE.md) for the operating model.
+New contributors start at [`CONTRIBUTING.md`](CONTRIBUTING.md); every doc is
+indexed in [`docs/README.md`](docs/README.md). Adding a board:
+[`docs/development/adding-a-board.md`](docs/development/adding-a-board.md).
+[`CLAUDE.md`](CLAUDE.md) is the operating model.
 
 ## Try it
 
