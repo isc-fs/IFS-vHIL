@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from vhil.server import auth, security
 from vhil.server import systems_write
-from vhil.server import decode, runs, scenarios, session, sources
+from vhil.server import decode, runs, scenarios, session, sources, training
 from vhil.server.config import Settings
 from vhil.server.workspace import NotFound, Workspace
 
@@ -61,10 +61,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(decode.router(settings, ws))
     app.include_router(scenarios.router(settings, ws))
     app.include_router(sources.router(settings, ws))
+    app.include_router(training.router(settings, ws))
 
     @app.get("/")
     def index():
         return FileResponse(STATIC / "index.html")
+
+    # The Training page (training/README.md): puzzles for new electrical members.
+    @app.get("/training/")
+    def training_page():
+        return FileResponse(STATIC / "training" / "index.html")
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
