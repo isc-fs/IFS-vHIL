@@ -26,6 +26,9 @@ are planned; today there is one of each:
 Where this file names Renode, the STM32H733 or the MainLite, the rule is
 specific to that backend, platform or board.
 
+Adding a board or MCU: [`docs/development/adding-a-board.md`](docs/development/adding-a-board.md)
+(the SensorHub, STM32L496, is next: [`docs/boards/sensorhub.md`](docs/boards/sensorhub.md)).
+
 How fast the emulated core runs firmware code (virtual-time fidelity of
 busy-waits, ISR and task CPU time; not wall-clock speed) is each firmware's
 `cpu.mips` in the catalogue, not the platform's
