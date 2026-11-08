@@ -1,7 +1,7 @@
 kind: training
 title: "The AIRs drop out a few seconds into Run"
 summary: "The car arms, precharges and goes to Run, then the tractive system dies on its own. Find the part that did it."
-level: 1
+level: 2
 fault: hardware
 topics: [shutdown circuit, AMS, cell temperatures, precharge]
 system: ecu-ams
