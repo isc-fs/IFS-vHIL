@@ -132,12 +132,32 @@ the Scenario tab, ▶ runs it).
             </ul>
         </div>
 
-        <div v-if="layout.view === 'runs'" class="vhil-runs">
+        <div
+            v-if="layout.view === 'runs'"
+            class="vhil-runs"
+            :class="{ '--drop': dropping }"
+            @dragover.prevent="dropping = true"
+            @dragleave="dropping = false"
+            @drop.prevent="dropRun"
+        >
             <div class="vhil-runs-head">
                 <span class="muted">{{ ws.id || 'every system' }}: last {{ ws.runs.length }}</span>
-                <button type="button" class="vhil-btn --small" @click="loadRuns">
-                    Refresh
-                </button>
+                <span class="vhil-runs-actions">
+                    <button
+                        type="button" class="vhil-btn --small"
+                        title="Open a teammate's .vhilrun file as a run (or drop one here)"
+                        @click="pickRun"
+                    >
+                        Import…
+                    </button>
+                    <button type="button" class="vhil-btn --small" @click="loadRuns">
+                        Refresh
+                    </button>
+                </span>
+                <input
+                    id="vhil-import-run" ref="runFile" type="file" accept=".vhilrun" hidden
+                    @change="fileRun"
+                >
             </div>
             <p v-if="!ws.runs.length" class="muted">No runs yet: Run (F5) starts one.</p>
             <ul class="vhil-list" aria-label="Runs">
@@ -157,7 +177,17 @@ the Scenario tab, ▶ runs it).
                         <span class="vhil-list-sub muted mono">
                             {{ ws.id ? '' : `${r.system} · ` }}{{ when(r) }}
                         </span>
+                        <span
+                            v-if="isImported(r)" class="vhil-run-imported"
+                            :title="importedFrom(r)"
+                        >imported</span>
                     </button>
+                    <a
+                        v-if="finished(r)"
+                        class="vhil-run-page" :href="bundleUrl(r.id)" download
+                        :aria-label="`Export run ${r.id} as a file`"
+                        :title="`Export run ${r.id} as a .vhilrun file, to share`"
+                    >↓</a>
                     <a
                         class="vhil-run-page" :href="runPage(r.id)" target="_blank" rel="noopener"
                         :aria-label="`Replay run ${r.id} in a new tab`"
@@ -175,9 +205,9 @@ import {
     computed, defineComponent, ref, watch,
 } from 'vue';
 import {
-    ws, loadRuns, newSystem, open, openRun, pickScenario, runNow,
+    ws, importRun, loadRuns, newSystem, open, openRun, pickScenario, runNow,
 } from './workspace.js';
-import { call, runPage } from './api.js';
+import { bundleUrl, call, runPage } from './api.js';
 import { loadScenarios, scen } from './scenarios.js';
 import { replay } from './replay.js';
 import StateBadge from './VhilStateBadge.vue';
@@ -259,6 +289,28 @@ export default defineComponent({
             ws.layout.dockTab = 'scenario';
             runNow();
         };
+        const FINISHED = new Set(['passed', 'failed', 'error', 'cancelled']);
+        const finished = (r) => FINISHED.has(r.state);
+        const isImported = (r) => Boolean(r.imported && r.imported.from);
+        const importedFrom = (r) => {
+            const f = r.imported.from;
+            const where = f.ref_name ? ` @ ${f.ref_name}` : '';
+            return `Run ${f.run} of ${f.owner || 'someone'}${where}, exported ${(f.exported?.at || '').slice(0, 10)}, `
+                + `imported by ${r.imported.by || 'you'}: read-only`;
+        };
+        const runFile = ref(null);
+        const dropping = ref(false);
+        const pickRun = () => runFile.value?.click();
+        const fileRun = (e) => {
+            const [file] = e.target.files;
+            e.target.value = '';
+            if (file) importRun(file);
+        };
+        const dropRun = (e) => {
+            dropping.value = false;
+            const file = [...(e.dataTransfer?.files || [])].find((f) => f.name.endsWith('.vhilrun'));
+            if (file) importRun(file);
+        };
         const when = (r) => {
             const at = (r.created || '').replace('T', ' ').slice(5, 16);
             return r.ref_name ? `${at} @ ${r.ref_name}` : at;
@@ -279,6 +331,15 @@ export default defineComponent({
             openRun,
             replay,
             runPage,
+            bundleUrl,
+            finished,
+            isImported,
+            importedFrom,
+            runFile,
+            dropping,
+            pickRun,
+            fileRun,
+            dropRun,
             when,
             scen,
             tests,

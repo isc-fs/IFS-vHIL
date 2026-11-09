@@ -696,6 +696,14 @@ from `git archive 04613679` except as listed below.
     them), and knows the circuit's two latches as pills (`imd_latch`,
     `ams_latch`: IMD latch (K4), AMS latch (K5)); `tests/js/plant.test.mjs`.
 
+31. **Share a run as a file.** The Runs view exports a finished run as a
+    `.vhilrun` file (↓, `GET /api/runs/<id>/bundle`) and imports one
+    (**Import…**, or a file dropped on the list: `POST /api/runs/import`,
+    vhil/server/bundle.py), then replays it; an imported run is marked
+    *imported*, with where it came from in its tooltip. `src/vhil/api.js`
+    `send` sends a File or Blob body as it is; `src/vhil/workspace.js`
+    `importRun`; `src/vhil/VhilRail.vue`.
+
 ## Left for later
 
 - **Dependabot alerts with no fix.** `showdown` ≤ 2.1.0 (three: ReDoS and
