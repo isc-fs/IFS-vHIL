@@ -20,8 +20,8 @@ A queued or running run can't be exported until it has finished.
   list. The run opens in the replay.
 - **Terminal:** `vhil import <file>`.
 
-An imported run is a new run here, with its own id. It's read-only and marked
-*imported*; its tooltip says whose run it was, at which branch, and when it
+An imported run is a new run here, with its own id. It's read-only and marked ⇣
+(imported); its tooltip says whose run it was, at which branch, and when it
 was exported. It shows in Runs but not in the Tests view's last results (it
 ran elsewhere), and the Debug tab has no firmware sources for it.
 

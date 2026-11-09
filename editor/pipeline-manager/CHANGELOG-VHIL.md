@@ -699,8 +699,8 @@ from `git archive 04613679` except as listed below.
 31. **Share a run as a file.** The Runs view exports a finished run as a
     `.vhilrun` file (↓, `GET /api/runs/<id>/bundle`) and imports one
     (**Import…**, or a file dropped on the list: `POST /api/runs/import`,
-    vhil/server/bundle.py), then replays it; an imported run is marked
-    *imported*, with where it came from in its tooltip. `src/vhil/api.js`
+    vhil/server/bundle.py), then replays it; an imported run is marked ⇣,
+    with where it came from in its tooltip. `src/vhil/api.js`
     `send` sends a File or Blob body as it is; `src/vhil/workspace.js`
     `importRun`; `src/vhil/VhilRail.vue`.
 

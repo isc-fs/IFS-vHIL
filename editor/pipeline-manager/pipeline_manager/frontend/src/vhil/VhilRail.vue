@@ -179,8 +179,8 @@ the Scenario tab, ▶ runs it).
                         </span>
                         <span
                             v-if="isImported(r)" class="vhil-run-imported"
-                            :title="importedFrom(r)"
-                        >imported</span>
+                            role="img" aria-label="imported" :title="importedFrom(r)"
+                        >⇣</span>
                     </button>
                     <a
                         v-if="finished(r)"
