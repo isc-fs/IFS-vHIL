@@ -21,6 +21,10 @@ What it does, each step a `bin/vhil` command a teammate could run by hand:
    answers. Quitting stops the app's containers (`vhil stop`); the VM keeps
    running, and the vHIL menu stops it.
 
+A run exported from the Runs view (↓) is saved to Downloads; a teammate's
+`.vhilrun` file dropped on the Runs list opens there
+([sharing runs](../docs/sharing-runs.md)).
+
 The menu's **Set-up and Status** (⌘,) returns to the wizard. **Install the
 `vhil` command** (Settings) links the same CLI into `/opt/homebrew/bin`.
 

@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from vhil.server import auth, security
 from vhil.server import systems_write
-from vhil.server import decode, runs, scenarios, session, sources
+from vhil.server import bundle, decode, runs, scenarios, session, sources
 from vhil.server.config import Settings
 from vhil.server.workspace import NotFound, Workspace
 
@@ -61,6 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(decode.router(settings, ws))
     app.include_router(scenarios.router(settings, ws))
     app.include_router(sources.router(settings, ws))
+    app.include_router(bundle.router(settings, ws))
 
     @app.get("/")
     def index():

@@ -563,6 +563,18 @@ export function openRun(id, { tab = 'bus' } = {}) {
     });
 }
 
+/** A teammate's .vhilrun file (GET /api/runs/<id>/bundle on their machine):
+ *  imported as a new, read-only run of this one, and replayed. */
+export function importRun(file) {
+    return guarded(`could not import ${file.name}`, async () => {
+        say(`Importing ${file.name}…`);
+        const out = await call('POST', '/api/runs/import', file);
+        await loadRuns();
+        say(`Imported ${file.name} as run ${out.run_id}`);
+        return openRun(out.run_id);
+    });
+}
+
 export const runActive = () => ws.run && !TERMINAL.has(ws.run.state);
 
 // -- LIVE ---------------------------------------------------------------------------

@@ -42,6 +42,7 @@ invariants in [`CLAUDE.md`](../CLAUDE.md#hard-invariants).
 | [scenarios.md](scenarios.md) | Scenarios: runs as data, with stimuli and expectations |
 | [state-view.md](state-view.md) | The editor's state panel |
 | [live-session.md](live-session.md) | Live sessions |
+| [sharing-runs.md](sharing-runs.md) | Sharing a finished run as a `.vhilrun` file |
 | [architecture/editor-workspace.md](architecture/editor-workspace.md) | Editor frontend design |
 | [architecture/m5-web-app.md](architecture/m5-web-app.md) | Shared web app architecture |
 

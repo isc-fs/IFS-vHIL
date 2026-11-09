@@ -30,6 +30,10 @@
 #   scripts/vhil-docker.sh prune [--dry-run]     prune old commit builds in /vhil/fw (vhil/fwprune.py)
 #   scripts/vhil-docker.sh editor-check [systems...]
 #                                                Pipeline Manager loads every system's graph
+#   scripts/vhil-docker.sh export-run <id> [-o file|dir]
+#                                                a finished run of the app as a .vhilrun file
+#   scripts/vhil-docker.sh import-run <file>     a .vhilrun file as a new run of the app
+#                                                (vhil/server/bundle.py, docs/sharing-runs.md)
 #   scripts/vhil-docker.sh shell                 a shell in the container
 #   scripts/vhil-docker.sh run <cmd...>          any command in the container
 #
@@ -291,6 +295,24 @@ editor)
     # web app's (`worker` executes it).
     ensure_images
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy ;;
+export-run|import-run)
+    # The app's runs (the vhil-data volume, as the api sees it) to and from
+    # a file on the host: its directory is mounted at /xfer.
+    if [ "$cmd" = export-run ]; then
+        [ -n "${1:-}" ] || { echo "usage: $0 export-run <run id> [-o file|dir]" >&2; exit 2; }
+        id=$1 out=.
+        [ "${2:-}" = -o ] && out=${3:?-o needs a file or directory}
+        if [ -d "$out" ]; then dir=$(cd "$out" && pwd) name=
+        else dir=$(cd "$(dirname "$out")" && pwd) name=$(basename "$out"); fi
+        args=(export "$id" -o "/xfer/$name")
+    else
+        f=${1:?usage: $0 import-run <file.vhilrun>}
+        [ -f "$f" ] || { echo "no file $f" >&2; exit 1; }
+        dir=$(cd "$(dirname "$f")" && pwd)
+        args=(import "/xfer/$(basename "$f")")
+    fi
+    run_args+=(-v "$dir:/xfer" -e VHIL_DATA=/vhil/server -e "USER=${USER:-}")
+    in_container 'exec python -c "import sys; from vhil.server.bundle import main; sys.exit(main())" "$@"' "${args[@]}" ;;
 editor-check)
     # Pipeline Manager's ./validate (its frontend's load) on each system's
     # dataflow, in the editor image where the patched checkout lives.
