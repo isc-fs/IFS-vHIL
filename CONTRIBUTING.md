@@ -12,7 +12,7 @@ Your first day, end to end:
 
 ```mermaid
 flowchart LR
-    A["<b>Read</b><br/>~5 min"] --> B["<b>Set up</b><br/>vm, pull, fw<br/>~15 min, once"]
+    A["<b>Read</b><br/>~5 min"] --> B["<b>Set up</b><br/>vhil setup<br/>~15 min, once"]
     B --> C["<b>Run</b><br/>unit + one sim test"]
     C --> D["<b>Change</b><br/>branch off dev"]
     D --> E["<b>PR into dev</b><br/>full-ci if emulation"]
@@ -39,10 +39,14 @@ time, so tests can run on every PR without the physical bench. Read:
 ```sh
 git clone https://github.com/isc-fs/IFS-vHIL && cd IFS-vHIL
 git switch dev
-scripts/vhil-docker.sh vm       # macOS only: a Colima VM (needs `brew install colima docker`)
-scripts/vhil-docker.sh pull     # pulls the Docker images, Renode included (a few GB)
-scripts/vhil-docker.sh fw       # builds the ECU and AMS firmware into the vhil-data volume
+brew install colima docker      # macOS only; on Linux, Docker itself
+bin/vhil setup                  # VM (macOS), the Docker images (a few GB), ECU/AMS/uDV firmware
+bin/vhil doctor                 # checks it all: says what to fix if anything is missing
 ```
+
+`bin/vhil` is the front door: add `bin/` to your `PATH` to type `vhil`.
+`bin/vhil help` lists its commands; anything else it passes to
+[`scripts/vhil-docker.sh`](scripts/vhil-docker.sh), which does the work.
 
 Details, Linux hosts and troubleshooting:
 [`docs/development/setup.md`](docs/development/setup.md).
@@ -50,11 +54,12 @@ Details, Linux hosts and troubleshooting:
 ## 3. Run things
 
 ```sh
-scripts/vhil-docker.sh unit                                  # host-only tests + validate every system (~1 min)
-scripts/vhil-docker.sh sim tests/sim/test_ams_boot.py        # one native test file on the emulated AMS
-scripts/vhil-docker.sh sim -k heartbeat                      # tests matching a name
-scripts/vhil-docker.sh editor                                # system editor: http://localhost:8080/editor/
-scripts/vhil-docker.sh shell                                 # a shell in the image (Renode, Python, toolchain)
+bin/vhil test unit                          # host-only tests + validate every system (~1 min)
+bin/vhil test tests/sim/test_ams_boot.py    # one native test file on the emulated AMS
+bin/vhil test -k heartbeat                  # tests matching a name
+bin/vhil scenario                           # every committed scenario
+bin/vhil ui                                 # the app and system editor, opened in the browser
+bin/vhil shell                              # a shell in the image (Renode, Python, toolchain)
 ```
 
 When a native test fails, its report has a snapshot of every board: PC,

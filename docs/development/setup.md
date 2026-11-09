@@ -16,6 +16,10 @@ on every `dev` push and release tag that changes them, plus the moving tags
 local by key, else pulled, else built. It builds only when none is published
 (a `docker/` change not on `dev` yet) or `docker/` has uncommitted changes.
 
+[`bin/vhil`](../../bin/vhil) wraps these with set-up checks (`vhil doctor`,
+`vhil setup`) and plain verbs (`vhil test`, `vhil scenario`, `vhil ui`);
+the wrapper's own commands are below.
+
 ```sh
 scripts/vhil-docker.sh vm          # macOS: Colima VM `vhil` with vcan (once; needs colima)
 scripts/vhil-docker.sh pull        # the published images of this checkout (any job pulls them when missing)
