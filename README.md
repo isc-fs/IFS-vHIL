@@ -24,14 +24,14 @@ BMI088).
 **Where it fits.** Each layer catches what the one before can't:
 
 ```mermaid
-flowchart LR
-    FW["Firmware repo<br/>(ECU, AMS, uDV)"] -->|production build| ELF(["Same .elf image"])
-    ELF --> V["vHIL<br/>emulated boards, virtual time<br/>every PR, in minutes"]
-    ELF --> H["HIL bench<br/>real boards, real electronics<br/>before a release"]
-    ELF --> C["Car<br/>ground truth"]
+flowchart TB
+    FW["Firmware repo: ECU, AMS, uDV"] -->|production build| ELF(["Same .elf image"])
+    ELF --> V["<b>vHIL</b><br/>emulated boards, virtual time<br/>every PR, minutes"]
+    ELF --> H["<b>HIL bench</b><br/>real boards and electronics<br/>before a release"]
+    ELF --> C["<b>Car</b><br/>ground truth"]
     V -->|logic, timing, fault paths| DEV{{"Merge to dev"}}
     H -->|silicon, analog, flashing| MAIN{{"Release to main"}}
-    C -->|logs and datasheets| FIX["Model fixes"]
+    C -->|logs, datasheets| FIX["Model fixes"]
     FIX -.-> V
 ```
 

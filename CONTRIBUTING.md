@@ -12,10 +12,10 @@ Your first day, end to end:
 
 ```mermaid
 flowchart LR
-    A["Read<br/>README, docs index,<br/>invariants<br/><i>~5 min</i>"] --> B["Set up<br/>vm, image, fw<br/><i>~30 min, once</i>"]
-    B --> C["Run<br/>unit, then one<br/>sim test<br/><i>~5 min</i>"]
-    C --> D["Change<br/>branch off dev,<br/>small commits"]
-    D --> E["PR into dev<br/>full-ci label if it<br/>touches emulation"]
+    A["<b>Read</b><br/>~5 min"] --> B["<b>Set up</b><br/>vm, image, fw<br/>~30 min, once"]
+    B --> C["<b>Run</b><br/>unit + one sim test"]
+    C --> D["<b>Change</b><br/>branch off dev"]
+    D --> E["<b>PR into dev</b><br/>full-ci if emulation"]
     E --> F(["Green CI,<br/>merge commit"])
 ```
 
