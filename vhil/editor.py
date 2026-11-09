@@ -306,6 +306,16 @@ def _role_description(board: dict, firmware: dict) -> str:
 NO_FIRMWARE = "(none)"
 
 
+def _every_protocol(model: dict) -> dict:
+    """A model's interface with each of its protocols' ports and pins added."""
+    iface = dict(model.get("interface", {}))
+    for proto, adds in (iface.pop("protocols", None) or {}).items():
+        iface[proto] = True
+        for key, value in adds.items():
+            iface[key] = [*iface.get(key, []), *value] if isinstance(value, list) else value
+    return iface
+
+
 def specification(catalog: Path = CATALOG) -> dict:
     """Pipeline Manager node types for everything in the catalogue."""
     firmware_docs = _catalog("firmware", catalog)
@@ -392,7 +402,9 @@ def specification(catalog: Path = CATALOG) -> dict:
         "additionalData": {"vhil": {"kind": "bus", "bitrate": CAN_BITRATE}},
     })
     for model_id, model in _catalog("model", catalog).items():
-        iface = model.get("interface", {})
+        # A model with protocols offers every bus it speaks and what each adds
+        # (a BMI088: I2C, or SPI and its chip selects); the one wired picks.
+        iface = _every_protocol(model)
         interfaces = [{"name": field, "type": itype, "direction": "inout", "side": "left",
                        "maxConnectionsCount": 1}
                       for field, itype in _MODEL_HOST_PORTS if iface.get(field)]
@@ -618,7 +630,7 @@ def from_dataflow(dataflow: dict, spec: dict | None = None) -> dict:
             model = models[devices[dev]["model"]]
             if field in model.get("interface", {}).get("analog_out", []):
                 devices[dev].setdefault("outputs", {})[field] = f"{board}.{pin}"
-            elif field in model.get("interface", {}).get("gpio", []):
+            elif field in _every_protocol(model).get("gpio", []):
                 devices[dev].setdefault("pins", {})[field] = f"{board}.{pin}"
             else:
                 devices[dev][field] = f"{board}.{pin}"

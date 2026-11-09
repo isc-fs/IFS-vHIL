@@ -1158,6 +1158,20 @@
             "radio": {
               "type": "boolean",
               "description": "Transmits over the air: every payload sent is a `radio` trace record (the model's Payloads)."
+            },
+            "protocols": {
+              "type": "object",
+              "minProperties": 2,
+              "propertyNames": {"enum": ["spi", "i2c"]},
+              "description": "A part that speaks more than one bus (a BMI088: I2C or SPI, picked by its PS pin): the bus a device wires picks one, as the chip's pin does. Each protocol's value adds to the interface for that choice, e.g. spi: {gpio: [csb1, csb2]}. Leave the protocols themselves out of the plain keys.",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cs": {"type": "boolean"},
+                  "gpio": {"type": "array", "items": {"$ref": "#/$defs/name"}, "minItems": 1, "uniqueItems": true}
+                }
+              }
             }
           }
         },
@@ -1209,6 +1223,7 @@
             "targets": {
               "type": "object",
               "minProperties": 1,
+              "$comment": "With interface.protocols, targets serve the i2c choice and type the other.",
               "propertyNames": {
                 "$ref": "#/$defs/name"
               },
@@ -1279,7 +1294,7 @@
               }
             }
           },
-          "oneOf": [
+          "anyOf": [
             {
               "required": [
                 "type"

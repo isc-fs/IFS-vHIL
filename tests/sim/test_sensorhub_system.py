@@ -14,7 +14,7 @@ import pytest
 from vhil.sim import Sim
 from vhil.system import REPO
 
-pytestmark = [pytest.mark.system_sensorhub, pytest.mark.can, pytest.mark.adc]
+pytestmark = [pytest.mark.system_sensorhub, pytest.mark.can, pytest.mark.adc, pytest.mark.i2c]
 
 SYSTEM = REPO / "systems" / "sensorhub.yaml"
 FLASH, SP = 0x08000000, 0x20010000
@@ -101,3 +101,31 @@ def test_a_power_cycle_wipes_the_rtc_backup_registers(sim):
     assert int(sim.monitor(f"sysbus ReadDoubleWord {bkp0r:#x}", board="sensorhub"), 16) == 0xA5A5
     sim.power_cycle("sensorhub")
     assert int(sim.monitor(f"sysbus ReadDoubleWord {bkp0r:#x}", board="sensorhub"), 16) == 0
+
+
+def test_the_imu_answers_on_spi3_with_its_chip_selects(sim):
+    """systems/sensorhub.yaml wires the BMI088 on SPI3, CSB1 PC4 / CSB2 PC5:
+    chip IDs through SPI3's data register (stm32l496xx.h SPI3_BASE
+    0x40003C00, GPIOC_BASE 0x48000800), the accelerometer's after its dummy
+    byte."""
+    spi3, gpioc = 0x40003C00, 0x48000800
+
+    def wr(address, value):
+        sim.monitor(f"sysbus WriteDoubleWord {address:#x} {value:#x}", board="sensorhub")
+
+    def xfer(cs, data):
+        wr(gpioc + 0x14, 0x30 & ~(1 << cs))
+        out = []
+        for b in data:
+            sim.monitor(f"sysbus WriteByte {spi3 + 0x0C:#x} {b:#x}", board="sensorhub")
+            out.append(int(sim.monitor(f"sysbus ReadByte {spi3 + 0x0C:#x}", board="sensorhub"), 16))
+        wr(gpioc + 0x14, 0x30)
+        return out
+
+    sim.run_for(ms=1)
+    wr(gpioc + 0x00, (1 << 8) | (1 << 10))              # MODER: PC4, PC5 outputs
+    wr(gpioc + 0x14, 0x30)                              # deselect: CSB1's rising edge
+    wr(spi3 + 0x04, (7 << 8) | (1 << 12))               # DS 8 bits, FRXTH
+    wr(spi3 + 0x00, (1 << 2) | (1 << 6))                # MSTR, SPE
+    assert xfer(4, [0x80, 0, 0])[2] == 0x1E
+    assert xfer(5, [0x80, 0])[1] == 0x0F

@@ -357,6 +357,23 @@ def require_gate_quantum(us: int, what: str) -> None:
                           f"{GATE_QUANTUM_US} us only; 1 ms is a non-gate run's opt-in (#348)")
 
 
+def device_interface(name: str, dev: dict) -> dict:
+    """What a device attaches to: its model's interface, and for a model that
+    speaks several buses (`protocols`, a BMI088's I2C or SPI) the one the
+    device wires, with what that choice adds (SPI's chip selects)."""
+    iface = dev["model_doc"].get("interface", {})
+    protocols = iface.get("protocols")
+    if not protocols:
+        return iface
+    chosen = [p for p in protocols if p in dev]
+    if len(chosen) != 1:
+        raise SystemError(f"device '{name}' ({dev['model']}) wires one of "
+                          f"{', '.join(sorted(protocols))} (its protocol), got "
+                          f"{', '.join(chosen) or 'none'}")
+    base = {k: v for k, v in iface.items() if k != "protocols"}
+    return {**base, chosen[0]: True, **protocols[chosen[0]]}
+
+
 class System:
     def __init__(self, path: Path, catalog: Path = CATALOG,
                  extra_card_dirs: Iterable[Path | str] = ()):
@@ -722,7 +739,7 @@ class System:
                     raise SystemError(f"'{node}' is on both '{seen[node]}' and '{bus}'")
                 seen[node] = bus
         for name, dev in self.devices.items():
-            interface = dev["model_doc"].get("interface", {})
+            interface = device_interface(name, dev)
             boards = set()
             for port, want in (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"),
                                ("i2c", "i2c")):
@@ -744,9 +761,12 @@ class System:
                                       f"every analog_out and follow one of its params")
             elif "renode" not in doc:
                 raise SystemError(f"model '{doc['id']}': backend renode needs a renode section")
-            elif bool(interface.get("i2c")) != ("targets" in doc["renode"]):
+            elif (bool(interface.get("i2c")) != ("targets" in doc["renode"])
+                  if "protocols" not in doc.get("interface", {})
+                  else ("targets" if interface.get("i2c") else "type") not in doc["renode"]):
                 # An I2C device is one or more targets, each at its address
-                # (a BMI088's two dies); anything else is one peripheral.
+                # (a BMI088's two dies); anything else is one peripheral. A
+                # model with protocols gives each choice its own.
                 raise SystemError(f"model '{doc['id']}': an i2c model gives renode targets "
                                   f"(a type and an address each), any other model a renode type")
             want_out = set(interface.get("analog_out", []))
@@ -1077,7 +1097,7 @@ class System:
             for i in range(int(dev.get("count", 1))):
                 lines += [f"{name}{i}: {rn.path(renode['type'])} @ {rn.ident(dev['attach'])} {i}"]
                 lines += body
-        elif "targets" in renode:
+        elif "targets" in renode and "i2c" in dev:
             # One peripheral per I2C target, named <device>_<target>.
             bus = local(self.resolve(dev["i2c"])[2])
             for part, t in renode["targets"].items():

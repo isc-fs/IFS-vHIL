@@ -1,7 +1,7 @@
 kind: system
 id: sensorhub
 description: >-
-  One SensorHub on its two CAN buses, nothing attached yet. Its firmware is
+  One SensorHub on its two CAN buses, with its on-board BMI088. Its firmware is
   not in the catalogue, so a run gives the image at render
   (`--firmware sensorhub=<elf>`). The base for SensorHub tests: add the
   sensors a test needs as devices.
@@ -15,3 +15,7 @@ buses:
   # Which car bus each one joins is not traced yet (docs/boards/sensorhub.md).
   can1: {kind: can, nodes: [sensorhub.CAN1]}  # CAN1_H/L, J1.9/J1.10
   can2: {kind: can, nodes: [sensorhub.CAN2]}  # CAN2_H/L, J1.11/J1.12
+devices:
+  # The on-board BMI088 on SPI3: CSB1 (accelerometer) PC4, CSB2 (gyroscope)
+  # PC5 (catalog/boards/sensorhub.yaml). The MainLite's is on I2C2.
+  imu: {model: bmi088, spi: sensorhub.SPI3, pins: {csb1: sensorhub.PC4, csb2: sensorhub.PC5}}

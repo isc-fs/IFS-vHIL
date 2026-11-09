@@ -413,7 +413,11 @@ def _ams(tmp_path, devices):
     ("  b: {model: ltc6820, spi: ams.SPI1, cs: ams.PB9}\n"
      "  c: {model: ltc6811, attach: b, params: {bogus: 1}}\n", "unknown params"),    ("  i: {model: ssa-2-250a, outputs: {out_p: ams.PF7}}\n", "drives outputs"),
     ("  i: {model: acs758lcb-050b, outputs: {out: ams.FDCAN1}}\n", "not an analog input"),
-    ("  imu: {model: bmi088}\n", "needs 'i2c'"),
+    ("  imu: {model: bmi088}\n", r"wires one of i2c, spi \(its protocol\), got none"),
+    ("  imu: {model: bmi088, i2c: ams.I2C2, spi: ams.SPI1}\n", "got i2c, spi"),
+    ("  imu: {model: bmi088, spi: ams.SPI1}\n", r"wires pins \['csb1', 'csb2'\], got \[\]"),
+    ("  imu: {model: bmi088, i2c: ams.I2C2, pins: {csb1: ams.PB9, csb2: ams.PB8}}\n",
+     r"wires pins \[\], got"),
     ("  imu: {model: bmi088, i2c: ams.SDMMC1}\n", "is sdmmc, not i2c"),
     ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, i2c: ams.I2C2}\n", "takes no 'i2c'"),
 ])
@@ -744,6 +748,16 @@ def test_a_single_ended_transfer_other_than_identity_is_rendered():
     script = system.render_renode()
     assert "sysbus.adc3_h73x SingleEndedTransfer 7 0.98 -3" in script
     assert "SingleEndedNoise" not in script
+
+
+def test_the_bus_a_bmi088_wires_picks_its_protocol():
+    """The same catalogue model: I2C dies on the MainLite, one SPI slave with
+    its chip selects on the SensorHub."""
+    ams = System(REPO / "systems" / "ams.yaml").render_renode()
+    assert "imu_acc: Sensors.Bmi088Accelerometer @ i2c2_h7 0x18" in ams and "Bmi088Spi" not in ams
+    hub = System(REPO / "systems" / "sensorhub.yaml").render_renode()
+    assert "imu: Sensors.Bmi088Spi @ spi3" in hub and "Bmi088Accelerometer" not in hub
+    assert "gpioPortC:\n    4 -> imu@0\n    5 -> imu@1" in hub
 
 
 def test_a_board_without_roles_takes_its_own_front_end():
