@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -541,6 +541,77 @@ async fn install_cli(app: AppHandle) -> Result<String, String> {
 // --- window, menu, quit -------------------------------------------------------
 
 /// The bundled set-up page, from the web app or anywhere else.
+/// A download the vHIL's page starts (a run exported as a .vhilrun file,
+/// vhil/server/bundle.py): saved to Downloads, never over another file, and
+/// shown in the file manager when it is in.
+fn on_download(app: AppHandle) -> impl Fn(tauri::Webview, tauri::webview::DownloadEvent) -> bool {
+    let saving: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+    move |_, event| {
+        use tauri::webview::DownloadEvent;
+        match event {
+            DownloadEvent::Requested { url, destination } => {
+                let Ok(dir) = app.path().download_dir() else { return false };
+                let name = destination
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .or_else(|| url.path_segments().and_then(|s| s.last()).map(str::to_string))
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "download".into());
+                let path = free_path(&dir, &name);
+                *destination = path.clone();
+                *saving.lock().unwrap() = Some(path);
+                true
+            }
+            DownloadEvent::Finished { success, .. } => {
+                if let Some(path) = saving.lock().unwrap().take() {
+                    if success {
+                        reveal(&path);
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+}
+
+/// dir/name, or dir/<stem> (2).<ext> and on while that exists.
+fn free_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .unwrap()
+}
+
+/// Shows a file in the file manager (Linux: its folder).
+fn reveal(path: &Path) {
+    let mut c = if cfg!(target_os = "macos") {
+        let mut c = command("open");
+        c.arg("-R");
+        c
+    } else if cfg!(windows) {
+        let mut c = command("explorer.exe");
+        c.arg("/select,");
+        c
+    } else {
+        command("xdg-open")
+    };
+    let target = if cfg!(any(target_os = "macos", windows)) {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let _ = c.arg(target).spawn();
+}
+
 fn show_setup(app: &AppHandle) {
     let url = if cfg!(windows) {
         "http://tauri.localhost/index.html?stay=1"
@@ -601,6 +672,20 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle();
+            // The window is built here (tauri.conf.json: create false) to
+            // save the page's downloads (on_download). Its file drops go to
+            // the page (dragDropEnabled false): the Runs list imports them.
+            let conf = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .ok_or("no main window in tauri.conf.json")?;
+            tauri::WebviewWindowBuilder::from_config(handle, &conf)?
+                .on_download(on_download(handle.clone()))
+                .build()?;
             app.set_menu(menu(handle)?)?;
             app.on_menu_event(|app, event| match event.id().as_ref() {
                 "setup" => show_setup(app),
