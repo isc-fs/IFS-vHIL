@@ -1,0 +1,80 @@
+kind: platform
+id: stm32h733
+description: >-
+  STM32H733ZG (Cortex-M7, 1 MB flash). Renode ships only H743/H753/H747, so
+  this reuses its stm32h7.repl and adds FDCAN3, TIM23, USART10, SPI1 (with a fault hook), the H73x
+  ADC3 with timed conversions and DMA, a DMA1 with half-transfer and error
+  flags, a DBGMCU, SDMMC1 with IDMA and an I2C2 that NACKs, plus the 24 MHz
+  HSE of the MainLite, and a flash controller with non-volatile option bytes and
+  sector write protection. Addresses and IRQs from ST's stm32h733xx.h.
+backend: renode
+renode:
+  repl: platforms/cpus/stm32h733.repl
+  cpu: cpu
+  sources:
+    # What lazily computed models and the DMA share (#260): loaded first.
+    - models/renode/VhilLazy.cs
+    # The H72x/H73x ADC3 (Renode models only the H743's).
+    - models/renode/Stm32H7Adc3.cs
+    # DMA1 with half-transfer, errors and circular mode (Renode's tags them).
+    - models/renode/Stm32H7Dma.cs
+    # DBGMCU: IDCODE and CR (Renode's H7 platform has none).
+    - models/renode/Stm32H7Dbgmcu.cs
+    # SDMMC with its internal DMA (Renode's tags IDMA).
+    - models/renode/Stm32H7Sdmmc.cs
+    # Flash controller with non-volatile option bytes and sector write
+    # protection (Renode's tags them and never raises WRPERR).
+    - models/renode/Stm32H7Flash.cs
+    # FDCAN with fault hooks for tests (Renode's MCAN has no error states).
+    - models/renode/Stm32H7Fdcan.cs
+    # The FDCAN clock calibration unit's IR/IE (Renode tags the range).
+    - models/renode/Stm32H7FdcanCcu.cs
+    # SPI with a fault hook for tests: a transfer that never runs (Renode's
+    # never fails one).
+    - models/renode/Stm32H7Spi.cs
+    # I2C master that NACKs an unanswered address (Renode's never does).
+    # Device models for I2C targets build on it, so it loads before them.
+    - models/renode/Stm32H7I2c.cs
+    # CORDIC co-processor (the H743 has none; the uDV's attitude filter uses it).
+    - models/renode/Stm32H7Cordic.cs
+    # A reserved range of the memory map that bus-faults every access
+    # (Renode returns 0 for unmapped reads), for the tests' bus-fault hook.
+    - models/renode/VhilBusError.cs
+    # One owner for the RCC's and the NVIC's bus hooks, shared by the
+    # models below.
+    - models/renode/VhilBusHooks.cs
+    # The default memory map's Execute Never while the MPU is off: a fetch
+    # from peripheral space is a MemManage (Renode aborts the machine).
+    - models/renode/VhilExecuteNever.cs
+    # RCC_RSR reset-source flags across resets (Renode's RCC resets them).
+    - models/renode/VhilResetFlags.cs
+    # RCC xxxRSTR peripheral resets with the H733's bits (Renode's has the
+    # H743's, and doesn't know the models this platform adds).
+    - models/renode/VhilRccResets.cs
+    # The Cortex-M7 cache controls as architected no-ops: CCR.IC/DC read back,
+    # ICIALLU accepted (Renode has no cache to enable or invalidate).
+    - models/renode/VhilCaches.cs
+    # Busy-wait fast-forward (#154): counter delay loops and fixed-point
+    # polling loops charged their exact instructions instead of executed one
+    # by one; what the firmware observes is unchanged (docs/cpu-timing.md).
+    - models/renode/VhilFastForward.cs
+  # After each board's platform loads; {board} is its machine name.
+  setup:
+    - emulation CreateVhilResetFlags "vhil_reset_{board}" "{board}"
+    - emulation CreateVhilRccResets "vhil_rcc_{board}" "{board}"
+    - emulation CreateVhilExecuteNever "vhil_xn_{board}" "{board}"
+    - emulation CreateVhilCaches "vhil_caches_{board}" "{board}"
+    - emulation CreateVhilFastForward "vhil_ff_{board}" "{board}"
+  # In the reset macro, after every reset: power-on, software and watchdog.
+  # Renode 1.17's CPU reset zeroes BASEPRI as read but not the masking it
+  # applies (renode/renode#1021). An IWDG reset taken while the firmware
+  # held BASEPRI (a FreeRTOS critical section, or the AMS's stack-overflow
+  # hook, called from the scheduler with BASEPRI raised) left the bootloader
+  # with its HAL tick (priority 15) masked: its 2 s auto-jump deadline never
+  # came and the board stayed in the bootloader for good. On the chip every
+  # reset clears it (ARMv7-M ARM B1.5.5, TakeReset: BASEPRI = 0).
+  reset:
+    - '{cpu} SetRegister "BasePri" 0x0'
+  # A board's write_protect (systems/*.yaml): its option bytes as burned
+  # before the first power-on (models/renode/Stm32H7Flash.cs).
+  write_protect: "sysbus.flashController_h7 WriteProtectedSectors {mask:#04x}"

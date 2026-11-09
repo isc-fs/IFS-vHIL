@@ -1,0 +1,1660 @@
+"""The web app's run worker (M5.2, #114; docs/architecture/m5-web-app.md).
+
+    python -m vhil.worker [--once] [--poll S] [--fw-dir DIR] [--no-build] [--no-prune]
+    python -m vhil.worker prune [--dry-run] [--fw-dir DIR]
+
+Claims queued runs from the server's SQLite table (vhil/server/runs.py) and
+executes their scenario with the same code CI runs: a `run` scenario drives
+`vhil.sim.Sim` directly, a `pytest` scenario runs pytest in a subprocess.
+
+A `run` advances virtual time in slices (slice_ms, default 100 ms). After
+each slice the frames, GPIO edges, samples and radio payloads it produced are appended to
+`<results>/<id>/trace.jsonl` in virtual-time order and flushed, so the API's
+live WebSocket streams them while the run goes on; then the run's DB state is
+read, and a run cancelled from the API stops there. Each slice also writes a
+`bus_load` record per CAN bus (#174): the fraction of the slice the bus was
+busy, exact from the bus model (models/renode/VhilCanBus.cs, every bus by
+default), estimated on a bus with `arbitration: false` from the frames seen at
+500 kbit/s (vhil/canframe.py, `exact: false`); the summary carries each
+bus's mean and peak.
+
+Firmware: each image key of the system ("<board>", "<board>.bootloader")
+needs an ELF at the ref the run asks for (default: the system's
+firmware_ref / bootloader_ref, else the catalogue's). Builds are keyed by
+commit: the API resolves each image's ref to its commit when the run is
+created (git ls-remote, never the cache: `firmware_commits` in the run,
+resolve_commits), and the worker resolves any it could not. The image of a
+commit is `<fw-dir>/<firmware>+<commit[:12]>.<recipe id>/<elf>`
+(vhil.system commit_source_dir; the recipe id hashes the catalogue's build
+recipe and toolchain, invariant 1), reused when `<fw-dir>/built.txt` lists
+it, so a branch that moved builds its new head and one commit picked as a
+branch and as a tag is built once. A build at a ref name (`vhil.system build`
+without --commit: `scripts/vhil-docker.sh fw`, builds from before commits)
+is reused too when its checkout is at the commit (vhil.system find_build).
+Otherwise the worker runs `python -m vhil.system build --workdir <fw-dir>
+--ref K=<ref> --commit K=<sha> --only K` for the missing images, as CI builds,
+under one lock per fw directory, and appends to built.txt. A ref whose commit
+can't be resolved at all (GitHub unreachable) falls back to the build at the
+ref name, as before, and the trace says so. --no-build makes a missing image
+an error instead. The run's summary records each image's ref and commit
+(`firmware_commits`). After a run, at most once an hour across the workers
+(VHIL_FW_PRUNE_INTERVAL_S), the worker prunes the commit builds no one is
+likely to run again (vhil/fwprune.py: the last VHIL_FW_KEEP used and those
+used within VHIL_FW_KEEP_DAYS stay, and active branch heads, queued and
+running runs' commits and a build in progress always); `prune [--dry-run]`
+makes a pass now.
+
+Live logs (vhil/runlog.py, docs/live-session.md#logs): every `log` record
+has a `source` and a `level`. A firmware build streams its output line by
+line (`build`, run_build; whole in build.log), a pytest run its output
+(`pytest`); at each slice boundary the worker reads what Renode logged
+(`renode`, filtered; whole in renode.log), what each board sent on its UARTs
+(`<board>.<UART>`; whole in uart/) and whether each board jumped from its
+bootloader to its app, all rate-limited per source.
+
+Liveness: while it holds a run the worker beats the run's heartbeat from a
+background thread (every --heartbeat S) and at every slice, and before each
+claim it reclaims runs whose heartbeat went stale (--reclaim-after S): a
+worker that died mid-run leaves a run another worker picks up again, at most
+MAX_ATTEMPTS times in all (vhil/server/runs.py). A worker that finds its run
+reclaimed from under it (it stalled past the timeout) drops it without
+writing a final state. A run's next attempt starts a fresh trace; the last
+one is kept as trace.attempt<N>.jsonl. A first attempt that finds its results
+directory already there (a database restored to a snapshot hands out the ids
+of runs it rolled back, whose results stay on the runs volume) moves it to
+`<results>/.orphaned/<id>-<time>` instead of appending to it. Every trace
+starts with a header carrying the run's token (vhil/server/runs.py,
+trace_header): until it is there, the API serves nothing at the run's path, so
+a client that opens a queued run never sees the stale trace it replaces.
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import fcntl
+import heapq
+import json
+import math
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import uuid
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Callable, NamedTuple, Optional
+
+from vhil import canframe
+from vhil import fwprune
+from vhil import runlog
+from vhil import expect as vexpect
+from vhil import stateview
+from vhil.server.config import Settings
+from vhil.server.runs import (HEARTBEAT_S, MAX_ATTEMPTS, RECLAIM_AFTER_S, TRACE, Limits,
+                              RunStore, code_changes, materialise_system, trace_header)
+from vhil.server.session import SessionStore
+from vhil.server.workspace import Workspace
+from vhil.system import (COMMIT, GATE_QUANTUM_US, System, SystemError, built_images,
+                         commit_image_path, commit_source_dir, find_build, image_path,
+                         quantum_us, stamp_ref)
+
+DEFAULT_FW_DIR = Path(os.environ.get("VHIL_FW_DIR", "/vhil/fw"))
+
+
+class Cancelled(Exception):
+    """The run was cancelled; .summary is what it had done by then."""
+
+    def __init__(self, summary: Optional[dict] = None):
+        super().__init__("cancelled")
+        self.summary = summary or {}
+
+
+class Lost(Exception):
+    """The run was reclaimed from this worker; its new holder finishes it."""
+
+
+class Heartbeat:
+    """Beats a held run's heartbeat every `period_s` from a daemon thread,
+    so phases with no slices (a firmware build, a pytest subprocess, Renode
+    starting) keep the run claimed. It stops beating once the store says the
+    run is no longer this worker's running run; the executor finds that out
+    itself at its next check (Worker._execute, cancelled)."""
+
+    def __init__(self, store: RunStore, run_id: int, worker: str, period_s: float):
+        self.store, self.run_id, self.worker, self.period_s = store, run_id, worker, period_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name=f"heartbeat-{run_id}", daemon=True)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.period_s):
+            try:
+                if not self.store.heartbeat(self.run_id, self.worker):
+                    return
+            except Exception as e:  # noqa: BLE001 - a busy DB is retried next beat
+                print(f"heartbeat run {self.run_id}: {e}", file=sys.stderr, flush=True)
+
+    def __enter__(self) -> "Heartbeat":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._thread.join()
+
+
+def set_aside(run_dir: Path) -> Path:
+    """Move a stale results directory to <results>/.orphaned/<id>-<time>, so a
+    new run with its id starts empty and the old files are kept for whoever
+    wants them."""
+    dest = run_dir.parent / ".orphaned" / f"{run_dir.name}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    n = 1
+    while dest.exists():
+        dest = dest.with_name(f"{dest.name.split('.')[0]}.{n}")
+        n += 1
+    run_dir.rename(dest)
+    return dest
+
+
+class TraceLimit(Exception):
+    """The run's trace reached Limits.max_trace_bytes; the run ends as error."""
+
+
+class TraceWriter:
+    """Appends JSON-lines trace records; each write() is one flushed batch.
+
+    With `max_bytes`, a batch that would take the file past it is dropped,
+    a log record says so, and TraceLimit is raised: a run can't fill the
+    shared results volume (a fast periodic sender or symbol watch over a long
+    run). After that only log records (the run's own end) are written.
+
+    With `header`, a new file starts with it as its first line (the run's
+    token, vhil/server/runs.py trace_header).
+
+    Every `log` record has a `source` and a `level` (vhil/runlog.py): one
+    written without is the worker's (`worker`, `info`). While `pre` (before
+    the system is powered on: firmware, a build, a pytest run), a log record
+    carries `wall_s` too, the wall time it was written."""
+
+    def __init__(self, path: Path, max_bytes: Optional[int] = None,
+                 header: Optional[dict] = None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self.max_bytes = max_bytes
+        self._f = open(path, "a")
+        self._size = self._f.tell()
+        self.full = False
+        self.pre = True
+        if header is not None and self._size == 0:
+            line = json.dumps(header, separators=(",", ":")) + "\n"
+            self._f.write(line)
+            self._f.flush()
+            self._size += len(line)
+
+    def write(self, records: list[dict]) -> None:
+        records.sort(key=lambda r: r["t_us"])   # stable: same-time order kept
+        for r in records:
+            if r.get("kind") == "log":
+                r.setdefault("source", "worker")
+                r.setdefault("level", "info")
+                if self.pre:
+                    r.setdefault("wall_s", runlog.wall())
+        if self.full:
+            records = [r for r in records if r.get("kind") == "log"]
+        text = "".join(json.dumps(rec, separators=(",", ":")) + "\n" for rec in records)
+        if self.max_bytes is not None and not self.full and self._size + len(text) > self.max_bytes:
+            self.full = True
+            t_us = records[0]["t_us"] if records else 0
+            note = json.dumps({"kind": "log", "t_us": t_us,
+                               "text": f"trace limit reached ({self.max_bytes >> 20} MiB): "
+                                       "stopping the run", "source": "worker", "level": "error"},
+                              separators=(",", ":")) + "\n"
+            self._f.write(note)
+            self._f.flush()
+            self._size += len(note)
+            raise TraceLimit(f"the trace reached this server's limit of "
+                             f"{self.max_bytes >> 20} MiB (VHIL_MAX_TRACE_MB)")
+        self._f.write(text)
+        self._f.flush()
+        self._size += len(text)
+
+    def log(self, t_us: int, text: str, source: str = "worker", level: str = "info") -> None:
+        self.write([{"kind": "log", "t_us": t_us, "text": text, "source": source,
+                     "level": level}])
+
+    def close(self) -> None:
+        self._f.close()
+
+
+# -- a live session ------------------------------------------------------------------
+
+class LiveSession:
+    """A live run's session channel, the worker's side (vhil/server/session.py):
+    its pending ops from the DB, settled back there; when it went idle; and
+    pacing: at each slice boundary the worker waits until wall time has come
+    to the end of the slice it is about to run (at `rtf`), so virtual time
+    never leads wall time, and a deficit over `max_lag_s` is forgiven
+    (re-based), never repaid by running flat out (as
+    models/renode/VhilPacer.cs does for the bench)."""
+
+    def __init__(self, store: SessionStore, run_id: int, limits: Limits, *, rtf: float = 1.0,
+                 max_lag_s: float = 0.25, poll_s: float = 0.05,
+                 clock: Callable[[], float] = time.monotonic,
+                 wall: Callable[[], float] = time.time,
+                 sleep: Callable[[float], None] = time.sleep):
+        self.store, self.run_id = store, run_id
+        self.max_periodic, self.idle_s = limits.live_max_periodic, float(limits.live_idle_s)
+        self.rtf, self.max_lag_s, self.poll_s = rtf, max_lag_s, poll_s
+        self.clock_fn, self.wall, self.sleep = clock, wall, sleep
+        self.started = wall()
+        self._idle_checked, self._last = -1e9, self.started
+        self._base = (0, clock())
+        self._window: list[tuple[float, int]] = []     # (wall, virtual us), the last second
+
+    def take(self, now_us: int = 0) -> list[dict]:
+        """The pending ops, in order (at virtual time now_us)."""
+        return self.store.pending(self.run_id)
+
+    def settle(self, settled: list) -> None:
+        self.store.settle(self.run_id, settled)
+
+    def refuse_pending(self, detail: str) -> None:
+        self.settle([(row["id"], "refused", None, detail) for row in self.take()])
+
+    def idle_left(self) -> float:
+        """Seconds of wall time before the session counts as idle."""
+        now = self.wall()
+        if now - self._idle_checked >= 1.0:       # one query a second at most
+            self._idle_checked = now
+            self._last = max(self.started, self.store.last_activity(self.run_id) or 0)
+        return self.idle_s - (now - self._last)
+
+    def idle(self) -> bool:
+        return self.idle_left() <= 0
+
+    def wait(self) -> None:
+        self.sleep(self.poll_s)
+
+    def rebase(self, now_us: int, window: bool = True) -> None:
+        """Pace from now on; `window`: measure the real-time factor afresh
+        too (a pause or a resume; not a forgiven deficit, after which the
+        factor is what it was)."""
+        self._base = (now_us, self.clock_fn())
+        if window:
+            self._window.clear()
+
+    def pace(self, now_us: int, until_us: int) -> None:
+        """At virtual time now_us, before running the slice to until_us."""
+        v0, w0 = self._base
+        if (self.clock_fn() - w0) - (now_us - v0) / 1e6 / self.rtf > self.max_lag_s:
+            # Behind: forgive, never sprint to catch up. Wall time now is the
+            # slice's end, so it runs at once: re-based at its start instead,
+            # an emulation slower than real time would wait out a whole slice
+            # each time it is forgiven.
+            self.rebase(until_us, window=False)
+            return
+        wait = (until_us - v0) / 1e6 / self.rtf - (self.clock_fn() - w0)
+        if wait >= 0.001:
+            self.sleep(wait)
+
+    def clock(self, now_us: int, paused: bool = False) -> dict:
+        """The slice's `clock` record: virtual time, the real-time factor over
+        the last second of wall time (0 while paused), the idle countdown."""
+        w = self.clock_fn()
+        self._window.append((w, now_us))
+        while len(self._window) > 2 and w - self._window[0][0] > 1.0:
+            self._window.pop(0)
+        (w0, v0), rtf = self._window[0], 0.0
+        if not paused and w > w0:
+            rtf = (now_us - v0) / 1e6 / (w - w0)
+        return {"kind": "clock", "t_us": now_us, "rtf": round(rtf, 3), "paused": paused,
+                "wall_s": round(self.wall() - self.started, 3),
+                "idle_left_s": max(0, round(self.idle_left()))}
+
+
+# -- the `run` scenario ------------------------------------------------------------
+
+def _us(ms) -> int:
+    """Virtual ms (a row's at_ms, maybe fractional) as whole us: rounded, so
+    a time written as us / 1000 (a recorded session's) comes back exact."""
+    return round(float(ms) * 1000)
+
+
+def execute_run(sim, scenario: dict, trace: TraceWriter, *,
+                cancelled: Callable[[], bool] = lambda: False,
+                progress: Callable[[int], None] = lambda us: None,
+                state_view: bool = False, session=None, debug_hub=None, logs=None) -> dict:
+    """execute_scenario, and every board a live session debugged let go
+    before the Sim stops (docs/debugger.md). debug_hub: makes the session's
+    DebugHub from the Sim (a test's fake; default vhil.gdb.DebugHub)."""
+    hub: dict = {"dbg": None}
+    try:
+        return execute_scenario(sim, scenario, trace, cancelled=cancelled, progress=progress,
+                                state_view=state_view, session=session, debug_hub=debug_hub,
+                                hub=hub, logs=logs)
+    finally:
+        if hub["dbg"] is not None:
+            hub["dbg"].close_all()
+
+
+def execute_scenario(sim, scenario: dict, trace: TraceWriter, *,
+                     cancelled: Callable[[], bool] = lambda: False,
+                     progress: Callable[[int], None] = lambda us: None,
+                     state_view: bool = False, session=None, debug_hub=None,
+                     hub: Optional[dict] = None, logs=None) -> dict:
+    """Drive a started Sim through a `run` scenario (runs.RunScenario as a
+    dict); returns the summary. Times in the scenario are virtual time from
+    the system's power-on. Raises Cancelled when `cancelled()` turns true at
+    a slice boundary. With `state_view`, the symbols and pins of every
+    board's state view (vhil/stateview.py) are recorded too, as the web app's
+    runs do for their state panel.
+
+    With `session` (a live session: LiveSession, vhil/server/session.py),
+    at every slice boundary the pending ops are taken in order: a stimulus is
+    scheduled at the end of the slice about to run, exactly as a scenario row
+    at that time is, and written into the trace as an `op` record at that
+    time; pause holds virtual time where it is until resume; stop ends the run
+    at that slice's end; an idle session (no op for session.idle_s) stops as
+    a stop does. Each slice also writes a `clock` record, and the session
+    paces virtual time to wall time.
+
+    A session's `debug` ops attach GDB to a board and drive it (vhil/gdb.py,
+    docs/debugger.md): with a debugger attached each slice's RunFor runs in a
+    thread, and when a board stops (a breakpoint, a step) the whole system
+    is held where it is, the stop is written into the trace with a paused
+    `clock` record, and debug ops and controls are taken until every board
+    runs again; stimuli wait for the next slice boundary.
+
+    With `logs` (vhil/runlog.py RunLogs), what Renode and the boards' UARTs
+    said is read at every slice boundary and written in that slice, stamped
+    with its end; the caller drains the rest (RunLogs.finish) when the Sim
+    stops."""
+    end_us = int(scenario["virtual_ms"]) * 1000
+    slice_us = int(scenario.get("slice_ms", 100)) * 1000
+    system = sim.system
+    frames = {bus: 0 for bus in system.buses}     # received from the bus
+    sent = {bus: 0 for bus in system.buses}       # the scenario's own CAN stimuli
+    loads: dict[str, list[float]] = {bus: [] for bus in system.buses}
+    counts = {"edges": 0, "samples": 0}
+
+    # Timed actions: (t_us, seq, fn). CAN frames are scheduled in the probe
+    # up front (exact virtual time); GPIO and analog are applied when time
+    # reaches them, so the run stops there first.
+    events: list = []
+    seq = 0
+
+    def at(t_us: int, fn) -> None:
+        nonlocal seq
+        heapq.heappush(events, (t_us, seq, fn))
+        seq += 1
+
+    # A CAN stimulus is in the trace as the frames the probe sent, stamped
+    # when they went out (`src: "stimulus"`, CanBus.sent); a periodic
+    # sender's start and stop and every other stimulus as log records (and a
+    # live op as an `op` record too), written in the slice that reaches them.
+    notes: list = []
+
+    def note(t_us: int, text) -> None:
+        nonlocal seq
+        rec = text if isinstance(text, dict) else {"kind": "log", "t_us": t_us, "text": text,
+                                                   "source": "scenario"}
+        heapq.heappush(notes, (t_us, seq, rec))
+        seq += 1
+
+    def gpio_target(board: str, pin: str) -> tuple[str, int]:
+        _, kind, target = system.resolve(f"{board}.{pin}")
+        if kind != "gpio":
+            raise ValueError(f"{board}.{pin} is {kind}, not gpio")
+        return target["port"], target["pin"]
+
+    pin_names: dict[tuple[str, str], str] = {}     # (board, "port:pin") -> "PB4"
+    # Symbols are sampled inside the emulation (BoardIO.sample), so a run
+    # stops only at its slices and stimuli; each slice collects what was
+    # sampled in it. The emulation samples at its sync points (every
+    # time.quantum_s): a time between two is sampled, and stamped, at the
+    # next. Stopping the run there instead, as this loop once did, moved
+    # every later sync point of the emulation, and with it when the
+    # firmware's frames went out.
+    samplers: list = []                            # [first_t_us, period_us, watch], to start
+    sampled_order: dict[tuple[str, str], int] = {}  # (board, name) -> its order at one time
+    initial: list[dict] = []                       # pin levels as watching starts
+    edge_boards: set[str] = set()
+
+    def watch_pin(board: str, name: str, level: bool = True) -> None:
+        """Record a pin's edges from now on, with its level now as an
+        `initial` edge when `level` (what a value needs before the first edge)."""
+        port, pin = gpio_target(board, name)
+        io = sim.io(board)
+        key = io.watch(port, pin)
+        pin_names.setdefault((board, key), name)
+        edge_boards.add(board)
+        if level:
+            initial.append({"kind": "edge", "t_us": sim.now_us(), "board": board,
+                            "pin": pin_names[(board, key)], "level": int(io.level(key)),
+                            "initial": True})
+
+    stimuli = scenario.get("stimuli", [])
+    # A named can_periodic's sender, for the stop_periodic that names it.
+    periodic = {s["name"]: (s["bus"], f"stim{i}", s["id"]) for i, s in enumerate(stimuli)
+                if s["kind"] == "can_periodic" and s.get("name")}
+
+    # Every stimulus takes effect at a sync point (docs/scenarios.md,
+    # "Times"). The probe sends a CAN frame at the first one at or after its
+    # time anyway (vhil/sim.py, #130); a pin, a voltage, a periodic's stop or
+    # a watch's start stops the run at its time, and a stop between two sync
+    # points moved every later one, and with them when the firmware's frames
+    # went out: a different run (#183 for samples). So a time between two is
+    # moved to the next, said in the trace and in the summary's `aligned`.
+    quantum_us = system.sync_quantum_us()
+    aligned: list[dict] = []
+
+    def on_grid(t_us: int, where: str) -> int:
+        g = -(-t_us // quantum_us) * quantum_us
+        if g != t_us:
+            aligned.append({"row": where, "at_us": t_us, "applied_us": g})
+            note(g, f"{where}: {t_us / 1000:g} ms is between sync points (every "
+                    f"{quantum_us / 1000:g} ms): applied at {g / 1000:g} ms")
+        return g
+
+    def schedule(s: dict, t_us: int, key: str, where: Optional[str] = None) -> None:
+        """One stimulus at virtual time t_us (a scenario row's, or a live op's
+        at the end of the coming slice), moved to the next sync point if it
+        falls between two; `key` names a periodic's sender, `where` the row
+        (for the trace)."""
+        where = where or key
+        t_us = on_grid(t_us, f"{where}.at_ms" if where.startswith("stimuli") else where)
+        kind = s["kind"]
+        what = f"stimulus {kind}"
+        if kind in ("can_send", "can_periodic"):
+            what += f" {s['bus']} 0x{s['id']:X} [{s.get('data', '')}]"
+        if kind == "can_send":
+            sim.can(s["bus"]).send_at(t_us, s["id"], bytes.fromhex(s.get("data", "")),
+                                      s.get("ext", False))
+        elif kind == "can_periodic":
+            bus = sim.can(s["bus"])
+            # SendPeriodic's start 0 means "now", which is the same thing at t=0.
+            bus.send_periodic(key, s["id"], bytes.fromhex(s.get("data", "")), s["period_ms"],
+                              start_us=t_us, extended=s.get("ext", False))
+            note(t_us, f"{what} every {s['period_ms']} ms")
+            if s.get("until_ms") is not None:
+                until = on_grid(_us(s["until_ms"]), f"{where}.until_ms")
+                at(until, lambda bus=bus, key=key: bus.stop_periodic(key))
+                note(until, f"{what} stopped")
+        elif kind == "stop_periodic":
+            bus_name, pkey, can_id = periodic[s["periodic"]]
+            at(t_us, lambda bus=sim.can(bus_name), key=pkey: bus.stop_periodic(key))
+            note(t_us, f"{what} {s['periodic']} ({bus_name} 0x{can_id:X})")
+        elif kind == "gpio":
+            port, pin = gpio_target(s["board"], s["pin"])
+            at(t_us, lambda b=s["board"], port=port, pin=pin, lv=s["level"]:
+               sim.io(b).set_input(port, pin, lv))
+            note(t_us, f"{what} {s['board']}.{s['pin']} = {int(s['level'])}")
+        elif kind == "analog":
+            at(t_us, lambda b=s["board"], pin=s["pin"], v=s["volts"]: sim.io(b).set_voltage(pin, v))
+            note(t_us, f"{what} {s['board']}.{s['pin']} = {s['volts']} V")
+        elif kind == "plant":
+            if s["plant"] not in plants:
+                raise ValueError(f"no plant '{s['plant']}' in {system.id}")
+
+            def set_plant(p=plants[s["plant"]], values=dict(s["set"]), t=t_us):
+                p.apply(values, t)
+                plant_due["now"] = True
+            at(t_us, set_plant)
+            note(t_us, f"{what} {s['plant']}: " + ", ".join(f"{k}={v}" for k, v in s["set"].items()))
+        elif kind == "watch":
+            # Mid-run (a live session's op too): from at_ms to the run's end.
+            if s.get("symbol"):
+                w = {"kind": "symbol", "board": s["board"], "name": s["symbol"],
+                     "size": s.get("size") or symbol_size(sim, s["board"], s["symbol"]),
+                     "period_ms": s.get("period_ms") or 10}
+                at(t_us, lambda w=w, t=t_us: samplers.append([t, _us(w["period_ms"]), w]))
+                note(t_us, f"{what} {s['board']}.{s['symbol']} every {w['period_ms']:g} ms")
+            else:
+                gpio_target(s["board"], s["pin"])          # refused now, not mid-run
+                at(t_us, lambda b=s["board"], p=s["pin"]: watch_pin(b, p))
+                note(t_us, f"{what} {s['board']}.{s['pin']}")
+        else:
+            raise ValueError(f"unknown stimulus kind '{kind}'")
+
+    # -- the system's plants (docs/m8-plan.md) ---------------------------------------
+    # Event-driven on the co-simulation port: stepped at the start, when an
+    # armed coil edge ends a run early (Sim.run_until_trigger), when a stimulus
+    # was applied, and at the plant's own next_us; never every slice.
+    plants: dict = {}
+    port = None
+    plant_due = {"now": False}
+    plant_state: dict[str, dict] = {}       # plant -> its state as last recorded
+    if getattr(system, "plants", None):
+        from vhil.cosim import Port
+        from vhil.plant_ts import make_plants, uncommissioned
+        plants = make_plants(system, sim)
+        port = Port(sim)
+        for sname, sig in port.signals.items():
+            if sig.kind == "gpio_out":
+                board, pin = sig.spec.split(".", 1)
+                _, _, target = system.resolve(sig.spec)
+                pin_names.setdefault((board, f"{target['port']}:{target['pin']}"), pin)
+        for p in plants.values():
+            for sname in p.triggers(port):
+                port.arm(sname)
+        plant_due["now"] = True
+        for pname, p in plants.items():
+            note(sim.now_us(), f"plant {pname}: {system.plants[pname]['plant']}; uncommissioned "
+                               f"(no car log): {', '.join(uncommissioned(p.params))}")
+
+    for i, s in enumerate(stimuli):
+        schedule(s, _us(s.get("at_ms", 0)), f"stim{i}", f"stimuli[{i}]")
+
+    for w in scenario.get("watch", []):
+        if w["kind"] == "pin":
+            watch_pin(w["board"], w["pin"], level=False)
+        elif w["kind"] == "symbol":
+            samplers.append([0, _us(w.get("period_ms", 10)), w])
+        else:
+            raise ValueError(f"unknown watch kind '{w['kind']}'")
+    # What the expects read (vhil/expect.py): their pins are watched, with
+    # the level at the start written as an `initial` edge (an expect needs a
+    # pin's value before its first edge), and their symbols sampled every
+    # 10 ms unless a watch already samples them.
+    expects = scenario.get("expect", [])
+    for board, name in vexpect.pins(expects):
+        watch_pin(board, name)
+    sampled = {(w["board"], w["name"]) for w in scenario.get("watch", []) if w["kind"] == "symbol"}
+    for board, name in vexpect.symbols(expects):
+        if (board, name) not in sampled:
+            sampled.add((board, name))
+            samplers.append([0, 10_000, {"kind": "symbol", "board": board, "name": name,
+                                         "size": symbol_size(sim, board, name)}])
+    if state_view:
+        # Every board's state view: its pins from power-on with their level,
+        # its symbols at the item's period (those the image lacks, an older
+        # firmware's, are left out and said so).
+        view_symbols, view_pins = stateview.watches(system)
+        watched = set(vexpect.pins(expects))
+        for board, name in view_pins:
+            if (board, name) not in watched:
+                watch_pin(board, name)
+        missing = []
+        for board, name, period_ms in view_symbols:
+            if (board, name) in sampled:
+                continue
+            if not has_symbol(sim, board, name):
+                missing.append(f"{board}.{name}")
+                continue
+            sampled.add((board, name))
+            samplers.append([0, _us(period_ms), {"kind": "symbol", "board": board,
+                                                 "name": name,
+                                                 "size": symbol_size(sim, board, name)}])
+        if missing:
+            note(sim.now_us(), "state view: not in the firmware, not recorded: "
+                               + ", ".join(missing))
+
+    # -- a live session's ops ------------------------------------------------------
+    live = {"paused": False, "stop": None, "applied": 0, "refused": 0}
+    # Periodic names a live session started (a recording's rows must stay a
+    # valid scenario: one name, one periodic) and those still running.
+    used = set(periodic)
+    running: set[str] = set()
+
+    def apply(row: dict, now: int, t_us: int) -> tuple[str, Optional[int], str]:
+        """One op: (applied | refused, its virtual time, detail)."""
+        op = row["op"]
+        kind = op["kind"]
+        if kind in ("pause", "resume"):
+            live["paused"] = kind == "pause"
+            session.rebase(now)
+            return "applied", now, ""
+        if kind == "stop":
+            live["stop"] = live["stop"] or "op"
+            return "applied", t_us, ""
+        if kind == "keepalive":
+            return "applied", now, ""
+        if live["stop"]:
+            return "refused", None, "the session is stopping"
+        try:
+            if kind in ("can_send", "can_periodic") and op["bus"] not in system.buses:
+                raise ValueError(f"no bus '{op['bus']}' in {system.id}")
+            if kind == "can_periodic":
+                if op["name"] in used:
+                    raise ValueError(f"a periodic named '{op['name']}' ran in this session already")
+                if len(running) >= session.max_periodic:
+                    raise ValueError(f"{len(running)} periodic senders run already, this "
+                                     "server's limit (VHIL_LIVE_MAX_PERIODIC)")
+                periodic[op["name"]] = (op["bus"], f"live{row['id']}", op["id"])
+                used.add(op["name"])
+                running.add(op["name"])
+            elif kind == "stop_periodic":
+                if op["periodic"] not in running:
+                    raise ValueError(f"no periodic named '{op['periodic']}' is running")
+                running.discard(op["periodic"])
+            elif kind == "gpio" and f"{op['board']}.{op['pin']}" in system.plant_driven_pins():
+                raise ValueError(f"{op['board']}.{op['pin']} is driven by plant "
+                                 f"'{system.plant_driven_pins()[op['board'] + '.' + op['pin']]}': "
+                                 "set its inputs instead")
+            elif kind == "analog":
+                _, pkind, _ = system.resolve(f"{op['board']}.{op['pin']}")
+                if pkind != "analog":
+                    raise ValueError(f"{op['board']}.{op['pin']} is {pkind}, not analog")
+            elif kind == "plant":
+                # Refused here, not mid-run when the plant applies it.
+                if op["plant"] not in plants:
+                    raise ValueError(f"no plant '{op['plant']}' in {system.id}")
+                from vhil.plant_ts import settable
+                bad = sorted(set(op["set"]) - settable(system.plants[op["plant"]]["plant"]))
+                if bad:
+                    raise ValueError(f"plant '{op['plant']}' has no fault or parameter "
+                                     f"{', '.join(bad)}")
+                # A value the plant can't take (r_leak 0, a word for a
+                # number) would end the run where it applies: tried on a copy.
+                trial = copy.deepcopy(plants[op["plant"]])
+                try:
+                    trial.apply(op["set"], t_us)
+                except (TypeError, ValueError, ZeroDivisionError) as e:
+                    raise ValueError(f"plant '{op['plant']}': {e}") from None
+            elif kind == "watch" and op.get("symbol") and getattr(sim, "firmware", None) \
+                    and not has_symbol(sim, op["board"], op["symbol"]):
+                raise ValueError(f"no symbol {op['symbol']} in {op['board']}'s image")
+            schedule(op, t_us, f"live{row['id']}", f"op {row['id']}")
+        except (KeyError, ValueError, SystemError) as e:
+            return "refused", None, str(e).strip("'\"")
+        return "applied", t_us, ""
+
+    # -- a live session's debugger (docs/debugger.md) ---------------------------------
+    hub = {"dbg": None} if hub is None else hub
+    inflight: set[int] = set()      # deferred debug ops, settled when the board stops
+
+    def debugger():
+        if hub["dbg"] is None:
+            if debug_hub is not None:
+                hub["dbg"] = debug_hub(sim)
+            else:
+                from vhil.gdb import DebugHub
+                hub["dbg"] = DebugHub(sim, Path(tempfile.mkdtemp(prefix="vhil-gdb-")))
+        return hub["dbg"]
+
+    def debug_op(row: dict, now: int, held: bool) -> tuple[Optional[tuple], list[dict]]:
+        """A `debug` op: (its settlement or None when deferred, trace records)."""
+        from vhil.gdb import DEFERRED, QUERY_CMDS
+        op = row["op"]
+        if live["stop"]:
+            status, result, detail, recs = "refused", None, "the session is stopping", []
+        else:
+            status, result, detail, recs = debugger().apply(op, now, held=held,
+                                                           paused=live["paused"], row=row)
+        if status == DEFERRED:
+            inflight.add(row["id"])
+            return None, recs
+        live["applied" if status == "applied" else "refused"] += 1
+        if op["cmd"] not in QUERY_CMDS or status != "applied":
+            rec = {"kind": "op", "t_us": now, "op_id": row["id"], "op": op, "status": status,
+                   "login": row.get("login", "")}
+            if detail:
+                rec["detail"] = detail
+            recs = [rec] + recs
+        return (row["id"], status, now if status == "applied" else None, detail, result), recs
+
+    def settle_deferred(settled: list, now: int) -> list[dict]:
+        """Deferred debug ops the hub settled: into the DB; their op records."""
+        out, rows = [], []
+        for row, status, result, detail in settled:
+            inflight.discard(row.get("id"))
+            live["applied" if status == "applied" else "refused"] += 1
+            rows.append((row["id"], status, now if status == "applied" else None, detail, result))
+            rec = {"kind": "op", "t_us": now, "op_id": row["id"], "op": row["op"],
+                   "status": status, "login": row.get("login", "")}
+            if detail:
+                rec["detail"] = detail
+            out.append(rec)
+        session.settle(rows)
+        return out
+
+    def take_ops(now: int, t_us: int) -> None:
+        """The pending ops, applied in order; their records into the trace (a
+        stimulus's at its time, in the slice that reaches it)."""
+        settled, now_records = [], []
+        for row in session.take(now):
+            if row["id"] in inflight:
+                continue
+            if row["op"]["kind"] == "debug":
+                s, recs = debug_op(row, now, held=False)
+                if s is not None:
+                    settled.append(s)
+                now_records += recs
+                continue
+            status, applied_at, detail = apply(row, now, t_us)
+            live["applied" if status == "applied" else "refused"] += 1
+            settled.append((row["id"], status, applied_at, detail))
+            rec = {"kind": "op", "t_us": applied_at if applied_at is not None else now,
+                   "op_id": row["id"], "op": row["op"], "status": status,
+                   "login": row.get("login", "")}
+            if detail:
+                rec["detail"] = detail
+            if status == "applied" and row["op"]["kind"] in STIMULUS_KINDS + ("stop",):
+                note(t_us, rec)
+            else:
+                now_records.append(rec)
+        session.settle(settled)
+        if now_records:
+            trace.write(now_records)
+
+    def live_boundary(now: int, t_us: int) -> None:
+        """A live session's slice boundary: ops, pause, idle, pacing."""
+        while True:
+            was = live["paused"]
+            take_ops(now, t_us)
+            if live["paused"] != was:
+                trace.write([session.clock(now, paused=live["paused"])])
+            if not live["stop"] and session.idle():
+                live["stop"] = "idle"
+                trace.write([{"kind": "log", "t_us": now, "source": "session",
+                              "text": f"live session idle for {session.idle_s:g} s: stopping"}])
+            if live["stop"] or not live["paused"]:
+                break
+            session.wait()
+            progress(now)
+            if cancelled():
+                raise Cancelled({"frames": frames, "sent": sent, **counts,
+                                 "bus_load": load_summary(loads)})
+        session.pace(now, t_us)
+
+    def held(now: int, busy: bool) -> None:
+        """Service the debuggers; while a board is stopped, the system is
+        held (a halted CPU holds Renode's time source, so every board stops
+        at the next sync point and no firmware timeout fires): show the stop,
+        take the debug ops and the controls until every board runs again.
+        `busy`: a RunFor waits on the stopped board, so the monitor is busy
+        and stimuli wait for the next slice boundary."""
+        dbg = hub["dbg"]
+        settled, recs, shown = dbg.service(now)
+        recs = settle_deferred(settled, now) + recs
+        if not dbg.stopped():
+            if recs:
+                trace.write(recs)
+            return
+        while True:
+            for board, stop in shown:
+                recs.append(dbg.stop_record(now, board, stop))
+            if shown:
+                recs.append({**session.clock(now, paused=True), "debug": dbg.where()})
+            if recs:
+                trace.write(recs)
+            recs, shown = [], []
+            if not dbg.stopped():
+                break
+            out = []
+            for row in session.take(now):
+                kind = row["op"]["kind"]
+                if row["id"] in inflight or kind not in ("debug", "stop", "resume", "pause",
+                                                         "keepalive"):
+                    continue        # a stimulus waits for the next boundary
+                if kind == "debug":
+                    s, r = debug_op(row, now, held=busy)
+                    if s is not None:
+                        out.append(s)
+                    recs += r
+                    continue
+                if kind == "stop":
+                    dbg.close_all()
+                    live["stop"] = live["stop"] or "op"
+                    recs.append({"kind": "debug", "t_us": now, "board": "", "event": "detached"})
+                elif kind == "resume":
+                    live["paused"] = False
+                    dbg.resume_all()
+                elif kind == "pause":
+                    live["paused"] = True        # held after the board goes on too
+                live["applied"] += 1
+                out.append((row["id"], "applied", now, ""))
+                recs.append({"kind": "op", "t_us": now, "op_id": row["id"], "op": row["op"],
+                             "status": "applied", "login": row.get("login", "")})
+            session.settle(out)
+            if not live["stop"] and session.idle():
+                live["stop"] = "idle"
+                dbg.close_all()
+                recs.append({"kind": "log", "t_us": now, "source": "session",
+                             "text": f"live session idle for {session.idle_s:g} s: stopping"})
+            if dbg.stopped():
+                session.wait()
+                progress(now)
+                if cancelled():
+                    dbg.close_all()
+                    raise Cancelled({"frames": frames, "sent": sent, **counts,
+                                     "bus_load": load_summary(loads)})
+            settled, more, shown = dbg.service(now)
+            recs += settle_deferred(settled, now) + more
+        trace.write(recs + [{"kind": "debug", "t_us": now, "board": "", "event": "running"},
+                            session.clock(now, paused=live["paused"])])
+        session.rebase(now)
+
+    def run_slice(now: int, us: int) -> int:
+        """sim.run_for, or with a debugger attached, RunFor in a thread while
+        this one services the debuggers (a stopped board holds it)."""
+        if hub["dbg"] is None or not hub["dbg"].active():
+            return sim.run_until_trigger(us) if plants else sim.run_for(us=us)
+        box: dict = {}
+
+        def body() -> None:
+            try:
+                box["t"] = sim.run_for(us=us)
+            except BaseException as e:  # noqa: BLE001 - raised in this thread below
+                box["e"] = e
+
+        th = threading.Thread(target=body, name="run-for", daemon=True)
+        th.start()
+        try:
+            while True:
+                th.join(0.02)
+                if hub["dbg"].active():
+                    held(now, busy=th.is_alive())
+                if not th.is_alive():
+                    break
+        finally:
+            if th.is_alive():
+                hub["dbg"].close_all()      # an error or a cancel: let the board go
+                th.join(60)
+        if "e" in box:
+            raise box["e"]
+        return box["t"]
+
+    def start_samplers(now: int) -> None:
+        for first, period, w in samplers:
+            sampled_order.setdefault((w["board"], w["name"]), len(sampled_order))
+            sim.io(w["board"]).sample(w["name"], w.get("size", 1), period, first, now)
+        samplers.clear()
+
+    now = sim.now_us()
+    since = now          # frames/edges from here on belong to the next slice
+    slice_end = now + slice_us
+    batch: list[dict] = []        # this slice's records, written when it ends
+    if logs is not None:
+        trace.write(logs.poll(now, sim))     # what the system said as it started
+    if session is not None:
+        session.rebase(now)
+        live_boundary(now, slice_end)
+    while True:
+        while events and events[0][0] <= now:
+            heapq.heappop(events)[2]()
+            plant_due["now"] = True
+        if plants and (plant_due["now"] or any(p.next_us is not None and now >= p.next_us
+                                               for p in plants.values())):
+            for p in plants.values():
+                p.step(port, now)
+            plant_due["now"] = False
+        start_samplers(now)
+        slice_done = now >= slice_end or now >= end_us
+        if slice_done:
+            # A slice's samples first at each time, in the order their
+            # samplers started, as when the run stopped to read them.
+            samples = [(t, sampled_order[(board, name)], board, name, value)
+                       for board in sorted({b for b, _ in sampled_order})
+                       for t, name, value in sim.io(board).samples(now)]
+            for t, _, board, name, value in sorted(samples):
+                batch.append({"kind": "sample", "t_us": t, "board": board, "name": name,
+                              "value": value})
+                counts["samples"] += 1
+            for bus in system.buses:
+                seen = sim.can(bus).frames(since_us=since)
+                mine = sim.can(bus).sent(since_us=since)
+                for f in seen:
+                    batch.append({"kind": "frame", "t_us": f.t_us, "bus": bus, "id": f.id,
+                                  "ext": f.extended, "data": f.data.hex()})
+                    frames[bus] += 1
+                for f in mine:
+                    batch.append({"kind": "frame", "t_us": f.t_us, "bus": bus, "id": f.id,
+                                  "ext": f.extended, "data": f.data.hex(), "src": "stimulus"})
+                    sent[bus] += 1
+                if now >= since:
+                    record = bus_load(sim, bus, since, now + 1, seen + mine)
+                    loads[bus].append(record["load"])
+                    batch.append(record)
+            batch += initial
+            initial.clear()
+            for board in sorted(edge_boards):
+                for e in sim.io(board).edges(since_us=since):
+                    batch.append({"kind": "edge", "t_us": e.t_us, "board": board,
+                                  "pin": pin_names.get((board, e.pin), e.pin), "level": int(e.level)})
+                    counts["edges"] += 1
+            # What each radio sent (docs/integration-contract.md, `radio`).
+            for device, board in system.radios():
+                for p in sim.radio(device).payloads(since_us=since):
+                    batch.append({"kind": "radio", "t_us": p.t_us, "board": board,
+                                  "device": device, "payload": p.data.hex()})
+            for pname, p in plants.items():
+                batch += p.records(pname, now)
+                # Its state for the editor's panel (docs/scenarios.md,
+                # "Signals"): what changed since the last slice, all at the
+                # first; a plant kind without `state` records none.
+                if hasattr(p, "state"):
+                    last = plant_state.setdefault(pname, {})
+                    for key, value in p.state(now).items():
+                        if key not in last or last[key] != value:
+                            last[key] = value
+                            batch.append({"kind": "plant", "t_us": now, "plant": pname,
+                                          "name": key, "value": value})
+            while notes and notes[0][0] <= now:
+                batch.append(heapq.heappop(notes)[2])
+            if logs is not None:
+                batch += logs.poll(now, sim)
+            if session is not None:
+                batch.append(session.clock(now))
+            since = now + 1
+            slice_end = now + slice_us
+            # Everything in a slice lies in (previous end, now], so the file
+            # stays in virtual-time order across slices.
+            trace.write(batch)
+            batch = []
+            progress(now)
+            if now >= end_us:
+                break
+            if cancelled():
+                raise Cancelled({"frames": frames, "sent": sent, **counts,
+                                 "bus_load": load_summary(loads)})
+            if session is not None:
+                live_boundary(now, slice_end)
+                if live["stop"]:
+                    # The ops already scheduled take effect: the run ends at
+                    # the end of the slice they were scheduled for.
+                    end_us = min(end_us, slice_end)
+        target = min([end_us, slice_end] + ([events[0][0]] if events else [])
+                     + [p.next_us for p in plants.values() if p.next_us is not None and p.next_us > now])
+        new = run_slice(now, max(target - now, 1))
+        if new <= now:
+            raise RuntimeError(f"virtual time stuck at {now} us")
+        if plants and getattr(sim, "triggered", False):
+            plant_due["now"] = True             # an armed coil edge ended the run
+        now = new
+    summary = {"virtual_ms": scenario["virtual_ms"], "frames": frames, "sent": sent, **counts,
+               "bus_load": load_summary(loads)}
+    if plants:
+        summary["plants"] = {n: {"plant": system.plants[n]["plant"], "steps": p.steps,
+                                 "uncommissioned": uncommissioned(p.params)}
+                             for n, p in plants.items()}
+    if aligned:
+        summary["aligned"] = aligned
+    if session is not None:
+        summary.update(virtual_ms=math.ceil(now / 1000), stopped=live["stop"] or "end",
+                       ops_applied=live["applied"], ops_refused=live["refused"])
+    return summary
+
+
+def bus_load(sim, bus: str, from_us: int, to_us: int, frames) -> dict:
+    """A `bus_load` trace record for [from_us, to_us): the bus model's busy
+    time on an arbitrated bus, else an estimate from the frames the probe saw
+    and sent there (Renode's hub has no timing; vhil/canframe.py)."""
+    can = sim.can(bus)
+    if can.arbitrated:
+        load, exact = can.load(from_us, to_us), True
+    else:
+        load, exact = canframe.load(frames, to_us - from_us), False
+    return {"kind": "bus_load", "t_us": to_us - 1, "bus": bus, "load": round(load, 4),
+            "window_us": to_us - from_us, "exact": exact}
+
+
+def load_summary(loads: dict[str, list[float]]) -> dict:
+    """bus -> {mean, peak} of its per-slice loads."""
+    return {bus: {"mean": round(sum(v) / len(v), 4), "peak": max(v)}
+            for bus, v in loads.items() if v}
+
+
+STIMULUS_KINDS = ("can_send", "can_periodic", "stop_periodic", "gpio", "analog", "watch", "plant")
+
+
+def has_symbol(sim, board: str, name: str) -> bool:
+    """Whether the board's image (sim.firmware) has the global."""
+    path = (getattr(sim, "firmware", None) or {}).get(board)
+    if path is None:
+        return False
+    from vhil import elf
+    try:
+        elf.symbol(path, name)
+    except (OSError, KeyError, ValueError):
+        return False
+    return True
+
+
+def symbol_size(sim, board: str, name: str) -> int:
+    """How many bytes to sample a symbol an expect reads: its size in the
+    board's ELF if 1, 2 or 4 (an enum or a counter), else 1."""
+    path = (getattr(sim, "firmware", None) or {}).get(board)
+    if path is None:
+        return 1
+    from vhil import elf
+    try:
+        size = elf.symbol(path, name)[1]
+    except (OSError, KeyError, ValueError):
+        return 1
+    return size if size in (1, 2, 4) else 1
+
+
+def evaluate_expects(run_dir: Path, scenario: dict, system: System, firmware: dict,
+                     end_us: int, trace: TraceWriter) -> dict:
+    """The scenario's expects (vhil/expect.py) over the run's trace: the
+    summary's `expects`, and one log line each at the run's end."""
+    from vhil.server.decode import system_contract
+    elfs = {b: Path(p) for b, p in firmware.items() if "." not in b and b in system.boards}
+    contract = system_contract(system, elfs)
+    results = vexpect.evaluate_trace(run_dir / TRACE, scenario["expect"], contract, end_us)
+    def verdict(r: dict) -> str:
+        if r.get("xfail"):
+            return (f"XFAIL ({r['xfail']})" if not r["passed"]
+                    else f"XPASS, FAILED: {r['xfail']} no longer reproduces")
+        return "passed" if r["passed"] else "FAILED"
+    trace.write([{"kind": "log", "t_us": end_us, "source": "scenario",
+                  "level": "info" if vexpect.ok(r) else "error",
+                  "text": f"expect {verdict(r)} "
+                          f"{r['name'] or r['check']} {r['signal']}: {r['detail']}"}
+                 for r in results])
+    return vexpect.summary(results)
+
+
+# -- the `pytest` scenario -----------------------------------------------------------
+
+def junit_summary(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    root = ET.parse(path).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    out = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    for s in suites:
+        for k in out:
+            out[k] += int(s.get(k, 0))
+    return out
+
+
+def image_env(system: System, firmware: dict[str, Path]) -> dict[str, str]:
+    """VHIL_<X>_ELF as tests/conftest.py reads them: board name for an app,
+    firmware id for a bootloader (VHIL_CAN_BOOTLOADER_ELF)."""
+    env = {}
+    for key, elf in firmware.items():
+        board, _, part = key.partition(".")
+        name = system.boards[board].bootloader["id"] if part == "bootloader" else board
+        env[f"VHIL_{name.upper().replace('-', '_')}_ELF"] = str(elf)
+    return env
+
+
+def execute_pytest(scenario: dict, run_dir: Path, workspace: Path, env: dict,
+                   trace: TraceWriter, cancelled: Callable[[], bool],
+                   max_output_bytes: Optional[int] = None,
+                   limit: Optional[runlog.RateLimit] = None) -> tuple[str, dict]:
+    """Run the scenario's pytest selection; its output goes to pytest.txt
+    and, rate-limited, into the trace as it comes (`pytest`, vhil/runlog.py)."""
+    junit = run_dir / "junit.xml"
+    cmd = [sys.executable, "-m", "pytest", scenario["select"], "-v", "-p", "no:cacheprovider",
+           "--sim-log-dir", str(run_dir / "sim-logs"), f"--junitxml={junit}"]
+    trace.log(0, "$ " + " ".join(cmd))
+    deadline = time.monotonic() + scenario.get("timeout_s", 3600)
+    limit = limit or runlog.RateLimit()
+    tail = runlog.FileTail(run_dir / "pytest.txt")
+
+    def stream(lines: list[str]) -> None:
+        recs = limit([runlog.record(0, line, "pytest", runlog.level_of(line),
+                                    wall_s=runlog.wall()) for line in lines if line.strip()])
+        if recs:
+            trace.write(recs)
+
+    with open(run_dir / "pytest.txt", "w") as out:
+        proc = subprocess.Popen(cmd, cwd=workspace, env={**os.environ, **env},
+                                stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        reason = None
+        while proc.poll() is None:
+            try:
+                if cancelled():
+                    reason = "cancelled"
+            except Lost:
+                reason = "lost"     # stop pytest before letting the run go
+            if not reason and time.monotonic() > deadline:
+                reason = "timeout"
+            if not reason and max_output_bytes is not None \
+                    and (run_dir / "pytest.txt").stat().st_size > max_output_bytes:
+                reason = "output"
+            if reason:
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                break
+            stream(tail.lines())
+            time.sleep(1)
+    stream(tail.rest())
+    trace.write(limit.flush(sources=["pytest"]))
+    rc = proc.returncode
+    summary = {"returncode": rc, **junit_summary(junit)}
+    trace.log(0, f"pytest exited {rc}" + (f" ({reason})" if reason else ""))
+    if reason == "lost":
+        raise Lost()
+    if reason == "cancelled":
+        raise Cancelled(summary)
+    if reason == "timeout":
+        return "error", {**summary, "error": f"timed out after {scenario.get('timeout_s')} s"}
+    if reason == "output":
+        return "error", {**summary, "error": f"pytest output passed this server's limit of "
+                                             f"{max_output_bytes >> 20} MiB (VHIL_MAX_OUTPUT_MB)"}
+    if rc == 0:
+        if summary.get("tests") and summary["skipped"] == summary["tests"]:
+            # e.g. no firmware image: nothing was tested, which isn't a pass.
+            return "error", {**summary, "error": "every test was skipped"}
+        return "passed", summary
+    if rc == 1:
+        return "failed", summary
+    return "error", {**summary, "error": f"pytest exited {rc}"}
+
+
+# -- firmware --------------------------------------------------------------------
+
+def image_ref(system: System, key: str, refs: dict) -> tuple[dict, str]:
+    """(catalogue firmware, ref) of an image: the run's ref, else the
+    system's (firmware_ref / bootloader_ref), else the catalogue's."""
+    board, _, part = key.partition(".")
+    b = system.boards[board]
+    fw = b.bootloader if part else b.firmware
+    return fw, refs.get(key) or b.ref("bootloader" if part else "firmware")
+
+
+def resolve_commits(system: System, refs: dict, lister, known: Optional[dict] = None,
+                    log: Callable[[str], None] = lambda m: None) -> dict[str, dict]:
+    """image key -> {"ref", "commit"}: each image's ref and the commit it is
+    at now (git ls-remote through `lister`, fresh), or commit None when it
+    can't be told (the remote unreachable, no such ref; `log` says why).
+    `known` (a run's firmware_commits) is kept for an image whose ref it
+    names with a commit."""
+    from vhil.server.githost import HostError, commit_of, fresh_refs
+    known, out, listed = known or {}, {}, {}
+    for key in system.images():
+        fw, ref = image_ref(system, key, refs)
+        k = known.get(key) or {}
+        if k.get("ref") == ref and isinstance(k.get("commit"), str) and COMMIT.fullmatch(k["commit"]):
+            out[key] = {"ref": ref, "commit": k["commit"]}
+            continue
+        commit = ref if COMMIT.fullmatch(ref) else None
+        if commit is None and lister is not None:
+            if fw["repo"] not in listed:
+                try:
+                    listed[fw["repo"]] = fresh_refs(lister, fw["repo"])
+                except HostError as e:
+                    listed[fw["repo"]] = None
+                    log(f"{key}: can't resolve {ref} to a commit ({e})")
+            if listed[fw["repo"]] is not None:
+                commit = commit_of(listed[fw["repo"]], ref)
+                if commit is None:
+                    log(f"{key}: {fw['repo']} has no branch or tag {ref}")
+        out[key] = {"ref": ref, "commit": commit}
+    return out
+
+
+def run_build(cmd: list[str], on_line: Callable[[str], None] = lambda line: None) -> str:
+    """Run `python -m vhil.system build`: its stdout (the board=elf lines
+    built.txt keeps) returned, its stderr (git, cmake, the compiler: the
+    build's output) handed to `on_line` a line at a time as it comes, so a
+    run's trace shows a build that takes minutes as it goes. A failed build
+    raises CalledProcessError with the output's last lines as its stderr."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            errors="replace", bufsize=1,
+                            env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    out: list[str] = []
+    reader = threading.Thread(target=lambda: out.append(proc.stdout.read()), daemon=True)
+    reader.start()
+    tail: list[str] = []
+    for line in proc.stderr:
+        line = line.rstrip("\r\n")
+        tail = (tail + [line])[-40:]
+        on_line(line)
+    rc = proc.wait()
+    reader.join()
+    if rc:
+        raise subprocess.CalledProcessError(rc, cmd, "".join(out), "\n".join(tail))
+    return "".join(out)
+
+
+class Image(NamedTuple):
+    ref: str
+    path: Path                     # [1], as callers index it
+    commit: Optional[str] = None
+
+
+class FirmwareResolver:
+    """Image key -> ELF for a system at the requested refs and their
+    commits (module doc). `lister` resolves a ref the run has no commit for
+    (default: anonymous git ls-remote; the firmware repos are public)."""
+
+    def __init__(self, fw_dir: Path = DEFAULT_FW_DIR, build: bool = True,
+                 log: Callable[[str], None] = print, lister=None):
+        self.fw_dir, self.build, self.log = Path(fw_dir), build, log
+        self._lister = lister
+
+    @property
+    def lister(self):
+        if self._lister is None:
+            from vhil.server.githost import LsRemote
+            self._lister = LsRemote()
+        return self._lister
+
+    def _built(self) -> dict[Path, str]:
+        return built_images(self.fw_dir)
+
+    def commits(self, system: System, refs: dict, known: Optional[dict] = None,
+                log: Callable[[str], None] = lambda m: None) -> dict[str, dict]:
+        """resolve_commits with this resolver's lister."""
+        return resolve_commits(system, refs, self.lister, known, log)
+
+    def expected(self, system: System, refs: dict,
+                 commits: Optional[dict] = None) -> dict[str, Image]:
+        """key -> (ref, the ELF a run uses, commit): the build of the image's
+        commit (commits: key -> {"ref", "commit"} or a sha) if one is
+        finished, else where a build of it will be; with no commit, the
+        build at the ref name."""
+        built, out = self._built(), {}
+        for key in system.images():
+            fw, ref = image_ref(system, key, refs)
+            c = (commits or {}).get(key)
+            commit = c.get("commit") if isinstance(c, dict) else c
+            if commit:
+                path = find_build(self.fw_dir, fw, commit, built) or \
+                    commit_image_path(self.fw_dir, fw, commit).resolve()
+            else:
+                path = image_path(self.fw_dir, fw, ref).resolve()
+            out[key] = Image(ref, path, commit or None)
+        return out
+
+    def resolve(self, system: System, refs: dict, commits: Optional[dict] = None,
+                on_line: Optional[Callable[[str], None]] = None) -> dict[str, Path]:
+        """`on_line` gets the build's output a line at a time, and a note while
+        another worker's build holds the lock (the worker streams them into
+        the run's trace, `build`)."""
+        say = on_line or (lambda line: None)
+        # Under the reuse lock, a prune can't remove a build between its
+        # lookup here and its last-use mark (vhil.fwprune).
+        with fwprune.reuse_lock(self.fw_dir):
+            want = self.expected(system, refs, commits)
+            built = self._built()
+            missing = [k for k, im in want.items() if im.path not in built or not im.path.is_file()]
+            self._used(system, refs, {k: im for k, im in want.items() if k not in missing})
+        if missing:
+            if not self.build:
+                raise RuntimeError("no built image for " + ", ".join(
+                    f"{k} at {want[k].ref}" + (f" ({want[k].commit[:12]})" if want[k].commit else "")
+                    for k in missing) + f" in {self.fw_dir}/built.txt")
+            self.fw_dir.mkdir(parents=True, exist_ok=True)
+            # One build at a time per firmware directory: a build replaces
+            # its source trees.
+            with open(self.fw_dir / ".build.lock", "w") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    say("waiting for another firmware build on this server to finish")
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                want = self.expected(system, refs, commits)    # another worker may have built it
+                built = self._built()
+                missing = [k for k, im in want.items()
+                           if im.path not in built or not im.path.is_file()]
+                if missing:
+                    cmd = [sys.executable, "-m", "vhil.system", "build", str(system.path),
+                           "--workdir", str(self.fw_dir)]
+                    for key in missing:
+                        cmd += ["--only", key, "--ref", f"{key}={want[key].ref}"]
+                        if want[key].commit:
+                            cmd += ["--commit", f"{key}={want[key].commit}"]
+                    self.log("building firmware: " + " ".join(cmd))
+                    say("building " + ", ".join(
+                        f"{k} at {want[k].ref}" + (f" ({want[k].commit[:12]})" if want[k].commit else "")
+                        for k in missing))
+                    built_out = run_build(cmd, say)
+                    with open(self.fw_dir / "built.txt", "a") as f:
+                        f.write(built_out)
+        # A commit build remembers each name it was run as (vhil.system
+        # newest_build: the editor's contract before a run).
+        for key, im in want.items():
+            if im.commit:
+                self._stamp(system, key, refs, im)
+        self._used(system, refs, want)
+        out = {k: im.path for k, im in want.items()}
+        for k, p in out.items():
+            if not p.is_file():
+                raise RuntimeError(f"firmware build gave no {k} image at {p}")
+        return out
+
+    def _used(self, system: System, refs: dict, images: dict[str, Image]) -> None:
+        """Mark each commit build in `images` used now (what a prune keeps by)."""
+        for key, im in images.items():
+            fw, _ = image_ref(system, key, refs)
+            if im.commit and im.path == commit_image_path(self.fw_dir, fw, im.commit).resolve():
+                fwprune.touch_used(commit_source_dir(self.fw_dir, fw, im.commit))
+
+    def _stamp(self, system: System, key: str, refs: dict, im: Image) -> None:
+        fw, _ = image_ref(system, key, refs)
+        if not self.build or im.path != commit_image_path(self.fw_dir, fw, im.commit).resolve():
+            return               # read-only, or a build at a ref name: no stamp
+        try:
+            stamp_ref(commit_source_dir(self.fw_dir, fw, im.commit), fw, im.commit, im.ref)
+        except OSError as e:
+            self.log(f"{key}: can't stamp its build: {e}")
+
+
+# -- the worker --------------------------------------------------------------------
+
+def _default_sim(system_path: Path, firmware: dict, log_path: Path,
+                 quantum_us: int = GATE_QUANTUM_US):
+    """The run's Sim: Renode's log at `log_path`, and what each board sends
+    on its UARTs in uart/ beside it (vhil/runlog.py streams both), at the
+    run's sync quantum (RunScenario.quantum_us: 500 us, or 1 ms opted in)."""
+    from vhil.sim import Sim
+    return Sim(system_path, firmware, log_path=log_path, uart_log_dir=log_path.parent / "uart",
+               quantum_us=quantum_us)
+
+
+def renode_build() -> str:
+    """The Renode this worker's runs use (RENODE, vhil.bench's default), as
+    vhil.renode.build_id names it: the release and the vHIL's patch set."""
+    from vhil import renode as rn
+    from vhil.bench import DEFAULT_RENODE
+    return rn.build_id(DEFAULT_RENODE)
+
+
+class Worker:
+    def __init__(self, settings: Settings, *, worker_id: Optional[str] = None,
+                 sim_factory: Callable = _default_sim,
+                 resolver: Optional[FirmwareResolver] = None,
+                 heartbeat_s: float = HEARTBEAT_S, reclaim_after_s: float = RECLAIM_AFTER_S,
+                 max_attempts: int = MAX_ATTEMPTS, limits: Optional[Limits] = None,
+                 prune: Optional[fwprune.PrunePolicy] = None):
+        if reclaim_after_s <= 2 * heartbeat_s:
+            raise ValueError("reclaim_after_s must be more than two heartbeats")
+        self.settings = settings
+        self.store = RunStore(settings.db)
+        # Host-network containers share a hostname and are all pid 1.
+        self.id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+        self.sim_factory = sim_factory
+        self.resolver = resolver or FirmwareResolver()
+        self.heartbeat_s, self.reclaim_after_s = heartbeat_s, reclaim_after_s
+        self.max_attempts = max_attempts
+        self.limits = limits or Limits.from_env()
+        self.prune = prune              # None: never prune the firmware volume
+        self._details = None
+
+    def reclaim(self) -> list[dict]:
+        moved = self.store.reclaim(self.reclaim_after_s, self.max_attempts)
+        for r in moved:
+            print(f"run {r['id']}: reclaimed from {r['worker']} after attempt {r['attempts']} "
+                  f"-> {r['state']}", flush=True)
+        return moved
+
+    def run_once(self) -> Optional[int]:
+        """Claim and execute one queued run; its id, or None if none was queued."""
+        self.reclaim()
+        run = self.store.claim(self.id)
+        if run is None:
+            return None
+        run_dir = Path(self.settings.results) / str(run["id"])
+        if run["attempts"] == 1 and run_dir.exists():
+            orphan = set_aside(run_dir)
+            print(f"run {run['id']}: results already at {run_dir} (from before a database "
+                  f"restore?) moved to {orphan}", flush=True)
+        if run["attempts"] > 1 and (run_dir / TRACE).is_file():
+            (run_dir / TRACE).rename(run_dir / f"trace.attempt{run['attempts'] - 1}.jsonl")
+        trace = TraceWriter(run_dir / TRACE, max_bytes=self.limits.max_trace_bytes,
+                            header=trace_header(run))
+        with Heartbeat(self.store, run["id"], self.id, self.heartbeat_s):
+            run_id = self._execute(run, run_dir, trace)
+        self.prune_firmware()
+        return run_id
+
+    def prune_firmware(self, force: bool = False, dry_run: bool = False) -> Optional[fwprune.PruneResult]:
+        """A firmware prune pass (vhil.fwprune) when one is due: at most once
+        per policy interval across every worker sharing the volume. Never
+        fails the caller; a worker that can't build doesn't prune."""
+        policy = self.prune
+        if policy is None or not self.resolver.build:
+            return None
+        fw_dir = self.resolver.fw_dir
+        if not force and not fwprune.due(fw_dir, policy.interval_s):
+            return None
+        log = lambda m: print(m, flush=True)
+        try:
+            if self._details is None:
+                self._details = fwprune.branch_details()
+            result = fwprune.prune(fw_dir, policy, catalog=Path(self.settings.workspace) / "catalog",
+                                   lister=self.resolver.lister, details=self._details,
+                                   db=self.settings.db, active_days=fwprune.active_days(),
+                                   dry_run=dry_run, log=log)
+        except Exception as e:  # noqa: BLE001 - a failed prune never fails a run
+            print(f"firmware prune failed: {type(e).__name__}: {e}", flush=True)
+            return None
+        if result.removed or result.skipped or dry_run:
+            for line in result.report():
+                print(line, flush=True)
+        return result
+
+    def _execute(self, run: dict, run_dir: Path, trace: TraceWriter) -> int:
+        run_id = run["id"]
+        state, virtual_us, summary = "error", 0, {}
+        progress = {"us": 0}
+        session: Optional[LiveSession] = None
+
+        def cancelled() -> bool:
+            """True once cancelled; raises Lost once the run is someone else's."""
+            st, holder = self.store.holder(run_id)
+            if holder != self.id:
+                raise Lost()
+            if st == "cancelled":
+                return True
+            if st != "running":
+                raise Lost()
+            return False
+
+        def on_progress(us: int) -> None:
+            progress["us"] = us
+            self.store.progress(run_id, us, worker=self.id)
+
+        # The run's live logs (vhil/runlog.py): one rate limit for them all.
+        limit = runlog.RateLimit()
+        build_log: dict = {"f": None}
+
+        def build_line(line: str) -> None:
+            """A firmware build's line: into build.log (an artifact) and,
+            rate-limited, into the trace as it comes."""
+            if build_log["f"] is None:
+                build_log["f"] = open(run_dir / "build.log", "a")
+            build_log["f"].write(line + "\n")
+            build_log["f"].flush()
+            trace.write(limit([runlog.record(0, line, "build", runlog.level_of(line),
+                                             wall_s=runlog.wall())]))
+
+        try:
+            if run["attempts"] > 1:
+                prev = (run.get("summary") or {}).get("reclaimed_from") or "a worker"
+                trace.log(0, f"attempt {run['attempts']} of {self.max_attempts}: reclaimed from "
+                             f"{prev}, whose heartbeat stopped")
+            system_path = self._system_file(run, run_dir, trace)
+            system = System(system_path)
+            commits = self.resolver.commits(system, run["firmware"],
+                                            run.get("firmware_commits") or {},
+                                            log=lambda m: trace.log(0, m))
+            unresolved = [k for k, c in commits.items() if not c["commit"]]
+            if unresolved:
+                trace.log(0, f"no commit for {', '.join(unresolved)}: using the build at the "
+                             f"ref name")
+            try:
+                firmware = self.resolver.resolve(system, run["firmware"], commits,
+                                                 on_line=build_line)
+            finally:
+                if build_log["f"] is not None:
+                    build_log["f"].close()
+                    trace.write(limit.flush(sources=["build"]))
+            trace.log(0, f"worker {self.id}; firmware " + ", ".join(
+                f"{k}={p}" + (f" ({commits[k]['ref']} @ {commits[k]['commit'][:12]})"
+                              if commits.get(k, {}).get("commit") else "")
+                for k, p in firmware.items()))
+            scenario = run["scenario"]
+            if scenario["kind"] == "run":
+                if scenario.get("live"):
+                    session = LiveSession(SessionStore(self.settings.db), run_id, self.limits)
+                # The run's sync quantum: the gate's 500 us unless the run
+                # opted in to 1 ms (#348), which only ever is a non-gate run.
+                quantum = quantum_us(scenario.get("quantum_us", GATE_QUANTUM_US))
+                if quantum != GATE_QUANTUM_US:
+                    trace.log(0, f"sync quantum {quantum / 1000:g} ms (opted in, #348): what a "
+                                 f"board sees of another lags by up to {quantum / 1000:g} ms, "
+                                 f"not the gate's {GATE_QUANTUM_US} us")
+                sim = self.sim_factory(system_path, firmware, run_dir / "renode.log", quantum)
+                logs = runlog.RunLogs(run_dir / "renode.log", limit=limit)
+                try:
+                    with sim:
+                        trace.pre = False          # virtual time from here on
+                        logs.add_uarts(getattr(sim, "uart_logs", None) or {})
+                        summary = execute_run(sim, scenario, trace, cancelled=cancelled,
+                                              progress=on_progress, state_view=True,
+                                              session=session, logs=logs)
+                finally:
+                    # What Renode and the UARTs said last (an abort, a quit).
+                    try:
+                        trace.write(logs.finish(progress["us"]))
+                    except TraceLimit:
+                        pass
+                state, virtual_us = "passed", progress["us"]
+                summary["quantum_us"] = getattr(sim, "quantum_us", quantum)
+                if scenario.get("expect"):
+                    summary.update(evaluate_expects(run_dir, scenario, system, firmware,
+                                                    virtual_us, trace))
+                    if summary["expects_failed"]:
+                        state = "failed"
+            elif scenario["kind"] == "pytest":
+                state, summary = execute_pytest(scenario, run_dir, Path(self.settings.workspace),
+                                                image_env(system, firmware), trace, cancelled,
+                                                max_output_bytes=self.limits.max_output_bytes,
+                                                limit=limit)
+                # Native tests run at their systems' own (the gate's) quantum.
+                summary["quantum_us"] = system.sync_quantum_us()
+            else:
+                raise ValueError(f"unknown scenario kind '{scenario['kind']}'")
+            summary["firmware"] = {k: str(p) for k, p in firmware.items()}
+            summary["firmware_commits"] = commits
+            summary["renode"] = renode_build()
+            if run.get("ref"):
+                summary["system_ref"] = run["ref"]
+        except Lost:
+            trace.log(progress["us"], f"worker {self.id} lost the run: it was reclaimed")
+            trace.close()
+            print(f"run {run_id}: lost (reclaimed by another worker)", flush=True)
+            return run_id
+        except Cancelled as e:
+            state, virtual_us = "cancelled", progress["us"]
+            summary = {**e.summary, "cancelled_at_us": virtual_us}
+            trace.log(virtual_us, "cancelled")
+        except BaseException as e:  # noqa: BLE001 - every failure ends the run as error
+            state, virtual_us = "error", progress["us"]
+            summary = {"error": f"{type(e).__name__}: {e}"}
+            (run_dir / "worker-error.txt").write_text(traceback.format_exc())
+            trace.log(virtual_us, f"error: {summary['error']}")
+            if not isinstance(e, Exception):
+                self.store.finish(run_id, state, virtual_us, summary, worker=self.id)
+                trace.close()
+                raise
+        if session is not None:
+            # Ops that came after the run's last boundary never apply.
+            session.refuse_pending(f"the session ended ({state})")
+        final = self.store.finish(run_id, state, virtual_us, summary, worker=self.id)
+        trace.close()
+        print(f"run {run_id}: {final} ({virtual_us} us)", flush=True)
+        return run_id
+
+    def _system_file(self, run: dict, run_dir: Path, trace: TraceWriter) -> Path:
+        """The system file the run executes: systems/<id>.yaml as of the
+        run's commit, written into its directory, so the shared workspace's
+        HEAD and working tree never move (vhil/server/runs.py, runs at a
+        saved ref). A run queued outside git uses the working tree's file."""
+        ws = Path(self.settings.workspace)
+        commit = run.get("ref") or ""
+        if not commit:
+            return ws / "systems" / f"{run['system']}.yaml"
+        head = Workspace(ws).ref()
+        name = run.get("ref_name") or "HEAD"
+        if run["scenario"]["kind"] == "pytest":
+            if commit != head:
+                raise RuntimeError(f"the workspace is at {head[:12] or 'no commit'}, not "
+                                   f"{commit[:12]} ({name}): a pytest run needs its ref checked out")
+            path = ws / "systems" / f"{run['system']}.yaml"
+        else:
+            changed = code_changes(ws, head, commit) if commit != head else []
+            if changed:
+                raise RuntimeError(f"{name} ({commit[:12]}) and the workspace ({head[:12]}) differ "
+                                   f"in what a run reads: {', '.join(changed[:10])}")
+            path = materialise_system(ws, commit, run["system"], run_dir / "system")
+        trace.log(0, f"system systems/{run['system']}.yaml at {name} ({commit[:12]})")
+        return path
+
+    def loop(self, poll_s: float = 1.0) -> None:
+        print(f"worker {self.id}: {self.settings.db}", flush=True)
+        while True:
+            if self.run_once() is None:
+                time.sleep(poll_s)
+
+
+def prune_main(argv) -> int:
+    p = argparse.ArgumentParser(prog="python -m vhil.worker prune",
+                                description="Prune the firmware volume's commit builds "
+                                            "(vhil/fwprune.py; VHIL_FW_KEEP, VHIL_FW_KEEP_DAYS, "
+                                            "VHIL_FW_MAX_GB)")
+    p.add_argument("--dry-run", action="store_true", help="say what would go; remove nothing")
+    p.add_argument("--fw-dir", type=Path, default=DEFAULT_FW_DIR,
+                   help="firmware build directory with built.txt (default $VHIL_FW_DIR or /vhil/fw)")
+    a = p.parse_args(argv)
+    worker = Worker(Settings.from_env(), resolver=FirmwareResolver(a.fw_dir),
+                    prune=fwprune.PrunePolicy.from_env())
+    result = worker.prune_firmware(force=True, dry_run=a.dry_run)
+    if result is not None and not (result.removed or result.skipped or a.dry_run):
+        for line in result.report():
+            print(line)
+    return 0 if result is not None and not result.skipped else 1
+
+
+def prepare_models() -> None:
+    """Compile the models' assembly from this worker's own checkout (its
+    workspace: the code its runs use) once, then require it for every run
+    (VHIL_MODELS=prebuilt, vhil/models.py): a run whose models are not those
+    sources fails instead of compiling its own."""
+    from vhil import models
+    from vhil.bench import DEFAULT_RENODE
+    sha = models.build(DEFAULT_RENODE)
+    os.environ["VHIL_MODELS"] = "prebuilt"
+    print(f"worker: models assembly {sha[:12]} ({models.home(DEFAULT_RENODE)})", file=sys.stderr, flush=True)
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["prune"]:
+        return prune_main(argv[1:])
+    p = argparse.ArgumentParser(prog="python -m vhil.worker", description=__doc__.splitlines()[0])
+    p.add_argument("--once", action="store_true", help="run at most one queued run, then exit")
+    p.add_argument("--poll", type=float, default=1.0, help="seconds between queue polls")
+    p.add_argument("--fw-dir", type=Path, default=DEFAULT_FW_DIR,
+                   help="firmware build directory with built.txt (default $VHIL_FW_DIR or /vhil/fw)")
+    p.add_argument("--no-build", action="store_true", help="never build firmware; reuse only")
+    p.add_argument("--no-prune", action="store_true",
+                   help="never prune old commit builds after a run (vhil/fwprune.py)")
+    p.add_argument("--heartbeat", type=float, default=HEARTBEAT_S,
+                   help=f"seconds between a held run's heartbeats (default {HEARTBEAT_S:g})")
+    p.add_argument("--reclaim-after", type=float, default=RECLAIM_AFTER_S,
+                   help="seconds without a heartbeat before a running run is reclaimed "
+                        f"(default {RECLAIM_AFTER_S:g}; the same on every worker)")
+    a = p.parse_args(argv)
+    # docker stop sends SIGTERM: end the current run as error, not silently.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    prepare_models()
+    worker = Worker(Settings.from_env(), resolver=FirmwareResolver(
+        a.fw_dir, build=not a.no_build, log=lambda m: print(m, file=sys.stderr, flush=True)),
+        heartbeat_s=a.heartbeat, reclaim_after_s=a.reclaim_after,
+        prune=None if a.no_prune else fwprune.PrunePolicy.from_env())
+    if a.once:
+        worker.run_once()
+    else:
+        worker.loop(a.poll)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

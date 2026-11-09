@@ -1,0 +1,1345 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/isc-fs/IFS-vHIL/schemas/vhil.schema.json",
+  "title": "IFS-vHIL catalogue and system documents",
+  "description": "Platforms, boards, firmware sources and device models form the catalogue (catalog/); a system (systems/) places boards, gives each its firmware, attaches devices, and wires them together. Nothing above `platform` and `model` names an architecture or a backend.",
+  "$defs": {
+    "plant": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "parameters"
+      ],
+      "additionalProperties": false,
+      "description": "A plant's parameters (catalog/plants/): each with its value, unit, where it comes from and what it was validated against (docs/m8-plan.md). A plant is outside the electronics and talks to a system through its co-simulation port (docs/cosim.md).",
+      "properties": {
+        "kind": {
+          "const": "plant-parameters"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string"
+        },
+        "parameter_sets": {
+          "type": "object",
+          "description": "Named sets put over `parameters` when a run selects one (the `parameter_set` parameter, vhil/plant_ts.py load_parameters): e.g. a pack fitted to a car log beside the datasheet-derived one. Each set parameter is one of `parameters`, with its own source and validation.",
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "description",
+              "parameters"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parameters": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": {
+                  "$ref": "#/$defs/plant/properties/parameters/additionalProperties"
+                }
+              }
+            }
+          }
+        },
+        "parameters": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "value",
+              "unit",
+              "status",
+              "source",
+              "validated_against"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "description": "A number, a list of numbers, a word, or null (the element is absent)."
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "cited",
+                  "uncommissioned"
+                ],
+                "description": "cited: from a schematic, a datasheet or the firmware's documented design. uncommissioned: no citable non-bench source; reports that use it say so."
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "validated_against": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The car log it was checked against (id, date, firmware commit), or null."
+              }
+            }
+          }
+        }
+      }
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "role": {
+      "enum": [
+        "ecu",
+        "ams",
+        "udv"
+      ],
+      "description": "A role a board unit is provisioned for: the car's MainLite roles (catalog/boards/mainlite.yaml roles), and only these."
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_+-]{0,31}$(?![\\s\\S])",
+      "description": "A car signal's name as a display label (APPS_1, CAN_ACU): letters, digits and _ + -, at most 32. Never an endpoint."
+    },
+    "gpio_pin": {
+      "type": "object",
+      "required": [
+        "port",
+        "pin"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "$ref": "#/$defs/peripheral"
+        },
+        "pin": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "peripheral": {
+      "type": "string",
+      "description": "A backend path to a peripheral, e.g. Renode's sysbus.fdcan1_h7.",
+      "minLength": 1
+    },
+    "address": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "platform": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "backend"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "platform"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string"
+        },
+        "backend": {
+          "enum": [
+            "renode"
+          ]
+        },
+        "renode": {
+          "type": "object",
+          "required": [
+            "repl"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "repl": {
+              "type": "string",
+              "description": "Platform description, relative to the repo root."
+            },
+            "cpu": {
+              "type": "string",
+              "default": "cpu"
+            },
+            "setup": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Monitor commands run on each machine after the platform loads."
+            },
+            "reset": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Monitor commands the reset macro runs after every reset of the machine (power-on, software, watchdog), with the machine selected; {cpu} is the CPU's name."
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "C# model sources the platform description needs, relative to the repo root, compiled before any machine loads."
+            },
+            "write_protect": {
+              "type": "string",
+              "description": "Monitor command that burns a board's write-protected sectors into the option bytes; {mask} is the sector bitmask (bit N = sector N)."
+            }
+          }
+        }
+      }
+    },
+    "board": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "platform"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "board"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string"
+        },
+        "platform": {
+          "$ref": "#/$defs/id"
+        },
+        "bootloader": {
+          "$ref": "#/$defs/id",
+          "description": "Firmware (catalog/firmware) every unit of this board carries in sector 0, burned at provisioning. The board boots through it from a provisioned flash image: it validates the application and jumps to it, or stays to be flashed over CAN. A system may build another ref of it (bootloader_ref), not leave it out."
+        },
+        "roles": {
+          "type": "object",
+          "description": "The roles a unit of this board is provisioned for, by name (the MainLite: ecu, ams, udv). A system places the board in one (its board entry's `role`), which gives the bootloader its node ID and the bus the app is flashed over.",
+          "propertyNames": {
+            "$ref": "#/$defs/role"
+          },
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "node_id",
+              "flash_bus",
+              "firmware"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "node_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 14,
+                "description": "The node ID the bootloader answers to in this role, seeded at provisioning (0x1..0xE)."
+              },
+              "flash_bus": {
+                "$ref": "#/$defs/name",
+                "description": "The board CAN connector (its `can`) the app is flashed over in this role."
+              },
+              "firmware": {
+                "$ref": "#/$defs/id",
+                "description": "The firmware (catalog/firmware) a unit in this role runs: the role sets it, a system does not. It may name one the catalogue lacks yet; a system placing a board in that role is then refused."
+              },
+              "backplane": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "doc"
+                ],
+                "additionalProperties": false,
+                "description": "The backplane a unit in this role is mounted on: its name and its reference page.",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9 _-]{0,31}$(?![\\s\\S])"
+                  },
+                  "doc": {
+                    "type": "string",
+                    "pattern": "^docs/backplanes/[a-z0-9-]+\\.md$(?![\\s\\S])"
+                  }
+                }
+              },
+              "pins": {
+                "type": "object",
+                "description": "The board connectors and pins this role's backplane routes, each with the car signal it carries: a display label, never an endpoint alias. Every other connector but the board's onboard ones is not connected in this role; a system wiring one gets a warning.",
+                "propertyNames": {
+                  "$ref": "#/$defs/name"
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/label"
+                }
+              },
+              "gpio": {
+                "type": "object",
+                "description": "Pins the board models as analog inputs that this role's backplane uses as GPIO, with their GPIO port and pin: in this role they are GPIO endpoints.",
+                "propertyNames": {
+                  "$ref": "#/$defs/name"
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/gpio_pin"
+                }
+              },
+              "adc_differential": {
+                "type": "object",
+                "description": "The measured transfer of this role's carrier on a differential ADC input, by the INP pin (an analog input of the board): the code reads (1 + gain * dV / VREF+) * 2^(n-1) + offset_codes (12-bit codes), plus its measured noise (noise_codes_rms, start_noise_codes_rms; seeded by the system's seed). Cite the measurement. Absent: the ideal transfer (gain 1, offset 0, noise-free).",
+                "propertyNames": {
+                  "$ref": "#/$defs/name"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["gain"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "gain": {"type": "number", "exclusiveMinimum": 0.5, "maximum": 1.5},
+                    "offset_codes": {"type": "integer", "minimum": -2048, "maximum": 2048},
+                    "noise_codes_rms": {"type": "number", "minimum": 0, "maximum": 64, "description": "Measured rms noise of each conversion, 12-bit codes (Gaussian-shaped, drawn per conversion). Cite the measurement."},
+                    "start_noise_codes_rms": {"type": "number", "minimum": 0, "maximum": 64, "description": "Measured rms of an offset drawn at each regular sequence start (ADSTART) and held for its conversions, 12-bit codes. Cite the measurement."}
+                  }
+                }
+              },
+              "adc_single_ended": {
+                "type": "object",
+                "description": "This role's ADC path on a single-ended input, by pin (an analog input of the board the role keeps analog): the code reads gain * V / VREF+ * (2^n - 1) + offset_codes (12-bit codes), plus its noise (noise_codes_rms, start_noise_codes_rms; seeded by the system's seed); front_end_ratio is the backplane's DC ratio from the sensor to the pin, applied only to a sensor-side source (System.sensor_to_pin), never to a stimulus written at the pin. Cite each figure and say whether it is measured or derived. Absent: the ideal transfer (gain 1, offset 0, noise-free).",
+                "propertyNames": {
+                  "$ref": "#/$defs/name"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "minProperties": 1,
+                  "properties": {
+                    "gain": {"type": "number", "exclusiveMinimum": 0.5, "maximum": 1.5},
+                    "offset_codes": {"type": "integer", "minimum": -2048, "maximum": 2048},
+                    "noise_codes_rms": {"type": "number", "minimum": 0, "maximum": 64, "description": "rms noise of each conversion, 12-bit codes (Gaussian-shaped, drawn per conversion). Cite its source."},
+                    "start_noise_codes_rms": {"type": "number", "minimum": 0, "maximum": 64, "description": "rms of an offset drawn at each regular sequence start (ADSTART) and held for its conversions, 12-bit codes. Cite its source."},
+                    "front_end_ratio": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "Pin volts per volt at the sensor: the backplane's divider (1 for a series RC). Cite the schematic."}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "pin_model": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*\\.pins\\.yaml$(?![\\s\\S])",
+          "description": "The board's published pin model, a file in catalog/pin-models/ (vhil/pin_model.py): the source of truth for which of its pins exist and leave the module. Every connector and pin of the board must leave it (or be `onboard`), and every pin it routes to the backplane must be a connector or pin of the board."
+        },
+        "unwired": {
+          "type": "object",
+          "description": "Pins and peripherals that leave the module (pin model) but that the emulator does not wire yet, with their kind: the editor offers them, and a system that wires one is refused as not emulated yet.",
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "enum": ["gpio", "analog", "uart"]
+          }
+        },
+        "vbat": {
+          "type": "boolean",
+          "description": "Whether the board backs the MCU's backup domain (VBAT). Without it a power cut wipes the RTC backup registers; default true, Renode's behaviour."
+        },
+        "onboard": {
+          "type": "object",
+          "description": "Connectors on the board itself, connected whatever its role's backplane routes, each with a display label (the MainLite's microSD and IMU).",
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/label"
+          }
+        },
+        "can": {
+          "type": "object",
+          "description": "Connector name -> CAN controller.",
+          "additionalProperties": {
+            "$ref": "#/$defs/peripheral"
+          }
+        },
+        "analog_in": {
+          "type": "object",
+          "description": "Pin name -> ADC and channel.",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "adc",
+              "channel"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "adc": {
+                "$ref": "#/$defs/peripheral"
+              },
+              "channel": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "spi": {
+          "type": "object",
+          "description": "Connector name -> SPI controller.",
+          "additionalProperties": {
+            "$ref": "#/$defs/peripheral"
+          }
+        },
+        "uart": {
+          "type": "object",
+          "description": "Connector name -> UART/USART controller.",
+          "additionalProperties": {
+            "$ref": "#/$defs/peripheral"
+          }
+        },
+        "gpio": {
+          "type": "object",
+          "description": "Pin name -> GPIO port and pin number.",
+          "additionalProperties": {
+            "$ref": "#/$defs/gpio_pin"
+          }
+        },
+        "sdmmc": {
+          "type": "object",
+          "description": "Connector name -> SD/MMC controller.",
+          "additionalProperties": {
+            "$ref": "#/$defs/peripheral"
+          }
+        },
+        "i2c": {
+          "type": "object",
+          "description": "Connector name -> I2C controller.",
+          "additionalProperties": {
+            "$ref": "#/$defs/peripheral"
+          }
+        }
+      }
+    },
+    "firmware": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "repo",
+        "ref",
+        "build",
+        "load"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "firmware"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/\\s]+/[^/\\s]+$"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "submodules": {
+          "type": "boolean",
+          "default": false
+        },
+        "build": {
+          "type": "object",
+          "required": [
+            "configure",
+            "build",
+            "elf"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "toolchain": {
+              "type": "string"
+            },
+            "configure": {
+              "type": "string"
+            },
+            "build": {
+              "type": "string"
+            },
+            "elf": {
+              "type": "string"
+            },
+            "recipe_source": {
+              "type": "string",
+              "description": "Where this recipe is reviewed, e.g. IFS_HIL configs/firmware/ecu.yaml."
+            }
+          }
+        },
+        "load": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "vector_table": {
+              "$ref": "#/$defs/address",
+              "description": "Where the image's vector table is linked. The image at the reset address (a board's bootloader, 0x08000000) gets VTOR set to it at reset, as the boot address does; an application behind a bootloader gets it from the bootloader when it jumps."
+            }
+          }
+        },
+        "cpu": {
+          "type": "object",
+          "required": [
+            "mips"
+          ],
+          "additionalProperties": false,
+          "description": "How fast the chip runs this firmware's code (docs/cpu-timing.md): the board's core is timed at this rate instead of the platform's. It depends on what the firmware sets up (clock tree, caches, where code and data live), so it belongs to the firmware.",
+          "properties": {
+            "mips": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4000,
+              "description": "Instructions per microsecond (Renode's PerformanceInMips)."
+            }
+          }
+        },
+        "can": {
+          "type": "object",
+          "required": [
+            "contract"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "contract": {
+              "description": "The board CAN connectors (e.g. FDCAN2) the firmware's CAN contract (its .def messages, Core/Inc/can/messages) rides: a .def names no bus. A board running this firmware decodes those messages only on the buses these connectors are on; without it, on every bus the board is on.",
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_]+$"
+              }
+            }
+          }
+        },
+        "state_view": {
+          "description": "What the state panel shows of a board running this firmware (docs/state-view.md), in order: its FSM state, contactors and relays, faults and key values. Each source is a signal in the scenario expects' grammar without the system's names: frame:<connector>.<message>.<field> (a board CAN connector, e.g. FDCAN1, and a field of the .def contract), symbol:<name> (a firmware global) or pin:<pin> (a board GPIO). The worker records the symbols and pins of every board's view in each run.",
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "type": "object",
+            "required": ["label", "source"],
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._+/()%-]{0,31}$"
+              },
+              "source": {
+                "type": "string",
+                "pattern": "^(frame:[A-Za-z_][A-Za-z0-9_]{0,63}\\.(0x[0-9A-Fa-f]{1,8}|[A-Za-z_][A-Za-z0-9_]{0,63})\\.[A-Za-z_][A-Za-z0-9_]{0,63}|symbol:[A-Za-z_][A-Za-z0-9_]{0,127}|pin:[A-Za-z0-9_]{1,64})$"
+              },
+              "kind": {
+                "description": "state: the FSM state (one per view); relay: a contactor, relay or digital output, closed/on when non-zero; fault: active when non-zero; value: a key value (the default).",
+                "enum": ["state", "relay", "fault", "value"],
+                "default": "value"
+              },
+              "unit": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9%/._ -]{0,12}$"
+              },
+              "enum": {
+                "description": "The DWARF enumeration (qualified, e.g. ams::fsm::State) whose enumerators label a symbol's values (GET /api/firmware/<id>/enums).",
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}(::[A-Za-z_][A-Za-z0-9_]{0,63}){0,7}$"
+              },
+              "values": {
+                "description": "Labels by raw value, cited in the firmware: where DWARF has no enumerator for a value (or no enum at all), or a symbol is a plain integer. Over the enum's own.",
+                "type": "object",
+                "maxProperties": 64,
+                "propertyNames": {"pattern": "^(0|-?[1-9][0-9]{0,9})$"},
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_][A-Za-z0-9_ .+:/-]{0,63}$"
+                }
+              },
+              "period_ms": {
+                "description": "How often a symbol is sampled (default 10 ms for state and fault, 50 ms for the rest).",
+                "type": "number",
+                "minimum": 1,
+                "maximum": 1000
+              }
+            }
+          }
+        }
+      }
+    },
+    "endpoint": {
+      "type": "string",
+      "description": "<board instance>.<connector or pin>",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\.[A-Za-z0-9_]+$"
+    },
+    "system": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "boards"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "system"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string"
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The run's seed (default 1): every modelled noise (a role's adc_differential noise) draws from it, with the board's name, so runs repeat byte for byte on any host. vhil.sim.Sim(seed=...) overrides it for a run."
+        },
+        "time": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "quantum_s": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "boards": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "board"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "board": {
+                "$ref": "#/$defs/id"
+              },
+              "role": {
+                "$ref": "#/$defs/role",
+                "description": "The board's role, one of its catalogue entry's roles (a MainLite: ecu, ams or udv): it gives the bootloader's node ID and flash bus, and the firmware the board runs. Required for a board that has roles."
+              },
+              "firmware": {
+                "$ref": "#/$defs/id",
+                "description": "The firmware a board without roles runs. A board with roles runs its role's and takes none here."
+              },
+              "firmware_ref": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?![-/])(?!.*\\.\\.)(?!.*//)[A-Za-z0-9._/+-]{1,100}(?<![./])$(?![\\s\\S])",
+                "description": "Branch or tag of the firmware's repo to build for this board, in place of the catalogue entry's ref. `vhil.system build --ref` still overrides it."
+              },
+              "bootloader_ref": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?![-/])(?!.*\\.\\.)(?!.*//)[A-Za-z0-9._/+-]{1,100}(?<![./])$(?![\\s\\S])",
+                "description": "Branch or tag of the bootloader the board carries (its catalogue board's bootloader), in place of the bootloader's catalogue ref."
+              },
+              "write_protect": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                },
+                "description": "Flash sectors write-protected in the option bytes (WRPSn) from the first power-on, as a board whose protection was latched before (e.g. the CAN bootloader's OB_APPLY_WRP on sector 0) holds them. Needs a platform with renode.write_protect."
+              }
+            }
+          }
+        },
+        "buses": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "kind",
+              "nodes"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "can"
+                ]
+              },
+              "nodes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/$defs/endpoint"
+                }
+              },
+              "host_netdev": {
+                "type": "string",
+                "description": "SocketCAN interface this bus is bridged to, when bridging is on.",
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,14}$"
+              },
+              "arbitration": {
+                "type": "boolean",
+                "default": true,
+                "description": "Model the bus in virtual time: arbitration, frame time with stuff bits, ACK and transmit error counting (models/renode/VhilCanBus.cs, #174). The default. false: Renode's CAN hub, which hands every frame to every node at once, at the next sync point."
+              }
+            }
+          }
+        },
+        "bench": {
+          "type": "object",
+          "description": "IFS_HIL bench compatibility: what the virtual broker maps the physical bench's relays, current monitors, DACs, I/O expander pins and ADCs to.",
+          "additionalProperties": false,
+          "properties": {
+            "power": {
+              "type": "array",
+              "description": "How IFS_HIL's broker powers each board: the bench slot it sits in, the TCA relay that switches it and the INA monitor that reads its current.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "board",
+                  "relay",
+                  "ina_addr",
+                  "current_A"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "board": {
+                    "$ref": "#/$defs/name"
+                  },
+                  "slot": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "relay": {
+                    "type": "object",
+                    "required": [
+                      "addr",
+                      "port",
+                      "pin"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "addr": {
+                        "type": "integer"
+                      },
+                      "port": {
+                        "type": "integer"
+                      },
+                      "pin": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "ina_addr": {
+                    "type": "integer"
+                  },
+                  "current_A": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "dac_routes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "dac",
+                  "channel",
+                  "to"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "dac": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "channel": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "to": {
+                    "$ref": "#/$defs/endpoint"
+                  }
+                }
+              }
+            },
+            "gpio_routes": {
+              "type": "array",
+              "description": "Bench TCA9555 output pins wired to a board's GPIO inputs: the virtual broker drives the input with the pin's level while the TCA drives it (direction output), else low.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "tca",
+                  "port",
+                  "pin",
+                  "to"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "tca": {
+                    "type": "integer",
+                    "minimum": 32,
+                    "maximum": 39
+                  },
+                  "port": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "pin": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 7
+                  },
+                  "to": {
+                    "$ref": "#/$defs/endpoint"
+                  }
+                }
+              }
+            },
+            "adc_routes": {
+              "type": "array",
+              "description": "Bench MCP3208 channels tapping a board's GPIO outputs: the virtual broker answers a read of the channel with the pin's live level (0 or 3.3 V), and 0 V while the board is unpowered.",
+              "items": {
+                "type": "object",
+                "required": [
+                  "adc",
+                  "channel",
+                  "from"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "adc": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "channel": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 7
+                  },
+                  "from": {
+                    "$ref": "#/$defs/endpoint"
+                  }
+                }
+              }
+            },
+            "cell_stimulus": {
+              "type": "object",
+              "description": "The bench's cell and temperature source on an LTC6811 chain (bench-01: the Pico LTC emulator, separately powered): every cell and NTC it holds, re-applied after each power-on of the chain's board, since the source keeps its state while the board is off.",
+              "required": [
+                "device",
+                "cell_mV",
+                "temp_dC"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "device": {
+                  "$ref": "#/$defs/name"
+                },
+                "cell_mV": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 5000
+                },
+                "temp_dC": {
+                  "type": "integer",
+                  "minimum": -400,
+                  "maximum": 1250
+                }
+              }
+            }
+          }
+        },
+        "devices": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "model": {
+                "$ref": "#/$defs/id"
+              },
+              "spi": {
+                "$ref": "#/$defs/endpoint"
+              },
+              "cs": {
+                "$ref": "#/$defs/endpoint"
+              },
+              "params": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": [
+                    "integer",
+                    "number",
+                    "string",
+                    "boolean"
+                  ]
+                },
+                "propertyNames": {
+                  "$ref": "#/$defs/name"
+                },
+                "description": "Overrides of the model's params, each of its default's type; a string param takes the model's param_formats format, or else letters, digits and _ . + -."
+              },
+              "sdmmc": {
+                "$ref": "#/$defs/endpoint"
+              },
+              "i2c": {
+                "$ref": "#/$defs/endpoint",
+                "description": "The board's I2C connector the device's targets sit on."
+              },
+              "attach": {
+                "$ref": "#/$defs/name",
+                "description": "Device whose port this one attaches to."
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Instances at positions 0..count-1 on the attach port, named <device><i>."
+              },
+              "outputs": {
+                "type": "object",
+                "propertyNames": {
+                  "$ref": "#/$defs/name"
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/endpoint"
+                },
+                "description": "Model analog output -> the board's analog input it drives."
+              },
+              "pins": {
+                "type": "object",
+                "propertyNames": {
+                  "$ref": "#/$defs/name"
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/endpoint"
+                },
+                "description": "Model GPIO pin (its interface's gpio) -> the board GPIO it is wired to."
+              }
+            }
+          }
+        },
+        "plants": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "description": "Plants the system runs on its co-simulation port wherever a run executes it (scenarios, web-app runs; not the wall-clock bench, whose parity stimulus stays IFS_HIL's): the switch for M8's tractive-system plant (docs/m8-plan.md). A system without plants runs exactly as before.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "plant"
+            ],
+            "properties": {
+              "plant": {
+                "$ref": "#/$defs/id",
+                "description": "Its parameters in catalog/plants/<plant>.yaml; tractive-system is the Python stand-in (vhil/plant_ts.py), shutdown-circuit the SDC logic (vhil/plant_sdc.py)."
+              },
+              "cells": {
+                "$ref": "#/$defs/name",
+                "description": "The LTC6820 device whose chain's cells give the pack voltage."
+              },
+              "params": {
+                "type": "object",
+                "propertyNames": {
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                },
+                "description": "Parameter overrides for this system, reported as such (never a substitute for a citation)."
+              },
+              "pack": {
+                "type": "boolean",
+                "description": "Tractive system only: its per-cell pack (vhil/plant_pack.py, M9 prep #318) is the cell source; it drives the `cells` chain's cells and NTCs, takes its balance switches back, and v_pack is the pack's."
+              },
+              "current": {
+                "$ref": "#/$defs/name",
+                "description": "Tractive system with pack only: the analog current-sensor device whose outputs carry the pack current; each output needs an analog port signal on its pin."
+              }
+            }
+          }
+        },
+        "port": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "step_ms",
+            "signals"
+          ],
+          "description": "The co-simulation port (vhil/cosim.py): named signals a plant exchanges with the system at a fixed virtual-time step.",
+          "properties": {
+            "step_ms": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "signals": {
+              "type": "object",
+              "propertyNames": {
+                "$ref": "#/$defs/name"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Exactly one of analog (a voltage the plant drives onto an analog input), gpio_in (a level the plant drives onto a GPIO input), gpio_out (a GPIO output the plant reads), can_rx (frames the plant receives from the system) or can_tx (frames the plant sends to it).",
+                "properties": {
+                  "analog": {
+                    "$ref": "#/$defs/endpoint"
+                  },
+                  "gpio_in": {
+                    "$ref": "#/$defs/endpoint"
+                  },
+                  "gpio_out": {
+                    "$ref": "#/$defs/endpoint"
+                  },
+                  "can_rx": {
+                    "type": "object",
+                    "required": [
+                      "bus",
+                      "id"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "bus": {
+                        "$ref": "#/$defs/name"
+                      },
+                      "id": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "can_tx": {
+                    "type": "object",
+                    "required": [
+                      "bus",
+                      "id"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "bus": {
+                        "$ref": "#/$defs/name"
+                      },
+                      "id": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                },
+                "minProperties": 1,
+                "maxProperties": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "interface",
+        "backend"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "model"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string"
+        },
+        "interface": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "What a device of this model attaches to, and what it provides.",
+          "properties": {
+            "spi": {
+              "type": "boolean"
+            },
+            "cs": {
+              "type": "boolean",
+              "description": "Chip-select input, active low."
+            },
+            "sdmmc": {
+              "type": "boolean"
+            },
+            "i2c": {
+              "type": "boolean",
+              "description": "An I2C target (or several, renode.targets) on an I2C connector."
+            },
+            "attach": {
+              "type": "string",
+              "description": "Kind of port on another device this model attaches to, e.g. isospi."
+            },
+            "provides": {
+              "type": "string",
+              "description": "Kind of port this model offers other devices, e.g. isospi."
+            },
+            "analog_out": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/name"
+              },
+              "minItems": 1,
+              "description": "Named analog outputs; a device maps each onto a board's analog input (outputs)."
+            },
+            "gpio": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/name"
+              },
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "Named GPIO pins; a device wires each to a board GPIO (pins). Which the MCU drives and which the model drives is the renode section's gpio_in / gpio_out."
+            },
+            "radio": {
+              "type": "boolean",
+              "description": "Transmits over the air: every payload sent is a `radio` trace record (the model's Payloads)."
+            }
+          }
+        },
+        "params": {
+          "type": "object",
+          "description": "Parameter name -> default value; a device may override.",
+          "additionalProperties": {
+            "type": [
+              "integer",
+              "number",
+              "string",
+              "boolean"
+            ]
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "param_formats": {
+          "type": "object",
+          "description": "String param -> the format its values take. card-image: a card image file inside a card-image directory (vhil.system.card_dirs). A string param without one takes letters, digits and _ . + - only.",
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "enum": [
+              "card-image"
+            ]
+          }
+        },
+        "backend": {
+          "enum": [
+            "renode",
+            "analog"
+          ]
+        },
+        "renode": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "C# source, relative to the repo root, compiled at load time. Omit for a model built into Renode."
+            },
+            "type": {
+              "type": "string",
+              "description": "Type as used in a platform description, e.g. SPI.Ltc6811Chain."
+            },
+            "targets": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "$ref": "#/$defs/name"
+              },
+              "description": "For an i2c model: one peripheral per I2C target, named <device>_<target>, e.g. a BMI088's accelerometer and gyroscope dies.",
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "type",
+                  "address"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "description": "Type as used in a platform description."
+                  },
+                  "address": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 127,
+                    "description": "7-bit I2C address."
+                  }
+                }
+              }
+            },
+            "params": {
+              "type": "object",
+              "description": "Model parameter -> constructor argument name.",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "gpio_in": {
+              "type": "object",
+              "description": "For a gpio model: pin -> the model's GPIO input number, for the pins the MCU drives.",
+              "propertyNames": {
+                "$ref": "#/$defs/name"
+              },
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "gpio_out": {
+              "type": "object",
+              "description": "For a gpio model: pin -> the model's GPIO property, for the pins the model drives.",
+              "propertyNames": {
+                "$ref": "#/$defs/name"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              }
+            },
+            "set_also": {
+              "type": "object",
+              "description": "Param -> constructor arguments also passed when that param is set (a non-empty value). An empty string param is left out.",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": [
+                    "integer",
+                    "number",
+                    "string",
+                    "boolean"
+                  ]
+                }
+              }
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "type"
+              ]
+            },
+            {
+              "required": [
+                "targets"
+              ]
+            }
+          ]
+        },
+        "analog": {
+          "type": "object",
+          "required": [
+            "input",
+            "outputs"
+          ],
+          "additionalProperties": false,
+          "description": "An analog source: each output's voltage is offset_V + gain_V * the input param, clipped to [min_V, max_V]. Set at load; a test or bench DAC may drive the pin afterwards.",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "The param the outputs follow, e.g. current_A."
+            },
+            "outputs": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "offset_V",
+                  "gain_V"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "offset_V": {
+                    "type": "number"
+                  },
+                  "gain_V": {
+                    "type": "number"
+                  },
+                  "min_V": {
+                    "type": "number"
+                  },
+                  "max_V": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/platform"
+    },
+    {
+      "$ref": "#/$defs/board"
+    },
+    {
+      "$ref": "#/$defs/firmware"
+    },
+    {
+      "$ref": "#/$defs/model"
+    },
+    {
+      "$ref": "#/$defs/system"
+    },
+    {
+      "$ref": "#/$defs/plant"
+    }
+  ]
+}

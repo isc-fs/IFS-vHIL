@@ -1,4 +1,4 @@
-// STM32H733ZG — the MCU on every MLC carrier (ECU and AMS).
+// STM32H733ZG — the MCU of the MainLite (AMS, ECU, uDV).
 //
 // Renode ships only the H743/H753/H747 parts. The H72x/H73x line shares their
 // peripheral IP, so this file reuses Renode's common stm32h7.repl and corrects
@@ -21,17 +21,77 @@ sram1:
 sram2:
     size: 0x4000
 
-// --- Clock tree: the MLC carriers have a 24 MHz HSE (Renode defaults to the
+// The reserved range between the AXI SRAM's end and D2's AHB SRAM: past
+// D1_AXISRAM2_BASE 0x24020000 + 192 KB (the AXI SRAM's last 64 KB block,
+// stm32h733xx.h:2166) = 0x24050000, up to D2_AHBSRAM1_BASE 0x30000000
+// (stm32h733xx.h:2169). On the chip an access to it is a bus error; Renode
+// returned 0 and dropped writes. Every access is now a precise BusFault
+// (models/renode/VhilBusError.cs), the target of the tests' bus-fault hook.
+reservedAxi: Miscellaneous.VhilBusError @ sysbus 0x24050000
+    size: 0x0BFB0000
+
+// --- Clock tree: the MainLite has a 24 MHz HSE (Renode defaults to the
 // Nucleo's 8 MHz). The firmwares run HSE/2*44 = 528 MHz SYSCLK; with the wrong
 // HSE the RCC model derives 176 MHz and every FreeRTOS period runs 3x slow.
 
 rcc:
     hseFrequency: 24000000
 
+// IWDG1's clock is the LSI, ~32 kHz (RM0468 Rev 3 §8.5, p. 318); stm32h7.repl
+// clocks it at 56 kHz, which made every watchdog timeout 1.75x too short.
+watchdog:
+    frequency: 32000
+
+// Renode times the core at 100 MIPS unless told otherwise, so code that busy-
+// waits (the ECU's bit-banged nRF24, cycle-counted delays) took 5x longer in
+// virtual time than on the 528 MHz part and delayed lower-priority tasks: the
+// ECU's 0x704 landed up to 25 ms late. 528, one instruction per cycle, is the
+// default for an image the catalogue gives no rate. How fast the chip really
+// runs code depends on the firmware's caches and memory placement, so each
+// firmware sets its own (catalog/firmware/*.yaml `cpu.mips`,
+// docs/cpu-timing.md). The wall-clock bench lowers it to keep up with real
+// time (vhil/bench.py, WALL_CLOCK_MIPS).
+cpu:
+    PerformanceInMips: 528
+
+// DWT cycle counter (DWT_BASE 0xE0001000, core_cm7.h). CYCCNT counts core
+// clock cycles (ARMv7-M ARM DDI0403E C1.8, "The Data Watchpoint and Trace
+// unit"), so it runs at SYSCLK: 528 MHz on every MainLite image (HSE 24 MHz /
+// PLLM 2 * PLLN 44 / PLLP 1: AMS, ECU and CAN bootloader main.c
+// SystemClock_Config). stm32h7.repl clocks it at 250 MHz, so every
+// CYCCNT-timed wait ran 2.1x long in virtual time (the bootloader's erase
+// timing, the AMS's delay_us after IFS08-CE-AMS#637). Renode's DWT counts
+// virtual time at this frequency and syncs the CPU's time on every CYCCNT
+// read, so a read is exact to the instruction: with a firmware rate of
+// cpu.mips, each instruction adds 528 / cpu.mips cycles (docs/cpu-timing.md,
+// "The cycle counter").
+dwt:
+    frequency: 528000000
+
 // --- Peripherals the H733 has and the H743 platform lacks
 
+// FDCAN1..3 with fault hooks (bus-off, TX FIFO full, failed bring-up) for
+// tests: models/renode/Stm32H7Fdcan.cs, Renode's MCAN unchanged until a hook
+// is set. stm32h7.repl's fdcan1/fdcan2 are taken off the bus and replaced;
+// same addresses and IRQs (FDCAN1_IT0/1 19/21, FDCAN2_IT0/1 20/22, FDCAN_CAL
+// 63; stm32h733xx.h), all on the shared 10 KB message RAM.
+fdcan1: @ none
+fdcan2: @ none
+
+fdcan1_h7: CAN.STM32H7_FDCAN @ sysbus 0x4000A000
+    Line0 -> nvic@19
+    Line1 -> nvic@21
+    Calibration -> nvic@63
+    messageRAM: canMessageRAM
+
+fdcan2_h7: CAN.STM32H7_FDCAN @ sysbus 0x4000A400
+    Line0 -> nvic@20
+    Line1 -> nvic@22
+    Calibration -> nvic@63
+    messageRAM: canMessageRAM
+
 // Third FDCAN (the ECU's dash bus). Shares the 10 KB message RAM with FDCAN1/2.
-fdcan3: CAN.MCAN @ sysbus 0x4000D400
+fdcan3_h7: CAN.STM32H7_FDCAN @ sysbus 0x4000D400
     Line0 -> nvic@159
     Line1 -> nvic@160
     Calibration -> nvic@63
@@ -39,16 +99,117 @@ fdcan3: CAN.MCAN @ sysbus 0x4000D400
 
 // TIM23 — CubeMX's HAL timebase on both firmwares. Without it HAL_GetTick never
 // advances and every HAL timeout loop spins forever. 32-bit; the timer kernel
-// clock is 2 x PCLK1 = 264 MHz with the carriers' clock tree.
+// clock is 2 x PCLK1 = 264 MHz with the MainLite's clock tree.
 timer23: Timers.STM32_Timer @ sysbus 0x4000E000
     initialLimit: 0xffffffff
     frequency: 264000000
     -> nvic@161
+
+// FDCAN clock calibration unit, over stm32h7.repl's "CAN_CCU" tag: IR/IE,
+// which HAL_FDCAN_IRQHandler reads on every FDCAN interrupt. Our model,
+// models/renode/Stm32H7FdcanCcu.cs. FDCAN_CCU_BASE = D2_APB1PERIPH_BASE +
+// 0xA800 (stm32h733xx.h:2340).
+fdcan_ccu: CAN.STM32H7_FDCAN_CCU @ sysbus 0x4000A800
 
 // USART10 — ECU GPS (NMEA @ 9600). Kernel clock = PCLK2 = 132 MHz.
 usart10: UART.STM32F7_USART @ sysbus 0x40011C00
     frequency: 132000000
     IRQ -> nvic@156
 
+// ADC3 — on the H72x/H73x a different 12-bit block from the H743's ADC that
+// stm32h7.repl puts here (RM0468; register map in stm32h733xx.h). Our model,
+// models/renode/Stm32H7Adc3.cs, loaded by catalog/platforms/stm32h733.yaml.
+// INN3 shares PF8 with INP7 (AMS ams_config.hpp:695-696, ECU io_signals.cpp:37).
+// ADC3_IRQn = 127 (stm32h733xx.h). A repl can't redeclare stm32h7.repl's
+// adc3, so that one is taken off the bus and this one takes its address.
+adc3: @ none
+
+adc3_h73x: Analog.STM32H7_ADC3 @ sysbus 0x58026000
+    referenceVoltage: 3.3
+    negativeInputs: "3:7"
+    // Conversion timing: the ADC kernel clock is PLL2P = 24 MHz / 2 x 16 / 2
+    // = 96 MHz on both MainLite firmwares (AMS stm32h7xx_hal_msp.c:101-110,
+    // ECU adc.c:101-110, RCC_ADCCLKSOURCE_PLL2), HCLK 264 MHz for CKMODE.
+    kernelClockFrequency: 96000000
+    busClockFrequency: 264000000
+    IRQ -> nvic@127
+    // DMAMUX1 request 115 (DMA_REQUEST_ADC3, stm32h7xx_hal_dma.h:377).
+    DmaRequest -> dmamux1@115
+
+// DMA1 with half-transfer, error and circular/double-buffer modes. Our model,
+// models/renode/Stm32H7Dma.cs; stm32h7.repl's STM32DMA tags HTIE/TEIE/CIRC
+// and never ends a normal-mode transfer. DMA1_BASE = D2_AHB1PERIPH_BASE =
+// 0x40020000, DMA1_Stream0..6_IRQn = 11..17, DMA1_Stream7_IRQn = 47
+// (stm32h733xx.h:2239, 72-78, 107). As for ADC3, the base platform's is taken
+// off the bus, and DMAMUX1 channels 0-7 (DMAMUX1_BASE 0x40020800,
+// stm32h733xx.h:2241) feed this one's streams instead.
+dma1: @ none
+
+dma1_h7: DMA.STM32H7_DMA @ sysbus 0x40020000
+    [0-7] -> nvic@[11-17, 47]
+
+dmamux1:
+    [0-7] -> dma1_h7@[0-7]
+
+// DBGMCU (debug unit): IDCODE and CR, which HAL_DMA_Init and the AMS's
+// idle-WFI build touch. Our model, models/renode/Stm32H7Dbgmcu.cs.
+// DBGMCU_BASE = 0x5C001000 (stm32h733xx.h:2491).
+dbgmcu: Miscellaneous.STM32H7_DBGMCU @ sysbus 0x5C001000
+
+// SDMMC1 with its internal DMA, which the AMS's FatFs transfers use. Our
+// model, models/renode/Stm32H7Sdmmc.cs; stm32h7.repl's STM32HSDMMC only tags
+// IDMA. SDMMC1_BASE = D1_AHB1PERIPH_BASE + 0x7000, SDMMC1_IRQn = 49
+// (stm32h733xx.h:2219, 109). As for ADC3, the base platform's is taken off
+// the bus and this one takes its address.
+sdmmc: @ none
+
+sdmmc1: SD.STM32H7_SDMMC @ sysbus 0x52007000
+    IRQ -> nvic@49
+
 // SPI1 — the AMS's LTC6820 isoSPI master. The base platform only tags it.
-spi1: SPI.STM32H7_SPI @ sysbus 0x40013000
+// Renode's STM32H7_SPI with a fault hook (a transfer that never runs) for
+// tests: models/renode/Stm32H7Spi.cs, unchanged until the hook is set.
+// SPI1_BASE = D2_APB2PERIPH_BASE + 0x3000 (stm32h733xx.h:2354, 2194). The
+// AMS polls it, so SPI1_IRQn (35) is not wired. Transfers take their clocked
+// time (#368): the SPI123 kernel clock is PLL1Q (IFS08-CE-AMS
+// stm32h7xx_hal_msp.c:397, RCC_SPI123CLKSOURCE_PLL), HSE 24 MHz / M 2 x N 44
+// / Q 4 = 132 MHz (main.c:377-380), so the AMS's prescaler 256 (main.c:628)
+// gives 515.625 kHz. Only the AMS uses SPI1.
+spi1: SPI.STM32H7_SPIWithFaults @ sysbus 0x40013000
+    kernelClockHz: 132000000
+
+// I2C2 — the MainLite's BMI088 IMU (PF0 SDA / PF1 SCL), read by the AMS's ImuTask
+// with RX on DMA1 Stream 0 through DMAMUX1. Our model,
+// models/renode/Stm32H7I2c.cs: Renode's STM32F7_I2C never NACKs an address
+// nobody answers, so a missing chip cost the HAL its whole timeout. Same
+// address; the event and error lines go straight to the NVIC, as on the
+// chip. I2C2_BASE = D2_APB1PERIPH_BASE + 0x5800 = 0x40005800, I2C2_EV_IRQn =
+// 33, I2C2_ER_IRQn = 34 (stm32h733xx.h:2325, 94-95); I2C2 RX is DMAMUX1
+// request 35 (DMA_REQUEST_I2C2_RX, stm32h7xx_hal_dma.h:260).
+i2c2: @ none
+
+i2c2_h7: I2C.STM32H7_I2C @ sysbus 0x40005800
+    EventInterrupt -> nvic@33
+    ErrorInterrupt -> nvic@34
+    DmaReceive -> dmamux1@35
+
+// CORDIC co-processor, which the H743 lacks (the uDV's attitude filter uses it
+// for atan2 and modulus, IFS09-DV-uDV attitude.c). Our model,
+// models/renode/Stm32H7Cordic.cs. CORDIC_BASE = D2_AHB2PERIPH_BASE + 0x4400 =
+// 0x48024400, CORDIC_IRQn = 154 (stm32h733xx.h:2275, 2196, 192).
+cordic: Miscellaneous.STM32H7_CORDIC @ sysbus 0x48024400
+    IRQ -> nvic@154
+
+// Flash controller with the option bytes (WRP, RDP, boot address, PCROP and
+// secure-area bounds) as non-volatile state and sector write protection
+// enforced on erase and program. Our model, models/renode/Stm32H7Flash.cs;
+// stm32h7.repl's STM32H7_FlashController tags PRAR/SCAR/BOOT/OPTSR2 and
+// never raises WRPERR. FLASH_R_BASE = D1_AHB1PERIPH_BASE + 0x2000, FLASH_IRQn
+// = 4 (stm32h733xx.h:2215, 65). As for ADC3, the base platform's is taken off
+// the bus and this one takes its address.
+flashController: @ none
+
+flashController_h7: MTD.STM32H733_FlashController @ sysbus 0x52002000
+    flash1: flashBank1
+    flash2: flashBank2
+    -> nvic@4

@@ -1,0 +1,148 @@
+name: Scenario tests (vHIL suite)
+
+# The vHIL's own suite: every committed scenario of every system
+# (systems/<system>.scenarios/*.yaml, docs/scenarios.md) run on Renode from
+# power-on, its expects checked against the trace in virtual time
+# (tests/scenarios/test_scenarios.py), with JUnit output.
+#
+# Heavy, so it runs as the native tests do (sim.yml; owner, 2026-10-06;
+# docs/ci.md): a pull request labelled `full-ci` runs the systems its changes
+# select (ci/impact.yaml), `full-ci-all`, a release pull request into main,
+# the nightly run on dev and a manual dispatch run every system's. A gate
+# since #198 (10 clean nightlies, 2026-10-09..18): a failing scenario fails
+# the check, which is required on dev. When no system is selected the job is
+# skipped, which GitHub counts as passing, so it gates the PRs that run it.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: '0 3 * * *'   # nightly, on dev (see the checkout ref)
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # What this event runs (scripts/ci-select.py over ci/impact.yaml).
+  select:
+    uses: ./.github/workflows/select.yml
+
+  scenarios:
+    needs: select
+    # Runs when the selection failed too, to fail (not skip) the check.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.scenarios == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: The selection ran
+        env:
+          SELECT: ${{ needs.select.result }}
+        run: test "$SELECT" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Arm GNU toolchain (pinned like IFS_HIL's recipe)
+        uses: carlosperate/arm-none-eabi-gcc-action@49f4db4520f840e77ab1e99b24cfac2c540a21b1 # v1.14.1
+        with:
+          release: '14.2.Rel1'
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: restore
+          scope: scenarios
+
+      - name: Build the ECU and AMS firmware their systems declare
+        id: fw
+        run: |
+          pip install -q pyyaml "jsonschema>=4" pytest "fastapi==0.115.*" "httpx==0.28.*"
+          for s in ecu ams; do
+            python -m vhil.system build "systems/$s.yaml" --workdir "$RUNNER_TEMP/fw" | tee -a built.txt
+          done
+          echo "ecu=$(sed -n 's/^ecu=//p' built.txt | tail -1)" >> "$GITHUB_OUTPUT"
+          echo "ams=$(sed -n 's/^ams=//p' built.txt | tail -1)" >> "$GITHUB_OUTPUT"
+          echo "bootloader=$(sed -n 's/^ecu.bootloader=//p' built.txt | tail -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: save
+          scope: scenarios
+
+      # Renode 1.17.0 + docker/renode's patches, as the image builds it.
+      - name: Renode (vHIL build)
+        uses: ./.github/actions/setup-renode
+        with:
+          save: ${{ needs.select.outputs.renode_save }}
+
+      - name: FAT tools for SD card images
+        run: sudo apt-get install -y -qq dosfstools mtools >/dev/null
+
+      - name: Run every committed scenario
+        id: run
+        env:
+          RENODE: ${{ runner.temp }}/renode/renode
+          VHIL_ECU_ELF: ${{ steps.fw.outputs.ecu }}
+          VHIL_AMS_ELF: ${{ steps.fw.outputs.ams }}
+          VHIL_CAN_BOOTLOADER_ELF: ${{ steps.fw.outputs.bootloader }}
+          # The selected systems (empty: every system's scenarios;
+          # tests/scenarios/conftest.py).
+          VHIL_SCENARIO_SYSTEMS: ${{ needs.select.outputs.mode != 'all' && needs.select.outputs.scenario_systems || '' }}
+        run: |
+          echo "systems: ${VHIL_SCENARIO_SYSTEMS:-all}"
+          set +e
+          # xunit1: the family whose report keeps each expect's property.
+          python -m pytest tests/scenarios -v --sim-log-dir sim-logs \
+              -o junit_family=xunit1 --junitxml=scenarios.xml
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Results (step summary; a warning per failed scenario)
+        if: always()
+        run: |
+          python - <<'EOF'
+          import os
+          import xml.etree.ElementTree as ET
+          out = ["## vHIL scenario tests", "",
+                 "| Scenario | Result | Expects |", "|---|---|---|"]
+          if not os.path.exists("scenarios.xml"):
+              out.append("| – | no JUnit report | |")
+          else:
+              for case in ET.parse("scenarios.xml").getroot().iter("testcase"):
+                  name = case.get("name", "").removeprefix("test_scenario[").removesuffix("]")
+                  failed = case.find("failure") is not None or case.find("error") is not None
+                  skipped = case.find("skipped") is not None
+                  props = [(p.get("name"), p.get("value")) for p in case.iter("property")]
+                  bad = sum(1 for _, v in props if v.startswith("FAIL"))
+                  verdict = "skipped" if skipped else ("FAILED" if failed else "passed")
+                  out.append(f"| `{name}` | {verdict} | {len(props) - bad}/{len(props)} |")
+                  if failed:
+                      detail = "; ".join(f"{k}: {v}" for k, v in props if v.startswith("FAIL"))
+                      print(f"::warning title=scenario {name} failed::{detail or 'see the log'}")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(out) + "\n")
+          EOF
+
+      - name: Upload the JUnit report and Renode logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scenarios
+          path: |
+            scenarios.xml
+            sim-logs/
+          if-no-files-found: ignore
+
+      - name: Fail the check on a failed scenario
+        if: always()
+        run: |
+          rc="${{ steps.run.outputs.rc }}"
+          if [ "${rc:-1}" != "0" ]; then echo "::error::scenario suite failed (pytest exit $rc)"; exit 1; fi

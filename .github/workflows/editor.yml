@@ -1,0 +1,62 @@
+name: Editor
+
+# The editor image builds from the vendored Pipeline Manager
+# (editor/pipeline-manager/) and its frontend loads every system's graph
+# (`vhil.editor check`, what `scripts/vhil-docker.sh editor-check` runs).
+# On a plain Python base, not the vHIL image: the editor stages need only
+# Python, git and curl, and building Renode's image here would cost minutes.
+#
+# Runs only when the editor's inputs change: the paths ci/impact.yaml maps
+# to `editor: true` (scripts/ci-select.py, docs/ci.md), on any pull request,
+# labelled or not, and on pushes to dev. The filter is a job-level `if:` on
+# the selection, not workflow `paths:`, so a skipped run still reports the
+# check as passed.
+
+on:
+  pull_request:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    uses: ./.github/workflows/select.yml
+
+  editor:
+    needs: select
+    if: needs.select.outputs.editor == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the editor image
+        # The same base docker/Dockerfile pins.
+        run: |
+          base=$(sed -n 's/^FROM \(python:[^ ]*\).*/\1/p' docker/Dockerfile)
+          docker build -t vhil-editor-ci --build-arg BASE="$base" \
+              -f docker/editor.Dockerfile .
+      - name: Pipeline Manager loads every system
+        # vhil's own dependencies (the vHIL image has them), then the
+        # frontend's validator on each system and the editor's unit tests,
+        # which include the same check now that PM_DIR is set.
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work vhil-editor-ci bash -c '
+              set -e
+              pip install -q pyyaml "ruamel.yaml==0.18.*" "jsonschema>=4" pytest
+              python -m vhil.editor check
+              python -m pytest -q tests/unit/test_editor.py tests/unit/test_editor_csp.py'
+      - name: The workspace's shell modules are the shell's
+        # One source (docs/architecture/editor-workspace.md): the image build
+        # copies them from vhil/server/static/ into src/vhil/shell/; the
+        # image's copies must be the checkout's, byte for byte.
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work vhil-editor-ci bash -c '
+              set -e
+              for f in tokens.css editor-run.js vtable.js decode.js plot.js \
+                       vendor/uplot/uPlot.esm.js vendor/uplot/uPlot.min.css; do
+                  cmp "/opt/pm/pipeline_manager/frontend/src/vhil/shell/$f" "vhil/server/static/$f"
+              done
+              echo "shell modules: the image holds the checkout copies"'

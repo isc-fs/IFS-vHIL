@@ -1,0 +1,80 @@
+# TLS reverse proxy in front of the web app (docs/deploy.md), on a host
+# (deploy/compose.prod.yaml) and locally (docker/compose.yaml).
+#
+# VHIL_SITE is a Caddy site address:
+#   vhil.example.org       public: automatic HTTPS (Let's Encrypt)
+#   localhost              local: HTTPS from Caddy's internal CA
+#   http://localhost       local: plain HTTP
+#   http://:8080           local: plain HTTP on 8080, any host name (docker/compose.yaml)
+#
+# One origin. The API serves the shell and /api; the editor (Pipeline
+# Manager) is under /editor/, its socket.io under /editor/socket.io/, the
+# prefix stripped on the way in. It has no login of its own: every request to
+# it is first checked against the API's /api/me, so the browser's session
+# cookie decides; 2xx (a signed-in org member, or anyone in dev mode) passes,
+# anything else is answered with the API's 401. The app's cookies stop at
+# the gate: they are cut from what reaches Pipeline Manager. The editor is
+# on no other port and in no other site.
+#
+# Response headers: nosniff, no referrer across origins, and who may frame a
+# page (CSP frame-ancestors): nobody for the app, and no other origin for the
+# editor. Nothing frames the editor now: it is the vHIL workspace, a page of
+# its own, which the shell's Editor route redirects to (vhil/server/static/
+# editor.js). Each upstream adds its own full CSP (vhil/server/security.py:
+# the API's, and the editor's through PM_CSP), so a browser enforces both.
+# HSTS on HTTPS responses, max-age
+# VHIL_HSTS_MAX_AGE (default one year; 0 for a localhost site, or the
+# browser keeps forcing HTTPS on localhost).
+(common) {
+	encode zstd gzip
+	log {
+		output stdout
+		format console
+	}
+	@https protocol https
+	header @https Strict-Transport-Security "max-age={$VHIL_HSTS_MAX_AGE:31536000}"
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+{$VHIL_SITE} {
+	import common
+	# System files and API bodies are small; nothing posts megabytes.
+	request_body {
+		max_size 8MB
+	}
+
+	redir /editor /editor/ 308
+
+	handle_path /editor/* {
+		header {
+			Content-Security-Policy "frame-ancestors 'self'; base-uri 'none'; object-src 'none'"
+			X-Frame-Options SAMEORIGIN
+		}
+		forward_auth api:8080 {
+			uri /api/me
+			# The check is a plain GET even when the request upgrades to a
+			# WebSocket (the editor's socket.io); passed on, those headers
+			# make the API answer /api/me as a WebSocket (403).
+			header_up -Connection
+			header_up -Upgrade
+			header_up -Sec-WebSocket-*
+		}
+		reverse_proxy editor:5000 {
+			# The session (and CSRF, OAuth) cookies are for the API: Pipeline
+			# Manager never sees them. Its own cookies, if any, pass.
+			header_up Cookie "vhil_[a-z]+=[^;]*(;\s*)?" ""
+		}
+	}
+
+	handle {
+		header {
+			Content-Security-Policy "frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
+			X-Frame-Options DENY
+		}
+		reverse_proxy api:8080
+	}
+}

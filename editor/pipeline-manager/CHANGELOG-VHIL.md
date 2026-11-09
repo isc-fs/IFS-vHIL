@@ -1,0 +1,719 @@
+# vHIL changes to Pipeline Manager
+
+Every divergence of this tree from upstream v0.5.2 (`04613679`), newest last.
+Paths are relative to this directory. Keep it complete: it is what a move to
+a new upstream release is checked against ([README-VHIL.md](README-VHIL.md)).
+
+## Left out of the import
+
+`examples/`, `docs/`, `img/`, `.github/`, `.ci.yml`,
+`.pre-commit-config.yaml` (README-VHIL.md says why). Nothing else differs
+from `git archive 04613679` except as listed below.
+
+## Added
+
+- `README-VHIL.md`, `CHANGELOG-VHIL.md`: this file and its neighbour.
+- `pipeline_manager/frontend/src/vhil/`: vHIL's own frontend code (the workspace, theme,
+  validators, log view, below); `src/vhil/shell/` is filled by the image
+  build and `src/vhil/validators/` by `build-validators.mjs`, neither in git.
+
+## Changed
+
+1. **bus-per-instance** (`pipeline_manager/frontend/src/core/NodeFactory.js`,
+   `createBaklavaInterfaces`). Each node instance gets its own copy of an
+   interface's `bus` object (and its `stubs`). Upstream copies the type's
+   interface with `Object.assign`, so every node of a type shared one `bus`
+   and held the stubs of the last one loaded: a graph with two CAN buses lost
+   all but the last bus's stubs ("Missing dst s:<bus>:0"). Not fixed upstream
+   as of v0.5.2 / main. Was `docker/pm/bus-per-instance.patch`.
+2. **Theme on the vHIL design tokens** (step 4 of the
+   [editor workspace plan](../../docs/architecture/editor-workspace.md)).
+   - `pipeline_manager/frontend/styles/_variables.scss`: the colour variables
+     are `var(--<token>, <dark value>)` on `vhil/server/static/tokens.css`
+     instead of compile-time hex, so a theme switch recolours the editor at
+     run time. Upstream → token: `$white` #ffffff → `--fg`; `$gray-100`
+     #999999 → `--fg-muted`; `$gray-200` #6f6f6f → `--border-control`;
+     `$gray-300` #606060 → `--fg-faint`; `$gray-400` #4a4a4a → 12 % `--fg`
+     over `--bg-3`; `$gray-500` #343434 → `--line`; `$gray-600` #1d1d1d →
+     `--bg-2`; `$gray-700` #151515 → `--bg-1`; `$black` #0f0f0f → `--bg-0`;
+     `$gold` → `--status-warn`; `$red`, `$red-dark` → `--status-failed`;
+     `$green` #00E58D → `--accent`; new `$focus` → `--focus`. The fallbacks
+     are the dark values (`tests/unit/test_editor_theme.py` holds them to
+     tokens.css). The token names are tokens.css's own (`--bg-0`, `--fg`…),
+     not a `--vhil-` alias of them: one name per token, and Pipeline Manager
+     uses none of them.
+   - Sass colour maths can't take a `var()`: `color.adjust($green, $alpha)`
+     (`styles/_editor.scss`), `#{$gray-600}E6` / `80` hex alpha suffixes
+     (`styles/_node.scss`, `styles/_markdown_style.scss`,
+     `components/GraphDetails.vue`, `Settings.vue`, `LoadingScreen.vue`,
+     `menu/ParentMenu.vue`) and `rgba($…)` (`menu/WelcomeMenu.vue`) are
+     `color-mix(in srgb, … N%, transparent)` with the same alpha.
+   - `resources/schemas/metadata_schema.json`: the canvas `backgroundColor`
+     default is `var(--bg-0, #0f1115)` (was `#0f0f0f`), so the canvas follows
+     the theme.
+   - `src/vhil/theme.css`: on the light theme, the SVG icons' hard-coded
+     white `fill`/`stroke` attributes take `--fg`.
+3. **Self-hosted fonts.** `styles/style.scss` drops the Google Fonts
+   `@import` (Montserrat, Roboto, Roboto Mono); `$montserrat`/`$roboto` are
+   `--font-ui` (Inter) and `$roboto-mono` is `--font-mono` (JetBrains Mono),
+   the woff2 files the shell serves, bundled into `dist/fonts/`.
+4. **Focus rings.** `styles/_global.scss`: `:focus-visible` draws a 2 px
+   `--focus` outline. The `outline: none` rules on the sidebar's and the
+   menus' close buttons (`styles/_node_sidebar.scss`,
+   `components/menu/ParentMenu.vue`) and on the group-name input
+   (`custom/RectangleGrouping.vue`) are gone; node property inputs
+   (`styles/_editor.scss`) ring on `:focus-visible` in `--focus` (was
+   `:focus` in green).
+5. **Theme selection.** `src/vhil/` (new): `index.ts` loads the tokens and
+   fonts (`src/vhil/shell/`, copied from `vhil/server/static/` by
+   `docker/editor.Dockerfile`, not in git) and applies `?theme=dark|light|auto`
+   from the URL, dark by default; `theme.ts` sets `data-theme` on `<html>`
+   (`auto`: none, so prefers-color-scheme picks, as in the shell).
+   `src/main.js` imports it first. A new frontend procedure,
+   `vhil_set_theme {theme}` (`core/communication/remoteProcedures.ts`,
+   `resources/api_specification/specification.json`), switches it at run
+   time (the shell's Editor page calls it over postMessage): the page passes
+   its theme in `?theme=` and calls it when the theme changes.
+6. **Served under a path** (step 6 of the editor workspace plan: the editor
+   is on the web app's origin, under `/editor/`, behind its proxy, which
+   strips the prefix). `core/communication/externalApp/backend.ts`: the
+   socket.io client's `path` is `socket.io` next to the page
+   (`new URL('socket.io', document.baseURI)`: `/editor/socket.io` there,
+   upstream's `/socket.io` at the root) when the backend is the page's own
+   origin. Asset URLs were relative already (`publicPath: ''`).
+7. **Precompiled validators** (CSP `script-src 'self'`: Ajv compiles with
+   `new Function`). `src/vhil/build-validators.mjs` (new) compiles, with
+   upstream's two Ajv configurations, every schema the editor checks against
+   into standalone code, `src/vhil/validators/{editor,rpc}.js` with their
+   `.d.ts` (TypeScript's checker overflows its stack inferring the generated
+   code): the specification, dataflow, metadata, graph and message schemas
+   with each of their `$defs`, and every JSON-RPC endpoint's params and
+   returns. `package.json`'s `build-server-app` and `build-static-html` run
+   it first. `core/validate-json.js` takes the precompiled validators and
+   looks one up by the schema's `$id` and the reference (upstream: an Ajv
+   instance, compiling), and uses `JSON.stringify` for Ajv's `stringify`;
+   `core/EditorManager.js` `validateJSONWithSchema` and
+   `core/communication/rpcCommunication.ts` construct no Ajv (its
+   `additionalAjvOptions` parameter, which nothing passed, is gone, and the
+   endpoint schemas' compile check moved to the build script). The bundle
+   keeps only Ajv's runtime helpers.
+8. **The terminal is a plain log** (CSP `style-src 'self'`: hterm wrote
+   inline styles; owner decision). `components/Terminal.vue` renders
+   `src/vhil/LogView.vue` (new): a virtualised list of plain-text lines
+   (only the rows in view are in the DOM; it follows the end unless
+   scrolled up; at most 20 000 lines; escape sequences dropped), with an
+   input line for a writable terminal (Enter sends the line through
+   `requestTerminalRead`, where hterm sent keystrokes). Entries are no
+   longer separated by a blank line. `components/TerminalPanel.vue` focuses
+   that input instead of `#hterm-terminal`. `src/third-party/hterm_all.js`
+   is gone.
+9. **postMessage on one origin.** `custom/Editor.vue` drops messages from
+   any origin but its own (the shell's Editor page, now the same origin)
+   and replies to `event.origin`; `core/communication/externalApp/frontend.ts`
+   posts to `window.location.origin`. Upstream accepted any origin and
+   replied to `'*'`.
+10. **CORS and CSP on the server.** `backend/fastapi.py`: CORS only for the
+    origins `PM_ALLOWED_ORIGINS` names (comma-separated; none by default:
+    upstream allowed `*`), and `backend/socketio.py`'s handshake the same
+    (same origin by default; upstream `*`). A new middleware sends `PM_CSP`
+    as the `Content-Security-Policy` on every response, or
+    `-Report-Only` with `PM_CSP_REPORT_ONLY=1`; unset, none (upstream).
+    vHIL's policy is `EDITOR_CSP` in `vhil/server/security.py`, which
+    `scripts/editor.sh` passes.
+11. **No style attribute in a node's title** (CSP `style-src 'self'`, found
+    by the Report-Only rollout: one report per node render).
+    `custom/CustomNode.vue` built the subtitle as
+    `<pre class="subtitle" style="overflow: hidden; …">`, set with `v-html`;
+    it is the class `subtitle-ellipsis` now, styled in `styles/_node.scss`.
+12. **The vHIL workspace** (step 7 of the editor workspace plan: the layout).
+    `components/Home.vue` lays out the vHIL workspace (`src/vhil/`, new)
+    instead of `NavBar`, the canvas alone and `TerminalPanel`: a 40 px top
+    bar (`VhilTopBar.vue`: the mark, "system @ branch" with a dot for unsaved
+    edits, a firmware chip per board opening the ref picker
+    `VhilRefPicker.vue`, the run's duration, Run (F5) and Stop (Shift+F5),
+    the mode pill, Commit… and Open PR, the theme toggle), the activity rail
+    and sidebar (`VhilRail.vue`, Ctrl+B: Palette, Systems, Runs), the canvas,
+    the inspector (`VhilInspector.vue`, resizable), the bottom dock
+    (`VhilDock.vue`, Ctrl+J, Ctrl/Alt+1..7: Log, Problems, and empty
+    Scenario, State, Bus, Signals and Debug tabs for later steps), the status
+    strip (`VhilStatus.vue`) and the dialogs (`VhilDialogs.vue`: Commit, PR,
+    the `?` keyboard map). What they do (`workspace.js`, `graph.js`, `api.js`,
+    `shortcuts.js`) is what the shell's Editor page did around the editor:
+    the web app's API on the same origin (`/api`, with the session's CSRF
+    token), and Run as `vhil/server/static/editor-run.js` says (copied into
+    `src/vhil/shell/` by the image build, as the tokens are). The graph is
+    read and edited in place (`saveDataflow`, a property's `value`) where the
+    shell went through postMessage JSON-RPC; the URL's `?system=&branch=`
+    opens a system, and the layout and theme are kept per viewer in
+    `localStorage`.
+    - **Gone from the page:** NavBar (its file menu, node search, graph
+      details, settings, notifications panel, fullscreen and backend-status
+      buttons, and the backend's navbar actions, so `Validate system`: Check
+      replaces it) and TerminalPanel (its tab strip and resizer: the dock's
+      Log tab renders `components/Terminal.vue` for the main terminal, and
+      takes `terminalStore.manager`, so `terminal_show` opens the Log). The
+      files are unchanged. Toasts still show; the node sidebar
+      (`custom/CustomSidebar.vue`) is mounted on the canvas, with the
+      `hoveredOver` NavBar provided.
+    - **The palette** (`components/Palette.vue`) is rendered in the canvas's
+      `palette` slot as before, inside a `<Teleport defer>` to the sidebar's
+      `#vhil-palette-host`: it keeps the canvas's `editorEl` injection, so
+      dragging a node onto the canvas places it as before. `workspace.css`
+      takes away its absolute position and slide transform.
+    - **A board's properties are in the inspector, not on its node.**
+      `custom/CustomNode.vue` shows no property rows on a node whose type's
+      `additionalData.vhil.kind` is `board` (the role, firmware, refs and
+      bootloader: five rows that made the board taller than wide). The
+      inspector edits the same property objects, so the node still tells the
+      backend of a role change (`properties_on_change`) and the backend
+      relabels its pins as before. A property's watcher skipped its first
+      change (its control settling as the node mounts); a board's
+      properties have no control on the node, so theirs skips nothing, or
+      the user's first role change would be lost.
+    - **Moved by CSS** (`workspace.css`): the zoom buttons
+      (`components/Zoom.vue`, fixed to the window's corner, where the dock
+      is now) sit in the canvas's corner.
+    - **Layout CSS** is `src/vhil/workspace.css`, on the tokens. Script sets
+      only the grid's sizes, as custom properties through the CSSOM (Vue's
+      `:style` objects), which `style-src 'self'` allows.
+13. **Node shapes and wires** (step 8 of the editor workspace plan).
+    - `custom/CustomNode.vue`: a node whose type's `additionalData.vhil.kind`
+      is `board`, `bus` or `model` draws its own head (`src/vhil/shapes.js`
+      says what it reads, `src/vhil/nodes.css` draws it, on the tokens) in
+      place of the title label, header icon and pill, and takes the classes
+      `vhil-node --vhil-<kind>` plus `--role-<role>` or `--can-<n>`. A board
+      is a card with a 4 px band and a chip in its role's colour (the role as
+      text), a mono sub-line from the specification's `role_info` ("node 0x2"), its pin columns captioned (devices and analog left, CAN and
+      digital right) and an empty `vhil-node-state` slot for the live state
+      pill (step 15); a bus is a thin pill-ended rail (8 px, width `auto`) in
+      its tint, `--can-1..4` by its place among the graph's buses, with its
+      name and bitrate written along it (`bitrate` from the specification);
+      a device is a compact (232 px) dashed card with a count pill (`×10`).
+      The role select relabels the card as it relabels the pins. Every vHIL
+      kind keeps its properties in the inspector (step 7 did so for boards):
+      a bus's netdev, a device's count and parameters.
+    - `custom/connection/ConnectionView.vue`: a wire is classed `--t-<type>`
+      by its interface type, a CAN wire on a bus takes the bus's tint
+      (`--color: var(--can-<n>, …)`), and hovering one shows a tooltip, one
+      element placed through the CSSOM (`src/vhil/shapes.js`): "can_acu ·
+      500 kbit/s · 2 nodes", or the type and both ends ("SPI · ams.SPI1 ↔
+      isospi.spi"). `styles/_connection.scss`: width by type (CAN 3 px; SPI,
+      I2C, SDMMC, UART, analog 2 px; GPIO 1.5 px, round dots) where upstream
+      drew every wire 5 px; hovered, a wire thickens in its own colour
+      (upstream: 6 px green).
+    - `icons/Plus.vue`, `Minus.vue`, `Crosshair.vue` (the zoom buttons) stroke
+      `$white` (`--fg`) instead of a scoped `#ffffff`, white on the light
+      theme's buttons.
+    - `core/communication/ExternalApplicationManager.js` no longer asks the
+      backend for its app capabilities (navbar buttons): nothing shows them,
+      and `vhil.editor` offers none now (its `Validate system` went; Check
+      validates). An empty list can't be returned anyway: the backend
+      library's `send_jsonrpc_message_with_sid` replaces a falsy result with
+      `{}`, which fails the `navbar_items` schema.
+    - `src/vhil/workspace.css`: the node sidebar (`custom/CustomSidebar.vue`)
+      is pinned to the canvas's right edge and hidden while closed; on a wide
+      canvas (the inspector hidden) the closed sidebar showed as an empty
+      panel.
+    - The specification's wire, port, header and pill colours
+      (`vhil/editor.py` `CANVAS_METADATA`) are token `var()`s with the dark
+      value as fallback, so the light theme recolours them.
+14. **Runs, REPLAY and the Bus tab** (step 9 of the editor workspace plan).
+    All in `src/vhil/` but for the image build; no Pipeline Manager file
+    changes.
+    - **REPLAY** (`replay.js`, `workspace.js`): opening a run from Runs
+      (`VhilRail.vue`: each row replays its run; `↗` opens its shell page),
+      or `?run=<id>`, opens the run's system as saved on its branch, loads
+      its record, its CAN contract (`/api/runs/<id>/contract`) and its trace
+      (`/api/runs/<id>/trace?kinds=frame,log`, 50 000 records a page,
+      following `X-Trace-Cursor`: `api.js` `tracePage`), and sets the mode
+      to REPLAY. The top bar (`VhilTopBar.vue`) trades the run duration for
+      the run's clock: a range over its virtual time, `t=` and the end, the
+      run's page link and Exit; the mode pill takes `--status-replay`. The
+      run's log records go to the Log. With no system open, Runs lists every
+      system's runs. Opening a system, or Run, leaves REPLAY.
+    - **Frames** (`frames.js`, `monitor.js`, pure; `tests/js/frames.test.mjs`
+      under node): `FrameStore` keeps frames in typed arrays, a ring of
+      2^20 that drops the oldest, sorted by virtual time (the worker writes a
+      slice bus by bus); `Monitor` folds them into one row per (bus, id) as
+      of a time, only the frames since the last call while time moves
+      forward.
+    - **The Bus tab** (`VhilBus.vue`, `bus.css`; `VhilDock.vue` renders it):
+      Monitor (one row per (bus, id): last data with the bytes changed in
+      the last 250 ms marked, fields decoded, count, mean period, age) and
+      Trace (every frame, filtered by bus and id with the shell's id filter,
+      the frame at the scrubber marked and centred while following, later
+      ones dimmed; a click moves the scrubber). Both are `rowtable.js`: the
+      shell's `vtable.js` window (`windowFor`, `scrollFor`) over a fixed pool
+      of rows made once and filled through `textContent` and classes, drawn
+      once per animation frame; only the rows in view are decoded, with the
+      shell's `decode.js`, and cached. `window.vhilBusTimings` keeps the last
+      600 draw times (ms), for the performance check.
+    - **One source:** `docker/editor.Dockerfile` copies `vtable.js` and
+      `decode.js` from `vhil/server/static/` into `src/vhil/shell/` with the
+      tokens and `editor-run.js`; the editor CI job compares the image's
+      copies with the checkout.
+    - **The shell** (`vhil/server/static/app.js`, `editor.js`): `#/runs/<id>`
+      redirects to `/editor/?run=<id>`, `#/runs` to the Runs view,
+      `#/systems[/<id>]` to the workspace, as `#/editor` did. Its own pages
+      stay under `#/classic/` (`api.js` `runPage`): a run's page keeps its
+      signals and artifacts, which REPLAY doesn't show yet, and links to
+      REPLAY; the runs list keeps its pytest runs.
+
+15. **Scenario model and table** (step 10 of the editor workspace plan). All
+    in `src/vhil/` but for the image build; no Pipeline Manager file changes.
+    - **Scenarios** (`scenarios.js`): the open system's scenario files
+      (`systems/<id>.scenarios/<name>.yaml`; `docs/scenarios.md`), listed on
+      its branch with their last runs, one selected for Run and the Scenario
+      tab, its firmware's CAN contract without a run
+      (`GET /api/systems/<id>/contract`, with the graph's firmware refs), and
+      its check on the server, 400 ms after each edit
+      (`POST .../scenarios/<name>/preview`). It imports nothing of
+      `workspace.js`, which binds the open system, branch and refs to it.
+    - **The model** (`scenario.js`, pure; `tests/js/scenario.test.mjs` under
+      node): a scenario's `stimuli`, `watch` and `expect` lists as one table
+      of rows sorted by time, each pointing at its item, edited in place;
+      what a row targets and sets; the server's messages and a run's expect
+      results by row.
+    - **The Scenario tab** (`VhilScenario.vue`, the row editor `VhilScenarioRow.vue`, `scenario.css`;
+      `VhilDock.vue` renders it): the scenario pick and `+ New`, its
+      description and virtual time, `+ Add row…` (send, periodic, stop,
+      gpio, analog, watch, expect), the state (errors, warnings, unsaved, the
+      last run's expects), the rows `t | action | target | value | result`,
+      and an editor for the selected one. A frame is edited as its message's
+      decoded fields from the contract: a value table as a select, a bit as
+      false/true, a scalar as a number with its unit, range and step, the hex
+      in sync (the shell's `decode.js`, which gains `encodeField`,
+      `rawFromPhysical`, `fieldRange` and `bytesToHex`: one copy); with no
+      contract, raw hex. An expect's signal is built from a source (frame
+      field, frame, symbol, pin), its owner and item, and its value is a
+      label select where the field has a value table.
+    - **The top bar** (`VhilTopBar.vue`): the scenario Run runs, next to the
+      run's duration, which is the scenario's own while one is selected.
+      Run (`workspace.js`) sends its rows and name with the run
+      (`shell/editor-run.js` `runRequest`'s `scenario`), and refuses while
+      the scenario has errors; when the run ends, its expect results are on
+      the rows, in the Log and in Problems.
+    - **Commit…** (`VhilDialogs.vue`) commits the system file, the selected
+      scenario or both, on one branch (the scenario on the system's new
+      commit). `?scenario=` in the URL selects one.
+    - **Problems** (`VhilDock.vue`, `VhilStatus.vue`) list the scenario's
+      check (errors, warnings) and its last run's failed expects with the
+      system's; a click shows the row.
+    - **Times between sync points** (`scenario.js` `appliedAt`,
+      `VhilScenario.vue`): a stimulus row whose time falls between two sync
+      points shows the time it runs at next to its own (`→ 5600.5`, from the
+      contract's `sync_quantum_us`), as the check's warning says
+      (docs/scenarios.md, "Times").
+
+16. **Timeline and the Tests view** (step 11 of the editor workspace plan).
+    All in `src/vhil/`; no Pipeline Manager file changes.
+    - **The timeline** (`VhilTimeline.vue`, laid out by `timeline.js`, pure,
+      `tests/js/timeline.test.mjs`; drawn in `scenario.css`), above the
+      Scenario tab's table, on the virtual-time axis REPLAY's scrubber uses:
+      a lane per bus and per board (and per bus or board a row names that the
+      system lacks), a diamond per `can_send`, a hatched bar per
+      `can_periodic` to its stop, a step per gpio/analog set, a bracket per
+      expect over its window; the watches are the gutter below. A mark is
+      dragged with a 1, 5 or 10 ms snap (checked on the server when it is
+      dropped), or moved with ←/→ when focused; Ctrl+wheel zooms around the
+      pointer, − / fit / + by buttons. SVG geometry is attributes and colour
+      classes, so `style-src 'self'` holds.
+    - **Expected against actual.** When a scenario's run ends, the workspace
+      replays it on the Scenario tab (`workspace.js` `openRun(id, {tab})`;
+      opening any run that ran a scenario selects it): each expect's result
+      sits on its lane at its evidence time, ✓ or ✕ (a click moves the
+      scrubber there, replaying the run first if needed), behind the marks
+      the frames and pin edges the scenario names (REPLAY now loads `edge`
+      records too: `replay.js` `replay.edges`), and the scrubber's time is a
+      line; clicking the axis scrubs.
+    - **Tests** (`VhilRail.vue`): a sidebar view of the open system's
+      scenarios (every system's with none open: `GET /api/scenarios`), each
+      with its last run's state and expects (passed, failed); opening one
+      selects it and replays that run on the Scenario tab, ▶ runs it.
+
+17. **State sources in the Scenario tab** (step 12 of the editor workspace
+    plan; [state view](../../docs/state-view.md)). All in `src/vhil/`; no
+    Pipeline Manager file changes.
+    - **Enum labels** (`VhilScenarioRow.vue`): an expect's value is a select
+      of labels for a symbol too, from the contract's `labels` (the image's
+      DWARF enum or the state view's table), with a field's value table
+      over them: `symbol:ams.g_state_telemetry == Precharge`.
+    - **The `watch` stimulus** (`scenario.js`, `timeline.js`,
+      `VhilScenarioRow.vue`): a watch that starts mid-run is a timed row
+      (a symbol or a pin, as the `watch` rows), a diamond on its board's
+      lane.
+
+18. **The state panel** (step 13 of the editor workspace plan;
+    [state view](../../docs/state-view.md)).
+    - **The model** (`state.js`, pure; `tests/js/state.test.mjs` under node):
+      `StateTrace` keeps each state-view signal's observations as a time
+      series of raw values, fed record by record (samples, edges, frames
+      decoded with the shell's `decode.js`): a replayed run's trace now, a
+      live session's stream later. `cardAt(board, t)` is a board's FSM state
+      (label, for how long, the one before, its transitions), relays,
+      active and latched-cleared faults with reason and age, key values,
+      and staleness (a source silent for three periods); `pillAt` the
+      canvas pill; `lanesOf` the history lanes.
+    - **REPLAY** (`replay.js`) loads the trace's `sample` records too and
+      builds the run's `StateTrace` once its contract (with each board's
+      state view) and trace are in.
+    - **The State tab** (`VhilState.vue`, `VhilStateCard.vue`, `state.css`;
+      `VhilDock.vue` renders it): a 340 px card per board at the scrubber's
+      time: the FSM state at 18 px with "for N ms" and the previous state;
+      contactors and relays as square pills with text (■ closed, filled;
+      □ open); active faults as ✕ pills with reason and age, cleared ones
+      outlined (○); key values with units; "stale" and a dashed card when
+      the state went silent; the history: the FSM state's lane (its states
+      written on it) and each relay's digital lane over the run, and the
+      transitions; a click on either moves the scrubber. Segment positions
+      are set through the CSSOM (`:style` objects). The FSM and digital
+      lanes live here until the Signals tab exists.
+    - **The inspector** (`VhilInspector.vue`): in REPLAY, the selected
+      board's card (without the history) above its properties.
+    - **The node pill** (`custom/CustomNode.vue`, the board's
+      `vhil-node-state` slot from step 8: `VhilNodeState.vue`; `nodes.css`):
+      "AMS · Precharge" at the scrubber's time; while a fault is active it
+      reads "✕ fault" and is ringed, and so is the board's card (`:has()`);
+      "stale" and dashed when its state went silent.
+
+19. **LIVE** (step 15 of the editor workspace plan; [live
+    sessions](../../docs/live-session.md)).
+    - **The session** (`session.js`): a live run's two WebSockets, its trace
+      as it is written (`/api/runs/<id>/live`: frames, samples, edges and
+      logs into the REPLAY store and model, `replay.js` `beginLive` and
+      `feedLive`; its `op` and `clock` records into the session's state) and
+      its channel (`/api/runs/<id>/session`: ops out, acks and control in).
+      Records are flushed every 50 ms at most. Every tab on the run folds the
+      same `op` records (`live.js` `SessionState`, pure,
+      `tests/js/live.test.mjs`), so the one that controls the session and
+      the ones that watch show the same periodic senders and pin levels.
+    - **The workspace** (`workspace.js`): ● Live starts a live session of the
+      saved system (`startLive`, refused as Run is with unsaved edits);
+      opening a running live run (Runs, `?run=`) joins it, as its controller
+      if the server gives control, else view only. The mode pill reads LIVE,
+      PAUSED while paused; the topology is locked (Pipeline Manager's own
+      read-only mode, `graph.js` `setLocked`); when the session ends, what it
+      streamed stays as a REPLAY of the run. "Save as scenario…"
+      (`VhilDialogs.vue`) opens the session's recording
+      (`GET /api/runs/<id>/session/scenario`) as a new scenario in the
+      Scenario tab, which Commit… saves.
+    - **The top bar** (`VhilTopBar.vue`): in LIVE, the run, the clock
+      ("t=12.345 s · RTF 0.98×"), who controls it (Take control once it is
+      free), the idle countdown in its last five minutes with Keep alive,
+      Pause/Resume (Space) and Stop (Shift+F5), and Leave.
+    - **The Bus tab** (`VhilBus.vue`): Monitor and Trace stream (a live
+      batch bumps `replay.tick`: the Monitor folds the new frames, the
+      Trace's index grows, nothing is rebuilt); a Send view (`VhilSend.vue`)
+      composes a frame from the contract's decoded fields or raw hex and
+      sends it once or every N ms as a named periodic (a period under 5 ms
+      asks first), and lists the senders running with Stop and Stop all; a
+      banner says while any runs.
+    - **Inputs** (`VhilInputs.vue`): a board's GPIO inputs as `role="switch"`
+      buttons reading HIGH/LOW, its analog inputs as a voltage with Set, from
+      the contract's `inputs` (`vhil/stateview.py`); in the inspector, and
+      from the board's context menu ("Inputs and analog…",
+      `custom/CustomNode.vue`, a panel `VhilInputsMenu.vue`).
+    - **The canvas**: a bus rail reads its frames a second
+      (`custom/CustomNode.vue`), and a CAN wire whose bus carried frames in
+      the last second marches, four steps a second, still under
+      prefers-reduced-motion (`custom/connection/ConnectionView.vue`
+      `--traffic`, `live.css`). The State tab, the inspector's card and the
+      node pill follow the session's clock.
+    - **The bootloader's window** (`state.js`): before 2 s a card says "in
+      bootloader" and the pill "AMS · bootloader", not the app's first state
+      read from RAM that is still 0.
+    - **The status strip** (`VhilStatus.vue`): the clock, each bus's frames a
+      second, the periodic senders running and Stop all.
+
+20. **The debugger** (step 17 of the editor workspace plan;
+    [debugger](../../docs/debugger.md)).
+    - **The model** (`debug.js`, pure, `tests/js/debug.test.mjs`): the
+      trace's `debug` records folded into each board's breakpoints, watches
+      and the stop it is held at (stack, locals, registers, watch values);
+      every stop, for a REPLAY; how a stop reads ("breakpoint in ecu
+      (control.cpp:35)") and what a breakpoint field's text means (a
+      function, file:line or an address). `replay.js` loads the `debug`
+      records with the trace and feeds a live session's as they come;
+      `session.js` reads a paused clock record's `debug` (`live.held`) and
+      sends an op with `request`, resolving with its ack (a query's result).
+    - **The Debug tab** (`VhilDebug.vue`, `debugui.js`), following the
+      canvas selection (else the held board): a step toolbar with labelled
+      buttons and their keys (Continue F5, Step over F10, Step into F11, Step
+      out Shift+F11, Break, Detach), breakpoints added by function, file:line
+      or address and removed from a list; the firmware source at the stop,
+      read only (`GET /api/runs/<id>/debug/source`, from the image's
+      checkout in the fw volume), a window of lines around the current one
+      (▶, highlighted, scrolled to) with a breakpoint gutter (● buttons that
+      set or clear one); a Disassembly toggle around the pc; the watch list.
+      A REPLAY says it can't be debugged and lists where the session
+      stopped (a click scrubs there). No list of the timeouts that would
+      have fired: the contracts give periods, not receivers' timeouts.
+    - **The frozen-bus banner** (`VhilHeld.vue`), in the Debug and Bus tabs:
+      "Bus frozen: all boards paused at t=… · breakpoint in ecu (…)". The top
+      bar adds where the system is held next to PAUSED; the Debug tab comes
+      up at a stop.
+    - **The inspector** (`VhilDebugInspect.vue`): a held board's call stack
+      (a click picks the frame the source and locals show), its locals and
+      its registers; with nothing selected, the held board's.
+    - **Watches** (`VhilWatches.vue`): a board's list, kept by the worker
+      (the `watches` op), in the Debug tab and the State tab alike, each with
+      its value at the board's stop.
+    - **Keys** (`shortcuts.js`): held at a stop and in control, F5
+      continues, F10 steps over, F11 steps into, Shift+F11 steps out.
+
+21. **Signals, Artifacts, Tests… and the shell's pages retired** (step 18 of
+    the editor workspace plan).
+    - **The Signals tab** (`VhilSignals.vue`, its model `signals.js`, pure,
+      `tests/js/signals.test.mjs`; `signals.css`; `VhilDock.vue` renders
+      it): one plot per signal over the run's virtual time, stacked on one
+      axis, with the shell's `plot.js` over uPlot (copied into
+      `src/vhil/shell/` by the image build with `vendor/uplot/`, and its
+      sheet bundled: one source, as `decode.js`). A signal is a board's
+      state-view FSM state or relay lane (`state.js` `lanesOf`, its values
+      read as their labels on the axis and in the legend: the default,
+      every board's), a decoded field of a CAN message the run carried (an
+      enum or a bit as labelled steps), or a sampled global; the list is
+      kept per system in `localStorage`. The scrubber is a line on every
+      plot and a click on one moves it. Plots rebuild whole, once a second
+      at most while live, and not while the tab is hidden. `plot.js` gains
+      `format`/`levels` (labelled step values) and `cssProvided()`.
+    - **The State tab** (`VhilStateCard.vue`, `VhilState.vue`, `state.css`):
+      its HTML lanes moved to Signals ("Lanes in Signals →"); the
+      transitions stay.
+    - **The Artifacts tab** (`VhilArtifacts.vue`, its model `artifacts.js`,
+      pure, `tests/js/artifacts.test.mjs`): the run's record (state, system
+      and ref, owner, what it ran, virtual and wall time, worker, frames per
+      bus, tests, stimuli moved to a sync point, firmware, its error; Cancel
+      while it may), a pytest run's JUnit cases with their failure snapshots
+      (opened in place), the worker's error, the end of `pytest.txt`, and
+      every file, fetched as text (`api.js` `text`) and never rendered. The
+      run's name in the top bar opens it.
+    - **Tests…** (`VhilTopBar.vue`, a dialog in `VhilDialogs.vue`,
+      `workspace.js` `runPytest`): a pytest run of `tests/sim` on the open
+      system (the test list from `GET /api/tests` as a datalist, a
+      timeout), what the shell's Runs form started; its log streams into the
+      Log and it opens on the Artifacts tab when it ends. A pytest run opened
+      from Runs opens there too.
+    - **Links** (`api.js` `runPage`): a run's link is its replay,
+      `/editor/?run=<id>`, and `?tab=` picks the dock tab (`workspace.js`
+      `start`). The shell's run page, runs list and systems pages are gone
+      (`vhil/server/static/inspect.js`, `runs.js`); `/` redirects here, and
+      every old link with it (`static/editor.js` `redirectFor`).
+    - **Keys** (`shortcuts.js`): Ctrl/Alt+1..8, the eighth tab Artifacts.
+    - **Light theme** (step 4's leftovers): text and icon fills hard-coded
+      white in Pipeline Manager's own components are `$white` (`--fg`):
+      `components/Settings.vue`, `GraphDetails.vue`, `Panel.vue`,
+      `menu/ParentMenu.vue`, `custom/LinkMenu.vue`, `ContextMenu.vue`,
+      `RectangleGrouping.vue`, `styles/_markdown_style.scss`, and the
+      `.normal` fill or stroke of `icons/Backend.vue`, `Bell.vue`, `Buy.vue`,
+      `Cogwheel.vue`, `Cube.vue`, `Indicator.vue`, `Magnifier.vue`,
+      `Save.vue`, `Sidebar.vue`, `VerticalEllipsis.vue`. White set as an SVG
+      attribute (a `color="white"` prop) is `src/vhil/theme.css`'s, as
+      before.
+
+22. **Dependency security fixes** (the frontend's Dependabot alerts).
+    `pipeline_manager/frontend/package-lock.json` is `npm audit fix` (no
+    `--force`, so within each range: e.g. sass 1.69 → 1.105, socket.io-client
+    4.7 → 4.8, webpack 5.100 → 5.111, caniuse-lite, which drops the
+    `-webkit-backdrop-filter` prefix), and `package.json`:
+    - `patch-package` ^7 → ^8.0.1 (tmp ^0.2; `patches/` applies unchanged);
+    - `js-loader` gone from `devDependencies`: nothing loads it, and it
+      pulled uglify-js 0.0.4 and connect 0.5.8;
+    - `overrides` for transitive dependencies whose fix is outside their
+      parent's range: `webpack-dev-server` ^5.2.6 (`vue-cli-service serve`
+      only, whose options are already v5's; selfsigned 5, no node-forge),
+      `postcss-selector-parser` ^7.1.6 (cssnano 5, eslint-plugin-vue),
+      `serialize-javascript` ^7.0.5 (copy- and css-minimizer-webpack-plugin),
+      postcss ^8.5.29 under `@vue/component-compiler-utils` (Vue 2 only,
+      never loaded here), picomatch 2 at ^2.3.2, uuid ^11.1.1 under sockjs,
+      underscore ^1.13.8 (under nomnom, jsonlint's CLI). The built CSS
+      differs from before only in that prefix and in where Sass 1.105 puts
+      declarations that follow a nested rule (same computed styles).
+
+23. **Markdown sanitized** (showdown's open advisories). `src/vhil/markdown.js`
+    (new) renders markdown for `custom/CustomSidebar.vue` (a node's
+    description) and `interfaces/TextAreaInterface.vue` (a text area's
+    preview), which each built their own showdown converter and put its
+    output in `v-html` unsanitized: showdown 2.1.0, the last release, has two
+    XSS alerts and passes raw HTML through. The output now goes through
+    DOMPurify (`target` kept for upstream's new-tab link rewrite, which runs
+    before it), and the input is cut at 20 000 characters, a guard against
+    the ReDoS alert (descriptions and notes are short). Every other `v-html`
+    already went through DOMPurify.
+
+24. **Active firmware branches** (the firmware ref picker,
+    `src/vhil/VhilRefPicker.vue`; `src/vhil/workspace.js` `refsOf`;
+    `src/vhil/artifacts.js` `ageText`, `firmwareText`; `src/vhil/workspace.css`).
+    The app's list is the repo's active branches (`GET
+    /api/firmware/{id}/refs`: default branch, dev/main, open PRs, heads in
+    the server's window), newest first, each option reading `name · 3 d ago ·
+    author · #PR · not built`; under the list, the picked ref's commit, age,
+    author and PR links, and how many inactive branches are hidden. "Show
+    all branches and tags" fetches `?all=1` and lists every branch and the
+    tags; the bootloader lists tags as before. Without the GitHub API the
+    API lists every branch and the picker shows its note. `built` is now
+    the commit's. The Artifacts tab's Firmware reads `ams: feat/x @
+    1a2b3c4d5e6f` from the run's resolved commits. The panel is
+    `min(380px, 100vw - 16px)` wide (was 340px).
+
+25. **Role, firmware and bootloader on the board's node** (owner decision:
+    in the board's rectangle, not on the right). Supersedes change 12's "A
+    board's properties are in the inspector" and change 24's picker.
+    - `custom/CustomNode.vue` renders `src/vhil/VhilBoardControls.vue` (new)
+      on a board, between its head and its pin columns: **Role** and
+      **Bootloader** side by side, **Firmware** under them across the card
+      (its firmware id and repo, set by the role and shown, not picked; the
+      ref dropdown; a line with the ref's commit, age, author, and
+      `▲ not built`). Native `<select>`s, not Pipeline Manager's property
+      rows: one look for the three rows, and a select the node's property
+      watcher sees only when the user changes it (a property row's control
+      "settles" on mount, the change the watcher skips). The role sets the
+      property as its control would, so the backend relabels the node and
+      puts the app on the catalogue's ref (`vhil/editor.py` `switch_role`)
+      as before. A uDV reads "▲ No udv firmware in the catalogue yet".
+      Disabled in LIVE (the topology is locked).
+    - The firmware dropdown lists what change 24's picker did, from the same
+      `GET /api/firmware/{id}/refs` (`workspace.js` `refsOf`, cached per
+      firmware across boards): the catalogue's ref (the empty value, so the
+      file keeps no ref), the active branches newest first
+      (`name · 3 d ago · author · #PR · not built`), a picked ref the list
+      doesn't show (`not active`, `not found`), and "Show all branches and
+      tags…" (an option that toggles the listing; `:show-all` can't be a git
+      ref). The bootloader lists tags. What they list is
+      `src/vhil/refs.js` (new, pure; `tests/js/refs.test.mjs`).
+    - Dragging and keys: the controls carry `no-drag="true"`, which
+      `startDragWrapper` already skips, so a press on a dropdown selects the
+      node without dragging it; `@keydown.stop` keeps keys out of the
+      canvas's hotkeys (Delete) and `@dblclick.stop` from opening the
+      sidebar. Classes only (`src/vhil/nodes.css`), no style attribute.
+    - The node's "settles" flag is `noPropertyRows` (was `inInspector`).
+    - **One place edits each field:** the inspector (`VhilInspector.vue`)
+      shows a board's role, firmware and refs read-only (an empty ref as
+      `<catalogue ref> (catalogue)`); `src/vhil/VhilRefPicker.vue` and its
+      CSS (`workspace.css` `.vhil-picker*`, `.vhil-ref-button`) are gone, and
+      `ws.picker` with them. The top bar's firmware chip shows the board
+      (`workspace.js` `showBoard`: selected, centred, its firmware dropdown
+      focused).
+26. **Native selects keep a pick** (Chrome and Safari on macOS: the top
+    bar's scenario dropdown opened, but clicking an option did nothing).
+    `components/Home.vue` bumps `tick` on every pointerup, keyup and change
+    (and 800 ms later), and passed it to the top bar and the inspector as a
+    prop: a prop change re-renders a component whole, and Vue re-patches
+    every `:value` on each render (it always patches `value`, and since 3.5
+    also sets the attribute), so an open select's options were re-written
+    under its popup, which drops the pick. Now:
+    - `Home.vue` provides `tick` (`inject('vhilTick')`) instead of passing
+      it to `VhilTopBar.vue` and `VhilInspector.vue`; they read it in the
+      computeds that follow the graph (the chips, the node's properties),
+      which keep their old value when they recompute to the same data
+      (`src/vhil/stable.js` `keep`, new, pure; `tests/js/stable.test.mjs`).
+      A pointer event no longer re-renders the top bar.
+    - The top bar's scenario select has `v-memo` (re-rendered only when the
+      scenario, the system or the list changes) and, after a pick, shows
+      what is selected (a refused pick goes back). The inspector's select
+      (inside a `v-for`, where `v-memo` can't go) takes its value through
+      `v-pick` (`stable.js`), which writes the DOM only when it differs, and
+      its options have `v-memo`.
+    - The board's own dropdowns (`VhilBoardControls.vue`) and the dock's
+      selects don't re-render on pointer events, and stay as they were.
+27. **Live logs** (the Log tab shows what a run says as it runs: the
+    worker, the firmware build, Renode and each board's UARTs;
+    `vhil/runlog.py`, [`docs/live-session.md`](../../docs/live-session.md#logs)).
+    - `src/vhil/runlog.js` (new): a run's `log` record as a Log entry
+      (`{ text, source, level }`: virtual time, or the wall time before
+      power-on; source; level; text) and the source filter (`orderSources`
+      orders the chips' names).
+      `workspace.js` (a followed run, a replay) and `session.js` (a live
+      session) log those entries instead of a formatted string.
+    - `src/vhil/LogView.vue`: an entry may be such an object (its text
+      shown); a warning or error row is coloured (`$gold`, `$red`); a
+      `hidden` prop drops the entries of those sources (a change rebuilds
+      the view).
+    - `src/vhil/VhilLog.vue` (new) in place of `components/Terminal.vue` in
+      the dock's Log tab (`VhilDock.vue`): a chip (a toggle button, not a
+      select: change 26) per source to hide or show its lines, remembered
+      in the layout (`logHidden`), and a link to download the run's whole
+      `renode.log`.
+    - `src/core/stores.js` `terminalStore.add`: the main terminal keeps at
+      most 40 000 entries in memory and saves its last 2 000 to
+      localStorage at most twice a second (upstream re-serialised the whole
+      log on every line, which a streaming run makes quadratic).
+28. **A system with no scenarios says so.** The top bar's scenario select
+    offered only "no scenario" for a system without any (`ecu-ams` before
+    its first), which read as a select that doesn't work. Its entries are
+    `src/vhil/scenario.js` `scenarioChoices` (pure; `tests/js/scenario.test.mjs`):
+    "no scenario", a disabled "no scenarios for <system> yet" when there
+    are none, the scenarios, then "New scenario…" (`NEW_SCENARIO`, not a
+    valid name), which keeps the pick (change 26), opens the Scenario tab
+    and focuses its name field (`workspace.js` `askNewScenario` bumps `scen.askName`,
+    which `VhilScenario.vue` watches). The Scenario tab's empty state
+    (`emptyScenarioText`) says how to make one: name it and + New, add
+    rows, Commit… to `systems/<system>.scenarios/<name>.yaml`, or record a
+    ● Live session and "Save as scenario…".
+29. **A system's plants** (M8, #147: the tractive-system plant of `ecu-ams`
+    and `ecu-ams-udv`; [live sessions](../../docs/live-session.md),
+    [scenarios](../../docs/scenarios.md)). All in `src/vhil/`; no Pipeline
+    Manager file changes.
+    - **The model** (`plant.js`, new, pure; `tests/js/plant.test.mjs`):
+      `PlantTrace` keeps the trace's `plant` records (the worker's per-slice
+      state and the contact moves) per plant and name, and `cardAt(plant, t)`
+      is a plant's state at a time: V_link, V_pack and i_pack with units,
+      AIR+, AIR−, Precharge, SDC (coil supply) and Discharge as two-state
+      pills, any other key as name=value. `plantsOf` reads the contract's
+      `plants` (fault inputs, other inputs, parameters with value, unit and
+      status); `parseSetting`, `defaultSet`, `plantOp`, `setText` are what
+      the controls and the row editor set.
+    - **REPLAY and LIVE** (`replay.js`, `session.js`): the trace's `plant`
+      records load and stream with the samples into `replay.plants`.
+      `live.js` folds `plant` ops into each plant's last set values
+      (`SessionState.plants`, `live.plants`) and reads them ("plant ts:
+      pre_open_circuit = true").
+    - **The plant's card** (`VhilPlantCard.vue`, `VhilPlants.vue`;
+      `state.css`): beside the boards' in the State tab and, with nothing
+      selected, in the inspector, at the scrubber's time (following the
+      clock while live), laid out as a board's card.
+    - **Its controls** (`VhilPlantControls.vue`; `live.css`), under the card
+      while live, as a board's inputs (`VhilInputs.vue`): a boolean fault
+      input is a switch, a number (c_scale, r_leak, a parameter) a field
+      with its unit and Set (empty: none, where null is a value), a
+      parameter's status a pill (cited, uncommissioned dashed, override), a
+      list parameter shown only. Each change is a `plant` op. No `<select>`.
+    - **The Scenario tab** (`scenario.js` `actionsFor`, `newItem`;
+      `timeline.js`; `VhilScenario.vue`, `VhilTimeline.vue`,
+      `VhilScenarioRow.vue`; `scenario.css`): "+ Add row…" offers `plant`
+      when the system has plants (the row sets the first fault on); the
+      timeline has a lane per plant, `plant ts`, with its rows as draggable
+      diamonds and its `plant:` expects; the row editor picks the plant and
+      edits its `set` as name/value pairs from what the plant may set
+      (+ Add setting, ✕), a parameter with its unit and status. Its selects
+      take their value through `v-pick` with `v-memo` options, from
+      computeds that `keep` their value (change 26).
+
+30. **A plant's card shows its own keys.** The shutdown circuit (TS-2,
+    `sdc`) records no link, pack or contacts, and its card listed them all as
+    "no data". `src/vhil/plant.js` `PlantTrace.cardAt` shows, once a plant
+    has recorded anything, only the known keys it records (before, all of
+    them), and knows the circuit's two latches as pills (`imd_latch`,
+    `ams_latch`: IMD latch (K4), AMS latch (K5)); `tests/js/plant.test.mjs`.
+
+## Left for later
+
+- **Dependabot alerts with no fix.** `showdown` ≤ 2.1.0 (three: ReDoS and
+  two XSS; its output is sanitized and its input capped, change 23, and the
+  CSP blocks inline script),
+  `braces` ≤ 3.0.3 (build tooling: chokidar, micromatch) and
+  `vue-template-compiler` 2.x (a required peer of
+  `@vue/cli-plugin-typescript` 5; the Vue 3 build never loads it) have no
+  patched release.
+
+- **Light theme contrast on coloured pills.** `custom/Editor.js`
+  `getTextColor` picks white or black text from a pill's hex colour; a
+  token `var()` isn't hex, so it reads white. vHIL's own nodes draw their
+  heads themselves (step 8) and show no such pill.
+- **HTML from the specification** (node titles and pills in
+  `custom/CustomNode.vue`, palette entries: `v-html` through DOMPurify): a
+  `style` attribute in it is refused by the CSP. vHIL's specification puts
+  none there.
+- **Screenshot baselines.** The editor image has Playwright's library
+  (`node_modules`) but no browser; the dark/light × 1366×768/1920×1080
+  baselines and the axe scan wait for a pinned browser in CI.

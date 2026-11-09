@@ -1,4 +1,7 @@
-# IFS_vHIL — proposal
+# IFS-vHIL — proposal
+
+> **Direction and roadmap now live in [`vision.md`](vision.md).** This
+> document keeps the Phase 0/1 design, spike results and findings.
 
 **Status:** Phase 0 (feasibility spike) done — see [§3](#3-what-the-spike-proved).
 **Date:** 2026-10-01
@@ -6,7 +9,7 @@
 ## 1. Why
 
 [IFS_HIL](https://github.com/isc-fs/IFS_HIL) runs the real firmware on real
-carriers, and nothing replaces that. But it is one bench, behind one runner,
+boards, and nothing replaces that. But it is one bench, behind one runner,
 on one person's desk:
 
 - A run needs `bench-01` powered, online and unwedged. When it isn't, every
@@ -48,7 +51,7 @@ bench's own hardware stay physical.
 IFS_HIL recipe ─▶ ECU08.elf / AMS.elf  (identical to what the bench flashes)
                         │
         ┌───────────────▼────────────────────────────┐
-        │ Renode  ·  one machine per carrier          │
+        │ Renode  ·  one machine per board          │
         │  platforms/cpus/stm32h733.repl              │
         │   ├─ FDCAN1/2/3 ─▶ CAN hubs (inv/acu/dash)  │
         │   ├─ ADC3       ◀─ SetVoltage (pedals, I)   │
@@ -65,12 +68,13 @@ IFS_HIL recipe ─▶ ECU08.elf / AMS.elf  (identical to what the bench flashes)
   ([`platforms/cpus/stm32h733.repl`](../platforms/cpus/stm32h733.repl)): it
   reuses Renode's common `stm32h7.repl` and adds what the H733 has and the
   H743 lacks — FDCAN3, TIM23 (the HAL timebase), USART10, a real SPI1 — plus
-  the H733 memory map and the carriers' 24 MHz HSE. Every address and IRQ is
+  the H733 memory map and the MainLite's 24 MHz HSE. Every address and IRQ is
   from ST's `stm32h733xx.h`.
 - **Boot.** The app images are linked at `0x08020000` behind the CAN
   bootloader. The ECU never sets VTOR itself, so the boot script does what
   the bootloader would: load the ELF, set VTOR, start. (Emulating the
-  bootloader too is Phase 4.)
+  bootloader too is Phase 4.) *Since #4, every system boots through the real
+  CAN bootloader instead (CLAUDE.md invariant 5).*
 - **CAN.** One Renode CAN hub per physical bus. On Linux, `SocketCANBridge`
   exposes each hub as a `vcan` interface, which is exactly what the physical
   bench's tests already talk to — the main reason the suites can be reused.
@@ -155,10 +159,10 @@ the Pico emulator's own fidelity.
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
 | **0 — spike** ✅ | H733 platform, ECU boot script, Robot smoke test | ECU boots, all three buses at the right rates |
-| **1 — CAN I/O + CI** | SocketCAN bridge to `vcan`, a pytest fixture that starts Renode and yields the buses, CI workflow building the ECU from IFS_HIL's recipe | IFS_HIL's ECU `smoke` suite (A, B, F, I) passes unmodified against the virtual ECU in GitHub Actions |
-| **2 — AMS** | LTC6820/LTC6811 chain model (C#), AMS boot script, GPIO/ADC stimulus adapter | AMS boots out of Error with seeded cells; AMS `smoke` passes |
-| **3 — fleet integration** | A `kind: virtual` bench descriptor in IFS_HIL, routed to GitHub-hosted runners; `/hil-test` picks virtual when no physical capability is needed | A firmware PR gets a virtual verdict without bench-01 |
-| **4 — depth** | CAN bootloader emulation (A-003, Block D), fault injection, coverage reports, multi-node (ECU ↔ AMS on one virtual bus) | ECU and AMS talking to each other, no simulators |
+| **1 — CAN I/O + CI** ([#1](https://github.com/isc-fs/IFS-vHIL/issues/1)) | SocketCAN bridge to `vcan`, a pytest fixture that starts Renode and yields the buses, CI workflow building the ECU from IFS_HIL's recipe | IFS_HIL's ECU `smoke` suite (A, B, F, I) passes unmodified against the virtual ECU in GitHub Actions |
+| **2 — AMS** ([#2](https://github.com/isc-fs/IFS-vHIL/issues/2)) | LTC6820/LTC6811 chain model (C#), AMS boot script, GPIO/ADC stimulus adapter | AMS boots out of Error with seeded cells; AMS `smoke` passes |
+| **3 — fleet integration** ([#3](https://github.com/isc-fs/IFS-vHIL/issues/3)) | A `kind: virtual` bench descriptor in IFS_HIL, routed to GitHub-hosted runners; `/hil-test` picks virtual when no physical capability is needed | A firmware PR gets a virtual verdict without bench-01 |
+| **4 — depth** ([#4](https://github.com/isc-fs/IFS-vHIL/issues/4)) | CAN bootloader emulation (A-003, Block D), fault injection, coverage reports, multi-node (ECU ↔ AMS on one virtual bus) | ECU and AMS talking to each other, no simulators |
 
 Phase 1 is the decisive one: if the existing suites run unmodified, the rest
 is incremental.
@@ -171,8 +175,9 @@ is incremental.
   assert on sub-millisecond timing need loose tolerances or stay physical.
 - **Silent no-ops.** Renode *tags* unmodelled peripherals: writes are dropped
   and reads return 0. A firmware path that depends on one can pass for the
-  wrong reason. Mitigation: fail CI on new "non existing peripheral" warnings
-  outside an allow-list.
+  wrong reason. Mitigation (in place): the peripheral guard fails any run
+  whose firmware touches unmodelled hardware not explained in
+  `configs/peripherals.yaml`.
 - **Linux-only CAN bridge.** `SocketCANBridge` needs Linux (or WSL2 with
   `vcan`). CI is Linux, so this only affects local runs on Windows/macOS.
 - **Upstream drift.** Pin the Renode version; bump deliberately.

@@ -1,0 +1,159 @@
+name: Image
+
+# Publishes the vHIL's Docker images to the org's registry, so a teammate
+# pulls them instead of building Renode from source (#373):
+#
+#   ghcr.io/isc-fs/ifs-vhil:<base key>           docker/Dockerfile
+#   ghcr.io/isc-fs/ifs-vhil-editor:<editor key>  docker/editor.Dockerfile
+#
+# Keys come from scripts/image-key.sh (a hash of each build's inputs), so
+# scripts/vhil-docker.sh finds the image of any clean checkout by its key.
+# Each image is built once per key, natively on an amd64 and an arm64 runner
+# (Colima on Apple silicon is arm64), and joined into one multi-arch tag.
+# Moving tags, the same on both images (deploy/compose.prod.yaml's VHIL_TAG):
+# `dev` follows the dev branch; a release tag `vX.Y.Z` gets `vX.Y.Z` and
+# `latest`.
+
+on:
+  push:
+    branches: [dev]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io/isc-fs
+
+jobs:
+  key:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      base: ${{ steps.key.outputs.base }}
+      editor: ${{ steps.key.outputs.editor }}
+      base_missing: ${{ steps.have.outputs.base_missing }}
+      editor_missing: ${{ steps.have.outputs.editor_missing }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: key
+        run: scripts/image-key.sh | tee -a "$GITHUB_OUTPUT"
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Already published?
+        id: have
+        env:
+          BASE: ${{ steps.key.outputs.base }}
+          EDITOR: ${{ steps.key.outputs.editor }}
+        run: |
+          missing() { docker buildx imagetools inspect "$1" >/dev/null 2>&1 && echo false || echo true; }
+          echo "base_missing=$(missing "$REGISTRY/ifs-vhil:$BASE")" | tee -a "$GITHUB_OUTPUT"
+          echo "editor_missing=$(missing "$REGISTRY/ifs-vhil-editor:$EDITOR")" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: key
+    if: needs.key.outputs.base_missing == 'true' || needs.key.outputs.editor_missing == 'true'
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      BASE: ${{ needs.key.outputs.base }}
+      EDITOR: ${{ needs.key.outputs.editor }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Per-arch tags (<key>-amd64, <key>-arm64); the manifest job joins them.
+      # The amd64 build reads the Renode stage from CI's cache (scope renode,
+      # .github/actions/setup-renode); each arch keeps a cache of its own.
+      - name: ifs-vhil
+        if: needs.key.outputs.base_missing == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: docker
+          file: docker/Dockerfile
+          push: true
+          provenance: false
+          tags: ${{ env.REGISTRY }}/ifs-vhil:${{ env.BASE }}-${{ matrix.arch }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: |
+            type=gha,scope=renode
+            type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,scope=image-${{ matrix.arch }},mode=max,ignore-error=true
+      - name: ifs-vhil-editor
+        if: needs.key.outputs.editor_missing == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/editor.Dockerfile
+          push: true
+          provenance: false
+          build-args: BASE=${{ env.REGISTRY }}/ifs-vhil:${{ env.BASE }}-${{ matrix.arch }}
+          tags: ${{ env.REGISTRY }}/ifs-vhil-editor:${{ env.EDITOR }}-${{ matrix.arch }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+  manifest:
+    needs: [key, build]
+    # After a build, or with nothing to build (both keys published already).
+    if: always() && needs.key.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      BASE: ${{ needs.key.outputs.base }}
+      EDITOR: ${{ needs.key.outputs.editor }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Multi-arch tags
+        run: |
+          set -euo pipefail
+          # The moving tags this ref gets: dev, a release tag and latest, or none.
+          moving=
+          if [ "$REF_TYPE" = tag ]; then moving="$REF_NAME latest"
+          elif [ "$REF_NAME" = dev ]; then moving=dev
+          fi
+          for pair in "ifs-vhil:$BASE" "ifs-vhil-editor:$EDITOR"; do
+              ref=$REGISTRY/$pair
+              if ! docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+                  docker buildx imagetools create -t "$ref" "$ref-amd64" "$ref-arm64"
+              fi
+              for m in $moving; do
+                  docker buildx imagetools create -t "$REGISTRY/${pair%%:*}:$m" "$ref"
+              done
+              echo "\`$ref\`${moving:+ (also \`$moving\`)}" >> "$GITHUB_STEP_SUMMARY"
+          done

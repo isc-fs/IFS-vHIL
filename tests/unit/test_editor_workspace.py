@@ -1,0 +1,296 @@
+"""The editor is the vHIL workspace (step 7 of
+docs/architecture/editor-workspace.md; editor/pipeline-manager/CHANGELOG-VHIL.md):
+Pipeline Manager's page is laid out by src/vhil/, and the shell's Editor
+route only sends the browser there. The browser checks (layout, Run, the
+role select, the CSP console) are in the PR that laid it out."""
+import re
+
+from vhil.system import REPO
+
+FRONTEND = REPO / "editor/pipeline-manager/pipeline_manager/frontend"
+VHIL = FRONTEND / "src/vhil"
+STATIC = REPO / "vhil/server/static"
+
+
+def test_the_page_is_the_workspace_not_pipeline_managers_navbar():
+    home = (FRONTEND / "src/components/Home.vue").read_text()
+    template = home.split("<script>")[0]
+    for part in ("VhilTopBar", "VhilRail", "VhilInspector", "VhilDock", "VhilStatus"):
+        assert f"<{part}" in template, part
+    assert "<NavBar" not in template and "<TerminalPanel" not in template
+    # The palette stays inside the canvas (its drag-and-drop injection) and
+    # is shown in the sidebar.
+    assert re.search(r'<Teleport to="#vhil-palette-host" defer>\s*<Palette />', template)
+    assert 'id="vhil-palette-host"' in (VHIL / "VhilRail.vue").read_text()
+
+
+def test_the_keyboard_map():
+    keys = (VHIL / "shortcuts.js").read_text()
+    for key in ("'F5'", "ev.shiftKey", "'b'", "'j'", "Digit([1-8])", "'?'"):
+        assert key in keys, key
+
+
+def test_run_is_the_shells_run_request():
+    """One copy of what Run sends: the shell's editor-run.js, copied in by
+    the image build (not in git under src/vhil/shell/)."""
+    workspace = (VHIL / "workspace.js").read_text()
+    assert "from './shell/editor-run.js'" in workspace
+    dockerfile = (REPO / "docker/editor.Dockerfile").read_text()
+    assert "vhil/server/static/editor-run.js" in dockerfile
+    assert "!vhil/server/static/editor-run.js" in (
+        REPO / "docker/editor.Dockerfile.dockerignore").read_text()
+
+
+def test_commit_builds_a_new_branch_on_the_opened_commit():
+    """As the shell's page did (#167): a commit names the commit the system
+    was opened at (or last committed as) as its base, so the new branch
+    runs with this deployment's code."""
+    workspace = (VHIL / "workspace.js").read_text()
+    assert "base: s.ref || ''" in workspace
+    assert "if (ws.base) body.base = ws.base;" in workspace
+    assert "ws.base = out.ref;" in workspace
+
+
+def test_shaped_nodes_show_no_property_rows():
+    """A shaped node (step 8: every vHIL kind is one) shows none of Pipeline
+    Manager's property rows: a bus's and a device's properties are edited in
+    the inspector, a board's role and refs by its own dropdowns."""
+    node = (FRONTEND / "src/custom/CustomNode.vue").read_text()
+    assert "const noPropertyRows = vhilType !== null;" in node
+    assert "if (noPropertyRows) return bigBuses.value;" in node
+
+
+def test_a_board_picks_its_role_firmware_and_bootloader_on_its_node():
+    """Role, firmware branch and bootloader tag are dropdowns on the board's
+    node, the only place they are edited: the inspector shows them
+    read-only, the top bar's chip shows the board, and the ref picker is
+    gone. The dropdowns don't drag the node or reach the canvas's hotkeys,
+    and set no style attribute (CSP style-src 'self')."""
+    node = (FRONTEND / "src/custom/CustomNode.vue").read_text()
+    assert '<VhilBoardControls v-if="vhil?.kind === \'board\'" :node="node" />' in node
+    controls = (VHIL / "VhilBoardControls.vue").read_text()
+    template = controls.split("<script>")[0]
+    assert 'no-drag="true"' in template and "@keydown.stop" in template
+    assert template.count("<select") == 3
+    assert "pickRef(props.node, part.refProp, value)" in controls
+    assert "setProp(props.node, 'role', value)" in controls
+    assert "No {{ app.fwId }} firmware in the catalogue yet" in template
+    assert ":style" not in template and "style=" not in template
+    # The drag handler skips what is marked no-drag.
+    assert "if (ev.target.closest('[no-drag=\"true\"]')) return;" in node
+    inspector = (VHIL / "VhilInspector.vue").read_text()
+    assert "readonly: p.readonly || onNode" in inspector and "pickRef" not in inspector
+    assert not (VHIL / "VhilRefPicker.vue").exists()
+    assert "VhilRefPicker" not in (FRONTEND / "src/components/Home.vue").read_text()
+    assert '@click="showBoard(chip.id)"' in (VHIL / "VhilTopBar.vue").read_text()
+    css = (VHIL / "nodes.css").read_text()
+    assert ".vhil-board-controls {" in css
+
+
+def test_node_shapes():
+    """Step 8: a board card with a role band and sub-line, a bus rail with
+    its name and bitrate, a device card with a count pill, an empty slot for
+    the live state; the classes nodes.css draws them from."""
+    node = (FRONTEND / "src/custom/CustomNode.vue").read_text()
+    template = node.split("\n<script setup>")[0]
+    for part in ('class="vhil-node-head"', 'class="vhil-node-role"', 'class="vhil-node-count"',
+                 'class="vhil-node-state"', 'class="vhil-node-sub"', 'class="vhil-bus-label"',
+                 'class="vhil-pin-groups"'):
+        assert part in template, part
+    assert "import '../vhil/nodes.css';" in node
+    css = (VHIL / "nodes.css").read_text()
+    for rule in (".--vhil-board", ".--vhil-bus", ".--vhil-model", "border: 1px dashed",
+                 ".vhil-node.--role-ams { --vhil-role: var(--role-ams); }",
+                 *(f".vhil-node.--can-{i} {{ --vhil-tint: var(--can-{i}); }}" for i in range(1, 5))):
+        assert rule in css, rule
+    # On the tokens only: no literal colour.
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", css)
+
+
+def test_wires_by_type_bus_tint_and_tooltip():
+    view = (FRONTEND / "src/custom/connection/ConnectionView.vue").read_text()
+    assert "[`--t-${type}`]" in view and "var(--can-${tint.value}" in view
+    assert '@pointermove="showTip"' in view and '@pointerleave="hideWireTip"' in view
+    scss = (FRONTEND / "styles/_connection.scss").read_text()
+    for width in ("--w: 2px;", "&.--t-can {\n        --w: 3px;", "&.--t-gpio {\n        --w: 1.5px;"):
+        assert width in scss, width
+    shapes = (VHIL / "shapes.js").read_text()
+    # The tooltip is placed through the CSSOM, never a style attribute.
+    assert "tip.style.transform" in shapes and "setAttribute('style'" not in shapes
+    assert "innerHTML" not in shapes
+
+
+def test_zoom_icons_follow_the_theme():
+    for icon in ("Plus", "Minus", "Crosshair"):
+        text = (FRONTEND / f"src/icons/{icon}.vue").read_text()
+        assert "#ffffff" not in text and "stroke: $white;" in text, icon
+
+
+def test_the_front_page_only_redirects_into_the_workspace():
+    """Step 18: the shell's own pages are gone (its run page, runs list and
+    pytest form, systems pages); / is a redirect into /editor/, which every
+    old link reaches through editor.js redirectFor (tests/js/redirect.test.mjs)."""
+    app = (STATIC / "app.js").read_text()
+    assert "location.replace(redirectFor(location.hash))" in app
+    assert "innerHTML" not in app and "<iframe" not in (STATIC / "editor.js").read_text()
+    index = (STATIC / "index.html").read_text()
+    assert 'href="/editor/"' in index and "<nav" not in index
+    for gone in ("inspect.js", "runs.js"):
+        assert not (STATIC / gone).exists(), gone
+    assert ".ed-grid" not in (STATIC / "app.css").read_text()
+    assert "/editor/?run=${id}" in (VHIL / "api.js").read_text()
+    workspace = (VHIL / "workspace.js").read_text()
+    assert "const run = Number(q.get('run'));" in workspace
+    assert "await openRun(run, { tab });" in workspace
+
+
+def test_the_workspace_covers_the_old_run_page():
+    """REPLAY shows what the shell's run page did: frames (Bus), signals
+    (Signals, on the shell's plot.js), log (Log) and artifacts (Artifacts);
+    and the runs list's pytest form is Tests… in the top bar."""
+    workspace = (VHIL / "workspace.js").read_text()
+    for tab in ("bus", "signals", "log", "artifacts"):
+        assert f"{{ id: '{tab}', label: " in workspace, tab
+    dock = (VHIL / "VhilDock.vue").read_text()
+    assert "<VhilSignals v-else-if=\"tab.id === 'signals'\" />" in dock
+    assert "<VhilArtifacts v-else-if=\"tab.id === 'artifacts'\" />" in dock
+    signals = (VHIL / "VhilSignals.vue").read_text()
+    assert "from './shell/plot.js'" in signals and "innerHTML" not in signals
+    assert "kind: 'pytest', select: tests" in workspace and "export function runPytest()" in workspace
+    assert "@click=\"ws.dialog = 'pytest'\"" in (VHIL / "VhilTopBar.vue").read_text()
+    replay = (VHIL / "replay.js").read_text()
+    assert "kinds: 'frame,log,edge,sample,bus_load,debug,plant'" in replay
+
+
+def test_replay():
+    """Opening a run enters REPLAY: the mode, the cursor-paged trace, the
+    scrubber in the top bar, the Bus tab."""
+    workspace = (VHIL / "workspace.js").read_text()
+    assert "ws.mode = 'REPLAY';" in workspace
+    assert "ws.layout.dockTab = run.scenario?.kind === 'pytest' && tab === 'bus'" in workspace
+    assert "export function openRun(id, { tab = 'bus' } = {}) {" in workspace
+    assert "{ id: 'bus', label: 'Bus' }," in workspace
+    replay = (VHIL / "replay.js").read_text()
+    assert "/api/runs/${run.id}/trace?" in replay and "q.set('cursor', cursor)" in replay
+    assert "/api/runs/${run.id}/contract" in replay
+    top = (VHIL / "VhilTopBar.vue").read_text()
+    assert 'type="range"' in top and 'v-model.number="replay.t"' in top
+    assert "<VhilBus v-else-if=\"tab.id === 'bus'\" />" in (VHIL / "VhilDock.vue").read_text()
+    assert '@click="openRun(r.id)"' in (VHIL / "VhilRail.vue").read_text()
+
+
+def test_the_bus_tab_reuses_the_shells_table_and_decoder():
+    """One copy of vtable.js, decode.js and plot.js: the image build copies
+    them into src/vhil/shell/ (and the editor CI job compares the copies); no
+    fork."""
+    assert "from './shell/decode.js'" in (VHIL / "VhilBus.vue").read_text()
+    assert "from './shell/vtable.js'" in (VHIL / "rowtable.js").read_text()
+    for name in ("vtable.js", "decode.js", "plot.js"):
+        assert not (VHIL / name).exists() and not (VHIL / "shell" / name).is_symlink()
+        assert f"vhil/server/static/{name}" in (REPO / "docker/editor.Dockerfile").read_text()
+        assert f"!vhil/server/static/{name}" in (
+            REPO / "docker/editor.Dockerfile.dockerignore").read_text()
+    ci = (REPO / ".github/workflows/editor.yml").read_text()
+    assert "for f in tokens.css editor-run.js vtable.js decode.js plot.js \\" in ci
+    assert "vendor/uplot/uPlot.esm.js vendor/uplot/uPlot.min.css; do" in ci
+    assert 'cmp "/opt/pm/pipeline_manager/frontend/src/vhil/shell/$f" "vhil/server/static/$f"' in ci
+
+
+def test_the_bus_tables_stay_fast_and_csp_clean():
+    """Rows reused and filled as text (no parsed HTML, no style attribute),
+    drawn once per animation frame; only the rows in view decoded."""
+    table = (VHIL / "rowtable.js").read_text()
+    assert "requestAnimationFrame" in table and "innerHTML" not in table
+    assert "this.fill(i, row)" in table and "this.pool" in table
+    bus = (VHIL / "VhilBus.vue").read_text()
+    assert "innerHTML" not in bus and "v-html" not in bus
+    assert "requestAnimationFrame(draw)" in bus and "decoded.get(i)" in bus
+    frames = (VHIL / "frames.js").read_text()
+    assert "new Float64Array(capacity)" in frames and "this.dropped += 1;" in frames
+
+
+def test_the_scenario_tab():
+    """Step 10: the Scenario tab edits the selected scenario's rows, frames
+    through the shell's decode.js (one copy, which encodes too), checked on
+    the server on each edit; Run sends its rows; Commit… commits it."""
+    assert "<VhilScenario v-else-if=\"tab.id === 'scenario'\" />" in (
+        VHIL / "VhilDock.vue").read_text()
+    tab = (VHIL / "VhilScenario.vue").read_text() + (VHIL / "VhilScenarioRow.vue").read_text()
+    assert "from './shell/decode.js'" in tab and "dec.encodeField(" in tab
+    assert "v-html" not in tab and "innerHTML" not in tab
+    scenarios = (VHIL / "scenarios.js").read_text()
+    assert "/preview${query(c)}" in scenarios and "/contract${query(c)}" in scenarios
+    assert "from './workspace.js'" not in scenarios      # bound, not imported (no cycle)
+    workspace = (VHIL / "workspace.js").read_text()
+    assert "system: ws.id, ref: ws.runRef, dataflow, virtualMs, scenario," in workspace
+    assert "await commitScenario({" in workspace
+    run = (STATIC / "editor-run.js").read_text()
+    assert "Object.assign(run, { name: scenario.name, stimuli, watch, expect });" in run
+    assert "export function encodeField(" in (STATIC / "decode.js").read_text()
+
+
+def test_the_timeline_and_the_tests_view():
+    """Step 11: the timeline draws the scenario on REPLAY's time axis (SVG
+    attributes and classes, no style attribute), drags with a snap, zooms
+    with Ctrl+wheel and lays the run's results over its lanes; a scenario's
+    run is replayed on the Scenario tab when it ends; Tests lists them."""
+    assert "<VhilTimeline :buses=\"buses\" :boards=\"boardNames\" :plants=\"plants\" />" in (
+        VHIL / "VhilScenario.vue").read_text()
+    tl = (VHIL / "VhilTimeline.vue").read_text()
+    template = tl.split("<script>")[0]
+    assert " style=" not in template and ":style" not in template and "v-html" not in template
+    assert "snap(drag.t0 + (ev.clientX - drag.x0) / scale.value, snapMs.value)" in tl
+    assert "if (!ev.ctrlKey && !ev.metaKey) return;" in tl
+    assert "replay.t = Math.min(replay.end, r.tUs);" in tl
+    assert "kinds: 'frame,log,edge,sample,bus_load,debug,plant'" in (VHIL / "replay.js").read_text()
+    workspace = (VHIL / "workspace.js").read_text()
+    assert "openRun(id, { tab: 'scenario' });" in workspace
+    rail = (VHIL / "VhilRail.vue").read_text()
+    assert "id: 'tests', label: 'Tests'" in rail and "call('GET', '/api/scenarios')" in rail
+
+
+def test_the_state_tab_inspector_card_and_node_pill():
+    """Step 13: a card per board in the State tab (with its history), the
+    selected board's in the inspector and a pill on its node, all from the
+    run's trace (samples too) through state.js; status as text and glyphs;
+    positions through the CSSOM (:style objects), never a style attribute."""
+    dock = (VHIL / "VhilDock.vue").read_text()
+    assert "<VhilState v-else-if=\"tab.id === 'state'\" />" in dock
+    assert "{ id: 'state', label: 'State' }," in (VHIL / "workspace.js").read_text()
+    replay = (VHIL / "replay.js").read_text()
+    assert "new StateTrace(replay.contract, { rawOf: rawValue })" in replay
+    assert "from './shell/decode.js'" in replay
+    card = (VHIL / "VhilStateCard.vue").read_text()
+    template = card.split("<script>")[0]
+    assert " style=" not in template and "v-html" not in template
+    for text in ("no active faults", "'■'", "'□'", "✕", "○", "stale", "for {{ duration("):
+        assert text in card, text
+    assert "<VhilStateCard" in (VHIL / "VhilInspector.vue").read_text()
+    node = (FRONTEND / "src/custom/CustomNode.vue").read_text()
+    assert '<VhilNodeState :board="node.title || node.type" />' in node
+    assert "✕ fault" in (VHIL / "VhilNodeState.vue").read_text()
+    for css in ("state.css", "nodes.css"):
+        assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", (VHIL / css).read_text()), css
+
+
+def test_the_debug_tab():
+    """Step 17 (docs/debugger.md): the Debug tab is a dock tab, not a slot;
+    its step buttons carry their keys as text, it draws no inline style, and
+    it sends debug ops only over the session channel."""
+    assert "{ id: 'debug', label: 'Debug' }," in (VHIL / "workspace.js").read_text()
+    assert "<VhilDebug v-else-if=\"tab.id === 'debug'\" />" in (VHIL / "VhilDock.vue").read_text()
+    template = (VHIL / "VhilDebug.vue").read_text().split("<script>")[0]
+    for label, key in (("Continue", "F5"), ("Step over", "F10"), ("Step into", "F11"),
+                       ("Step out", "Shift+F11")):
+        assert f"{label} <kbd>{key}</kbd>" in template, label
+        assert f'aria-keyshortcuts="{key}"' in template, key
+    assert "can't be debugged" in template
+    assert "Bus frozen" in (VHIL / "VhilHeld.vue").read_text()
+    ui = (VHIL / "debugui.js").read_text()
+    assert "request({ kind: 'debug', board, ...op })" in ui and "/debug/source?" in ui
+    keys = (VHIL / "shortcuts.js").read_text()
+    assert "F10: 'next'" in keys and "ev.shiftKey ? 'finish' : 'step'" in keys
+    for vue in ("VhilDebug.vue", "VhilDebugInspect.vue", "VhilWatches.vue", "VhilHeld.vue"):
+        t = (VHIL / vue).read_text().split("<script>")[0]
+        assert " style=" not in t and ":style" not in t and "v-html" not in t, vue
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", (VHIL / "debug.css").read_text())

@@ -1,0 +1,458 @@
+# M8: the car's electrical plant (tractive system)
+
+Plan for [#147](https://github.com/isc-fs/IFS-vHIL/issues/147), unparked on
+2026-10-16 once HIL parity and the speed work were done. The plant FMU is
+requested from IFSSIM in
+[isc-fs/IFSSIM#669](https://github.com/isc-fs/IFSSIM/issues/669); until it
+lands, a Python stand-in (TS-1) runs the same contract in CI.
+
+## Status (2026-10-18)
+
+Steps 1-5 below are merged: the plan and parameters (#310), the TS-1 stand-in
+on an event-driven port (#311), the FMI 3.0 master (#313), the `plants:`
+switch and the scenarios (#314), and the evidence (#315). `ecu-ams` and
+`ecu-ams-udv` run the plant in every scenario and web-app run.
+
+Since then:
+
+- **TS-2, the shutdown circuit** (#317, [below](#ts-2-the-shutdown-circuit)):
+  - The AMS backplane's IMD and AMS latches and the harness's switches are now
+    a plant that drives AIR+_VCC on PF9. Every ecu-ams scenario now presses
+    RST_EXT and sets TSMS on it.
+  - Four new scenarios cover the latches at power-on, a shutdown button in Run,
+    the IMD latch, and AMS_OK opening the circuit.
+  - No firmware departure was found. Speed: within noise (one stop per AMS_OK
+    edge).
+- **The editor** (#319):
+  - A live session sets plant rows (`{kind: plant, ...}` ops, recorded as
+    scenario rows).
+  - The trace carries each plant's state at slice ends, and the inspector and
+    State tab show it (V_link, V_pack, contacts, SDC, discharge, i_pack).
+  - The Scenario timeline draws a lane per plant.
+  - The contract lists each plant's settable inputs, faults and parameters,
+    with their status.
+- **M9 prep** (#318): the plant drives the AMS's measurement chain
+  ([below](#m9-prep-the-measurement-chain), in its own PR).
+
+**Results** against ECU dev 44610a5 and AMS dev 94b59a9. Every scenario
+passes, locally (aarch64) and on CI (x86):
+
+| Scenario (`systems/ecu-ams.scenarios/`) | What the firmware did |
+|---|---|
+| `car-arms-through-the-ecu` | Arms through Precharge to Run on the plant's link. AIR+'s contact closes at 335.0 V of 351.5 V (95.3 %; FS rule 90 %, firmware 95 %), 0.86 s after PRE and AIR- |
+| `ams-fault-puts-the-ecu-in-ams-error`, `dead-ecu-opens-the-airs` | As before, on the plant's link instead of a scripted step |
+| `precharge-never-conducts`, `precharge-into-a-large-capacitance`, `precharge-into-a-leaky-link` | Error, reason 12, at `PrechargeMaxMs`; AIR+ never driven |
+| `welded-air-minus` | Arms as usual: undetectable without aux contacts |
+| `welded-air-plus` | AIR- closes the pack straight onto the empty link (0 % at its closing), Run at once: undetectable without aux contacts |
+| `airs-drop-out-in-run` | Bus collapse confirmed, back to Start without latching; the ECU secures the discharge |
+| `rearm-refused-on-a-charged-link` | A press on the stranded link is refused while the ECU holds the bleed; after the release a press re-arms |
+| `sdc-needs-a-reset-after-power-on` | TSMS on but no RST_EXT press: PF9 low, the press refused; after RST_EXT the next press arms Precharge |
+| `sdc-opens-in-run` | A shutdown button in Run: contacts open on the lost coil supply, Start unlatched, the bleed takes the link; released, the circuit re-closes with no reset |
+| `imd-latch-holds-the-sdc-open` | IMD_OK falls in Run: K4 drops, Start; IMD_OK back, the circuit stays open until RST_EXT |
+| `ams-ok-opens-the-sdc` | Over-current Error drops AMS_OK, K5 and AIR+_VCC; RST_EXT with AMS_OK low refused |
+| `inverter-sense-floor-holds-the-discharge` | With a 48 V reading floor, the ECU secures a **drained** link at TSMS on and holds it for 30 s with a fault; the AMS refuses the arm meanwhile ([IFS08-CE-ECU#266](https://github.com/isc-fs/IFS08-CE-ECU/issues/266); with a silent floor the car never arms) |
+
+No scenario fails against the firmware's intent, so none is an expected
+failure. The welded-AIR cases are hardware the car lacks (aux contacts, out
+of scope). The sense floor is an unmeasured inverter behaviour, filed for the
+measurement.
+
+**Speed**: the plant costs +0.1 % host CPU per virtual s against a scripted
+0x466 of the same frames ([`performance.md`](performance/rounds.md#a-plant-on-the-co-simulation-port-m8-147)).
+The identity fingerprint of every system is unchanged.
+
+**#147's exit criteria**:
+
+- [x] On `ecu-ams.yaml` the real AMS and ECU go Start → Precharge →
+  Transition → Run on V_link from TS-1, and no scripted DC-bus value is left
+  in its scenarios.
+- [x] The fault scenarios give the expected firmware state and reason,
+  deterministically.
+- [x] The re-arm and sense-floor scenarios run in CI and pass. The sense
+  floor's consequence is filed (IFS08-CE-ECU#266).
+- [ ] Every parameter cited and the nominal curve validated against a car
+  log. Only `c_link`, `vdc_resolution` and `cells_per_chip` are cited, and no
+  car log exists, so reports say "uncommissioned".
+- [x] Parity runs are unaffected. The bench path runs no plant, IFS_HIL's
+  suites pass, and the fingerprint is unchanged.
+- [x] `docs/cosim.md` and `docs/vision.md` are updated.
+- [x] TS-2 (gated in the issue): the SDC as series logic with the traced
+  latches, its scenarios in CI (#317). The harness elements and the uDV's K1
+  placement are untraceable (no harness schematic) and stay uncommissioned
+  inputs.
+- [x] The editor drives and shows plants (#319).
+
+## Why
+
+The firmware has safety logic that only a tractive-system plant can exercise,
+and neither bench has one (the physical bench samples the AMS's PB4-PB7 as
+logic levels and fakes precharge with a linear CAN ramp):
+
+- AMS (IFS08-CE-AMS dev 94b59a9): `PrechargeMaxMs` 5000
+  (`ams_config.hpp:190`), the 95 % precharge-complete test
+  (`state_machine.hpp:117-128`), `BusCollapsePercent` 50 /
+  `BusCollapseConfirmTicks` 20 (`:742-743`), the `DcBusDischargedV` 60 re-arm
+  gate (`state_machine.hpp:163-171`, `ams_config.hpp:760`).
+- ECU (IFS08-CE-ECU dev 44610a5): the held discharge and its
+  `DischargeReleaseV` 10 / `DischargeTimeoutMs` 30000
+  (`ecu_config.hpp:540`, `:548`; `discharge.hpp`), against the inverter's
+  sense floor.
+
+And `vhil/plants.py`'s `Inverter.dc_bus_v = 350` reports a charged link with
+the AIRs open: a known departure from the car (invariant 9).
+
+## The boundary (written into vision.md)
+
+The vHIL owns the car's **electrical plant between the boards' connectors**:
+what the boards drive and measure on their harness (contactor coils, the
+tractive system's DC link, the cells the LTC6811 chain reads, the current
+sensors). Vehicle, motor load, tyres and EBS pneumatics belong to
+MingoCIL/IFSSIM (M9). The physics of the accumulator and powertrain is
+IFSSIM's: it is requested as an FMU (IFSSIM#669), and the vHIL is its
+co-simulation master. The vHIL's own Python plant is a stand-in for CI, not a
+second battery model.
+
+## The plant contract
+
+One contract for the stand-in and the FMU: the variable names, units and
+signs of IFSSIM#669 §3, so either drops in for the other. The vHIL maps them
+to the system's port.
+
+| Variable | Dir | Unit | Car signal (vHIL endpoint) | TS-1 stand-in |
+|---|---|---|---|---|
+| `air_pos_cmd`, `air_neg_cmd`, `pre_cmd` | in | bool | AMS PB5 / PB6 / PB7 coil drive (`gpio_out`) | yes |
+| `discharge_cmd` | in | bool | ECU PB6, high = secure the bleed (`gpio_out`; ECU `control_task.cpp:301`) | yes |
+| `sdc_closed` | in | bool | the coil supply AIR+_VCC, which the AMS senses on PF9 (schematic, below): the level driven on `ams.PF9` | yes |
+| `i_inverter_dc` | in | A, + = discharge | scripted in M8 (0), IFSSIM powertrain in M9 | 0 only |
+| `i_charger`, `cell_bleed[95]`, `t_ambient` | in | A, bool, K | scripted; `cell_bleed` from the LTC6811s' DCC bits | with `pack: true` (M9 prep, below) |
+| `v_link` | out | V | inverter DC link, reported on 0x466 (`can_tx`, can_inv) | yes |
+| `v_pack` | out | V | pack terminals | sum of the LTC6811 model's cells |
+| `air_pos_closed`, `air_neg_closed`, `pre_closed` | out | bool | contact state after its delay | yes |
+| `v_cell[95]`, `t_sensor[N]`, `i_pack`, `soc_cell[95]` | out | V, K, A, 1 | the LTC6811 chain (100 uV, 0.1 C), the current sensor's PF7/PF8 legs | with `pack: true` (M9 prep, below) |
+
+Faults are boolean inputs of the plant (IFSSIM#669 §4), test API on the
+stand-in: `welded_air_pos`, `welded_air_neg`, `pre_open_circuit` (the
+precharge path never conducts), `air_external_open` (both AIRs' contacts drop
+out with their coils still driven), `c_scale` (a large C) and `r_leak` (a
+leaky one).
+
+**Parameters**: [`catalog/plants/tractive-system.yaml`](../catalog/plants/tractive-system.yaml),
+one entry each with `value`, `unit`, `status` (cited or uncommissioned),
+`source` and `validated_against`. The FMU takes them as FMI parameters of the
+same names.
+
+| Parameter | Value | Status | Source |
+|---|---|---|---|
+| `c_link` | 400 uF | cited | W90 manual §5.1, 380-420 uF |
+| `r_precharge` | 690 ohm | uncommissioned | IFS_HIL comment only (bench) |
+| `r_discharge` | 6.5 kohm | uncommissioned | ECU's design estimate, tau ~2.6 s (`ecu_config.hpp:534-539`) |
+| `r_inverter_bleed` | none | uncommissioned | not in the W90 manual |
+| `air_close` / `air_open` | 20 / 10 ms | uncommissioned | AIR part unknown |
+| `pre_close` / `pre_open` | 10 / 5 ms | uncommissioned | relay part unknown |
+| `cells_per_chip` | 9, 10 | cited | AMS `ams_config.hpp:1130-1131` |
+| `vdc_period` | 10 ms | uncommissioned | not in the DBC, not measured |
+| `vdc_resolution` | 1 V | cited | DBC `DCBus_Voltage_V` 16\|10@1+ (1,0) |
+| `sense_floor` / `below_floor` | 0 V / hold | uncommissioned | unmeasured (`ecu_config.hpp:520-533`) |
+
+Nothing is validated against a car log: none exists in any repo (searched
+2026-10-16). Every report on these runs says "uncommissioned".
+
+**Hardware traced for this plan** (isc-fs/IFS08-ES main bcb4511,
+`boards/AMS_IFS08/kicad/AMS IFS08.kicad_sch`, its netlist): PB5/PB6/PB7
+(MainLite pads 7/8/9) drive Q2/Q1/Q3 DMN6075S low-side switches (1 kohm gate,
+2.2 kohm pull-down) to J11.6/J11.5/J11.4; the coils' high side and flyback
+diodes D5/D6/D2 return to **AIR+_VCC** (J11.1-3, J1.16), which is also what
+PF9 (TSMS_FIL) senses through R18 62 kohm. Two consequences:
+
+- the coil supply is the TSMS-switched shutdown circuit, and the AMS sees it:
+  when the SDC opens upstream of AIR+_VCC, PF9 drops with it, and the AMS
+  falls to Start (TSMS drop), not to its bus-collapse path;
+- so `BusCollapse` (AIRs open while the AMS believes Run,
+  `state_machine.hpp:415-421`) needs a cause the AMS cannot sense on PF9: a
+  contact that drops out, a broken coil wire or return. The fault scenario
+  uses `air_external_open` for that, and says why.
+
+## Time and determinism
+
+The plant steps in virtual time only, and a run with it is as deterministic as
+one without: the same firmware, system, parameters and stimuli give the same
+frames at the same times (a test holds two runs identical).
+
+**Exchange on events, not every step.** Stopping the emulation costs: on
+ecu-ams a 10 ms lock-step exchange (a `RunFor` per step, one edge query) costs
++0.15-0.25 host CPU s per virtual s over 100 ms slices, +20-30 % (measured
+2026-10-16, M-series host, Colima). The budget is under 5 %. So the plant is
+exchanged with only when something can change:
+
+- **its inputs change**: an armed coil pin's edge ends the emulation's run at
+  the next sync point (`emulation RunForUntilTrigger`, a C# runner that is
+  `MasterTimeSource.RunFor`'s loop with one flag checked at each sync point;
+  `VhilGpioProbe.Trigger`). The edge's exact virtual time comes with it
+  (`BoardIO.edges(since_us)`), and contacts move after their delay, so a
+  plant that learns of an edge at most one quantum (0.5 ms) late computes
+  exactly what a plant stepped at every quantum would. A stimulus that drives
+  PF9 is already a stop of the run;
+- **its outputs change**: the stand-in is closed form (first-order RC
+  segments between events), so at an exchange it computes the link until the
+  next event it can foresee, and hands the inverter's 0x466 reports for that
+  stretch to the CAN probe in one call (a periodic sender with a payload
+  schedule). The run stops again only when the stretch ends (the link has
+  settled: none) or an input changes.
+
+Measured on the prototype: a run with the trigger armed gives a bus timeline
+byte-identical to `emulation RunFor`'s, and returns at the sync point after
+the edge (an AIR-/PRE edge at 3648.5 ms returned at 3649.0 ms).
+
+A lock-step `Port.run` (native tests' plants: `Inverter`, `Pedals`) keeps its
+fixed step; the TS plant joins it as one more plant and is exact at any step
+for the reason above.
+
+**The FMU** steps on a fixed communication grid (5 ms default, 1-10 ms),
+inputs held over a step. The master steps it ahead to compute the coming
+0x466 reports, and when an input edge arrives inside that stretch it rolls
+back: `fmi3GetFMUState`/`fmi3SetFMUState` at each exchange when the FMU can
+(`canGetAndSetFMUState`), else `fmi3Reset` and a replay of the recorded inputs
+from t = 0 (deterministic by IFSSIM#669 §2; cheap at the requested 50x real
+time over the few edges a run has). An input change takes effect at the
+first grid point at or after it.
+
+**Speed check** for every PR that touches a run: `scripts/speed.py`
+interleaved A/B, ecu-ams, and an ecu-ams scenario with the scripted 0x466
+against the same scenario plant-driven (both send 0x466 every 10 ms). The
+identity fingerprint of every system without a plant stays byte-identical.
+
+Found on the way, not M8's to fix: CAN probe frames cost wall time on
+ecu-ams (a 10 ms 0x466 periodic took ecu-ams from 0.48 to 1.57 wall s per
+virtual s, CPU +20 %), and every scenario with a periodic stimulus paid it.
+Suspected to be Renode's `TimeSourceBase.WaitIfBlocked`, it was
+`Emulation.StartAll`'s 100 ms sleep, once per `RunFor` that sent a frame;
+fixed in #312 (performance/rounds.md, "A probe's frame"): scenarios ~3x faster in
+wall time, traces unchanged.
+
+## Where the plant runs
+
+| Path | Plant | Why |
+|---|---|---|
+| Scenarios and web-app runs (`vhil/worker.py`) | yes, when the system file declares it | the plant is part of the system |
+| Native tests (`vhil.sim` + `Port`) | when a test passes it to `Port.run` | tests choose their plants |
+| Wall-clock bench, IFS_HIL parity (`vhil/bench.py`) | **no** | parity keeps the bench's stimulus: IFS_HIL's linear `ramp_to` |
+
+The system file switch, on `ecu-ams.yaml` and `ecu-ams-udv.yaml`:
+
+```yaml
+plants:
+  ts: {plant: tractive-system, cells: isospi}   # catalog/plants/tractive-system.yaml
+port:
+  step_ms: 10
+  signals:
+    air_pos_cmd:   {gpio_out: ams.PB5}
+    air_neg_cmd:   {gpio_out: ams.PB6}
+    pre_cmd:       {gpio_out: ams.PB7}
+    discharge_cmd: {gpio_out: ecu.PB6}
+    sdc_closed:    {gpio_in: ams.PF9}   # AIR+_VCC as the AMS senses it
+    v_link:        {can_tx: {bus: can_inv, id: 0x466}}
+```
+
+A system without `plants:` renders and runs exactly as before.
+
+## Scenarios (beyond-bench)
+
+Plant-driven scenarios replace the scripted 0x466 steps in
+`systems/ecu-ams.scenarios/`, and add, tagged `beyond-bench` (they never
+gate parity runs):
+
+| Scenario | Expect |
+|---|---|
+| nominal precharge | Start → Precharge → Transition → Run on V_link from the plant; AIR+ closes with V_link ≥ 90 % of V_pack (FS rule; the firmware waits for 95 %) |
+| precharge never conducts (`pre_open_circuit`) | Error after `PrechargeMaxMs`, reason 12 |
+| welded AIR- / welded AIR+ | the firmware's response (sequencing), recorded |
+| AIRs drop out in Run (`air_external_open`) | bus collapse confirmed, back to Start (not latched) |
+| large / leaky C | precharge slower / settles short: Run late or Error, reason 12 |
+| re-arm on a charged link | a DASH_CHG press with V_link above `DcBusDischargedV` is refused (stays Start) |
+| inverter sense floor | with a floor above `DischargeReleaseV`, the ECU's held discharge never releases and times out after `DischargeTimeoutMs` |
+
+Timing is asserted only against validated parameters; with every parameter
+uncommissioned today, the expects assert sequencing and the firmware's own
+constants (`PrechargeMaxMs`, `BusCollapseConfirmTicks`), not the RC curve.
+When the firmware fails one, invariant 9 decides: the car's hardware and
+the firmware's intent, a firmware issue with the evidence, and the scenario
+held as a strict expected failure.
+
+## TS-2: the shutdown circuit
+
+`vhil/plant_sdc.py`, parameters in
+[`catalog/plants/shutdown-circuit.yaml`](../catalog/plants/shutdown-circuit.yaml).
+The SDC is the vHIL's, not the FMU's: IFSSIM#669 takes `sdc_closed` as an
+input ("the vHIL computes it"), so the circuit stays when the FMU replaces
+the stand-in.
+
+**Traced** (isc-fs/IFS08-ES main bcb4511, `boards/AMS_IFS08/kicad/AMS IFS08.kicad_sch`,
+its netlist): the only board of the car with SDC parts is the AMS backplane.
+
+```
+SC_IN J1.14 -> J4.5..J4.6 (off-board) -> J7.7..J7.8 HV_INTERLOCK+/- ("interlock amphenol")
+  -> K4 IMD latch -> K5 AMS latch -> J2.4..J2.3 (off-board) -> SC_OUT J1.15
+  -> [harness, no schematic: BSPD, inertia, BOTS, shutdown buttons, uDV K1?, TSMS]
+  -> TSMS = AIR+_VCC (J1.16): the three coils' high side, and PF9 through R18 62k
+```
+
+- K4 and K5 are monostable relays wired as latches: the coil's low side is
+  Q8 / Q10, gated by IMD_OK (J1.3) / AMS_OK (PB4, J1.4); the high side is
+  RST_IMD / RST_BMS, fed by the **RST_EXT** button (J1.7, through D9/D10)
+  and held by the relay's own pole 1. A latch closes only while its OK line
+  is high and RST_EXT is pressed, holds while OK stays high, and drops for
+  good when OK falls, so both are open after every power-on until a press.
+  One RST_EXT resets both. (The library symbol says "RT2 bistable" and the
+  BOM has no part number: the relay type is unconfirmed; the wiring is the
+  self-hold. The board's datasheet says RST_PILOTO also resets the latch;
+  the netlist routes it only to PF10, DASH_CHG.)
+- The AMS firmware agrees: "AMS_OK ... sits UPSTREAM of TSMS in the loop"
+  (IFS08-CE-AMS 94b59a9 `state_machine.hpp:241-242`); AMS_OK is active high
+  from the end of the 2 s boot grace unless Error is latched
+  (`safety_predicates.hpp:276-286`). The AMS has no IMD or SDC-feedback
+  input (`safety_predicates.hpp:150-154`), the ECU none at all.
+- The uDV's K1 (MicroDV2, isc-fs/IFS09-DV-uDV feat/5-hardware d2e4250) is a
+  traced series break between J7.1 `/SDC in 1` and J7.2 `/SDC out`, closed
+  when PB7 is high; whether J7 is in the car's SDC is in no schematic. It is
+  in series only when `udv_k1_in_series` (uncommissioned, false) says so:
+  with it in series, the uDV firmware, which closes K1 only after its EBS
+  check with ASMS on (`ebs_manager.cpp:53-58`, `app_task.cpp:666-675`),
+  would keep a manual car from ever arming.
+
+**The model.** Boolean series logic: `interlocks_ok` (the two untraced
+off-board loops), `hv_interlock`, the K4 and K5 latches, `bspd_ok`,
+`inertia_ok`, `bots_ok`, `estop_ok`, the uDV's K1 when in series, `tsms`.
+Every harness element is a plain switch, since no latch is traced there
+(the FS rules want the BSPD latched too; its board is in no repo). Relays
+switch instantly (no part numbers); the contactors' delays stay the
+tractive-system plant's. Inputs are scenario rows (`{kind: plant, plant:
+sdc, set: {tsms: true}}`, `{reset: true}` / `{reset: false}` for an
+RST_EXT press); a row that drives PF9 directly is refused, since the
+circuit drives it.
+
+**On the port.** `ams_ok: {gpio_out: ams.PB4}` (and `udv_sdc: {gpio_out:
+udv.PB7}` on ecu-ams-udv) in, `sdc_closed: {gpio_in: ams.PF9}` out, which the
+tractive-system plant reads as its coil supply: the circuit steps first.
+Event-driven: an AMS_OK edge ends the run at the next sync point, a row is
+applied at its time, and PF9 is driven only when the circuit changes. It
+costs a stop per AMS_OK edge (two a run: the boot grace and an Error).
+
+**Scenarios** (`systems/ecu-ams.scenarios/`, beyond-bench): every ecu-ams
+scenario now presses RST_EXT at 5.4 s and sets TSMS at 5.5 s on the
+circuit, and four are new: `sdc-needs-a-reset-after-power-on`,
+`sdc-opens-in-run`, `imd-latch-holds-the-sdc-open` and `ams-ok-opens-the-sdc`
+(what each expects: [`scenarios.md`](scenarios.md#the-suite); what the firmware did:
+[Status](#status-2026-10-18)).
+
+## M9 prep: the measurement chain
+
+Tracked in [#318](https://github.com/isc-fs/IFS-vHIL/issues/318), done
+before IFSSIM's FMU so it swaps in on the same contract. With `pack: true`
+on the tractive-system plant (`ecu-ams`, `ecu-ams-udv`) the stand-in carries
+a per-cell pack (`vhil/plant_pack.py`) and drives the AMS's measurement
+chain ([`cosim.md`](cosim.md#cell-source)).
+
+**The model.** 95 series elements, each 6 VTC6 in parallel: OCV(SOC) from
+the VTC6 fit the AMS's own estimator uses (TFM_RMG, from the CMU eVTOL
+dataset), R0 with its temperature coefficient, one RC, a lumped thermal
+mass to ambient, per-element capacity and SOC spreads from a seeded
+generator. Between events every term is closed form (soc linear, RC and
+temperature first order; the heat uses R0 at 25 C so it stays exact), so how
+often the plant is stepped changes nothing. The pack current is the
+inverter's (and charger's) scripted current while both AIRs are closed; the
+bleed removes charge only, since the AMS opens every switch while it
+converts (IFS08-CE-AMS `bms_poll_task.cpp:372-420`). NTCs: 20 per chip on
+ADG731 channels 0-9 and 16-25, spread evenly over the chip's cells
+(uncommissioned map).
+
+**Faults** (IFSSIM#669 §4, scenario rows): `weak_cell` with
+`weak_cell_capacity` / `weak_cell_r0` (scales), `hot_cell` with
+`hot_cell_dt` (K above its thermal state), `imbalance_cell` with
+`imbalance_soc` (a one-shot SOC offset). Scripted inputs: `i_inverter_dc`,
+`i_charger` (A), `t_ambient` (K). A pack parameter set by a row (`soc_init:
+0.15`, `cell_capacity`) rebuilds the pack, reported as an override.
+
+**Cost.** Event-driven: the cells reach the chain when one moves an LTC6811
+LSB (100 uV) or a temperature 0.1 C, no sooner than `cell_exchange_min`
+(0.1 s); a pack at rest is settled and never stops the run; balancing starts
+by a trigger, and while a switch is on the plant reads the on-time every
+`bleed_poll` (5 s) at most. Under 60 A the plant stops the run every 0.1 s
+(the discharge scenario: 265 steps in 40 s).
+
+**Parameters** ([`catalog/plants/tractive-system.yaml`](../catalog/plants/tractive-system.yaml)):
+
+| Parameter | Value | Status | Source |
+|---|---|---|---|
+| `cells_series`, `cells_parallel` | 95, 6 | cited | AMS `ams_config.hpp:420-446` |
+| `cell_capacity` | 3.0 Ah | cited | IFSSIM `ifs08.m:219` (datasheet) |
+| `cell_ocv` / `cell_ocv_soc` | 2.50 ... 4.22 V | cited | TFM_RMG `params.py:23-42` (VTC6 fit), = AMS `soc_estimator.hpp:57-63` |
+| `cell_r0`, `cell_r0_alpha` | 20.06 mOhm, -0.0199/K | cited | TFM_RMG fit, AMS `ams_config.hpp:487-498` |
+| `cell_r1`, `cell_tau1` | 8 mOhm, 30 s | uncommissioned | "typical 18650", not fitted |
+| `cell_mass` | 46.7 g | cited | IFSSIM `ifs08.m:313` (datasheet) |
+| `cell_cp`, `cell_r_th` | 900 J/(kg K), 2.15 K/W | uncommissioned | assumed (IFSSIM, TFM) |
+| `bleed_r` | 23.5 ohm | cited | BMS_LITE R71 \|\| R72, 47 ohm each (IFS08-ES bcb4511) |
+| `soc_init`, `soc_spread`, `capacity_spread`, `spread_seed`, `t_init` | 0.5, 0, 0, 1, 298.15 K | uncommissioned | a run's choice; no pack measurement |
+| `ntc_map` | proportional | uncommissioned | no NTC placement document |
+| `cell_exchange_min`, `bleed_poll` | 0.1 s, 5 s | uncommissioned | co-simulation settings, not physics |
+| `cell_ocv_offset`, `cell_r0_scale` | null (uniform) | uncommissioned | per element (95, chain order); only a set fitted to a car log gives them |
+| `parameter_set` | null | cited | which of `parameter_sets` a run puts over these (a row or a system's `params`) |
+
+**Parameter sets.** The listed parameters are the datasheet-derived pack;
+`parameter_sets` holds named sets put over them, each parameter with its own
+source and validation (`set: {parameter_set: <name>}` in a row). One today,
+`car-log0077`: fitted to car SD log LOG0077 (2026-09-29, a 163 s drive at
+4 Hz, ~22 C) by [`scripts/fit_pack.py`](../scripts/fit_pack.py), which
+takes the log directory (the logs stay out of the repository) and reports
+the fit:
+
+| Parameter | Car (LOG0077) | Datasheet set | How |
+|---|---|---|---|
+| R0 per element | 3.70 +- 0.04 mOhm at 21.9 C (3.49 at 25 C; 20.92 mOhm per cell) | 3.34 mOhm at 25 C | pack voltage on I_raw with two lag taps for the cell poll's skew (184 ms), OCV drift at the table's slope |
+| R0 per element, spread | 3.46-4.57 mOhm (sd 0.19, 4.8x its standard error) | uniform | even cells of a module 3.56, odd 3.86 mOhm: the taps' share of the busbars |
+| RC | 2.46 mOhm / 10 s per element | 1.33 mOhm / 30 s | best hold-out on a tau grid; 10-20 s fit alike |
+| OCV offset | -141.5 mV (c3_0) to +135 mV (c0_10) | none | rest rows of the log's last 30 s, medians |
+
+Fit quality: R2 0.947, residual 25 mV rms per element (hold-out on the
+drive's last 40 %: 33 mV); the quick fit without the skew and the OCV drift
+gives the 3.9 mOhm, R2 0.85, first estimated. Not fitted: capacity, the OCV
+table, the thermal parameters. The `ecu-ams` load-sag scenarios
+(AMS#644) run on this set at the log's end state (SoC 0.584, 21.9 C).
+
+IFSSIM's `ifs08.m` OCV table is a generic NMC curve labelled SECONDARY; the
+stand-in uses the VTC6 fit, and the FMU should say which it uses.
+
+**Scenarios** (`systems/ecu-ams.scenarios/`, beyond-bench), AMS dev 94b59a9:
+
+| Scenario | Result |
+|---|---|
+| `discharge-to-under-voltage` | a 15 % pack, one weak element, 60 A from 11 s: the weak element crosses 2800 mV at 24.2 s, the AMS latches CellUnderVoltage (4) at 24.66 s (its 25-tick confirm plus a 200 ms poll), the AIRs open, the current stops; the plant's minimum never went under 2750 mV |
+| `current-sensor-reads-the-pack` | 100 A for 3 s: 0x135 follows up and back, sign and scale right; the AMS reads the true current through the AMS carrier's measured ADC3 transfer (gain 0.92, +6 codes; [#320](https://github.com/isc-fs/IFS-vHIL/issues/320)) |
+| `balancing-only-in-start` | two elements +10 % SOC and 0x103 BALN: the AMS bleeds exactly those two (no neighbour, no low cell) in Start, and stops in Run |
+| `balancing-converges` | the same on 1000x smaller cells (an override): the high element bleeds down to within 20 mV of the floor and balancing stops |
+| `hot-cell-over-temperature` | a 65 C element in Run: the AMS reads it (0x4A2 max 64+) but never faults: `TempFaultsTrusted = false` ([IFS08-CE-AMS#639](https://github.com/isc-fs/IFS08-CE-AMS/issues/639)); the Error expects are strict expected failures |
+
+An expect may carry `xfail: <owner/repo#N>` ([`scenarios.md`](scenarios.md#expects)): a
+strict expected failure on a filed firmware issue.
+
+## Steps
+
+1. This plan, the boundary in vision.md, the parameter file.
+2. The plant interface and the TS-1 stand-in (`vhil/plant_ts.py`): the
+   contract, the parameter loader, the event-driven runner, the probe's
+   payload schedule, `Inverter` reading V_link when a plant is present.
+3. An FMI 3.0 co-simulation master (`vhil/fmi.py`, ctypes, no new
+   dependency) and a reference FMU built in the tests from C: the same
+   contract, so the stand-in and the FMU are compared on the same inputs.
+4. The system switch and the scenarios above.
+5. Speed and determinism evidence, docs, #147's exit checklist.
+
+## Left after M8's steps
+
+- Validation against a car log of a real precharge (0x466/0x100), with its
+  id, date and firmware commit; until then "uncommissioned".
+- IFSSIM's FMU swapped in for the stand-in.
+- The accumulator's TS schematic (precharge R, AIR and precharge-relay part
+  numbers, bleed R), to cite what is a placeholder now.
+- The observer fixtures (RTDS on-time, brake light, IMD source).
+- The car's harness schematic, to place the BSPD, inertia switch, BOTS,
+  shutdown buttons, TSMS and the uDV's K1 in the SDC and cite their latches.

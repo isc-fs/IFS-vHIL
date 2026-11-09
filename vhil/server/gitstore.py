@@ -1,0 +1,224 @@
+"""Commit files to branches of the workspace without touching any checkout.
+
+A save from the browser is a commit on a branch (docs/architecture/m5-web-app.md,
+principle 1), but the workspace is one git checkout shared by every user and
+by the server itself: its working tree and HEAD must not move. So a save never
+checks anything out. It builds the commit with git's plumbing in a private
+index file:
+
+    blob   = git hash-object -w --stdin                 (the new file)
+    index  = git read-tree <parent>                     (GIT_INDEX_FILE = a temp file)
+             git update-index --cacheinfo 100644,<blob>,<path>
+    tree   = git write-tree
+    commit = git commit-tree <tree> -p <parent>         (author from the request)
+             git update-ref refs/heads/<branch> <commit> <old>
+
+The last step is a compare-and-swap: if another save moved the branch in
+between, it fails and nothing is lost. The parent is the branch's tip, else
+the remote's copy of it (origin/<branch>), else the commit the save names as
+its `base` (the editor's: the commit the system was opened at), else the base
+branch (origin/dev, dev). A run at a saved ref runs the deployment's code
+with the ref's system file (vhil/server/runs.py), so a new branch made from
+the workspace's commit is one that runs here; one made from dev's tip runs
+only where the workspace is at dev's tip. A branch checked out in any
+worktree is refused: moving its ref under that tree would make the tree look
+like it reverted the save. `dev` and `main` are never written; changes reach
+them through a PR.
+
+Who saved a commit is recorded as a `Vhil-User: <login>` trailer
+(OWNER_TRAILER), so the API can refuse to move a branch another member last
+saved (vhil/server/systems_write.py). A save's message can't forge it: lines
+that look like these trailers are dropped from the message first.
+"""
+from __future__ import annotations
+
+import io
+import os
+import re
+import subprocess
+import tarfile
+import tempfile
+import threading
+from pathlib import Path
+
+PROTECTED = frozenset({"dev", "main", "master", "HEAD"})
+_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}\Z")
+OWNER_TRAILER = "Vhil-User"
+TAKEOVER_TRAILER = "Vhil-Takeover-From"
+_OURS = re.compile(rf"^\s*({OWNER_TRAILER}|{TAKEOVER_TRAILER})\s*:", re.I | re.M)
+_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+# GitHub's noreply address: <login>@ or <id>+<login>@users.noreply.github.com
+# (what a github-mode save before owner trailers wrote, systems_write._author).
+_NOREPLY = re.compile(r"^(?:\d+\+)?([A-Za-z0-9-]{1,39})@users\.noreply\.github\.com$", re.I)
+
+
+def clean_message(message: str) -> str:
+    """A save's message without lines posing as our trailers."""
+    return "\n".join(line for line in message.splitlines() if not _OURS.match(line))
+
+
+class GitError(Exception):
+    pass
+
+
+class BadBranch(ValueError):
+    pass
+
+
+class Conflict(GitError):
+    pass
+
+
+class GitStore:
+    def __init__(self, root: Path, base: str = "dev"):
+        self.root = Path(root)
+        self.base = base
+        self._lock = threading.Lock()
+
+    # -- plumbing ---------------------------------------------------------------
+
+    def git(self, *args: str, env: dict | None = None, input: str | bytes | None = None,
+            check: bool = True, text: bool = True) -> str | bytes:
+        out = subprocess.run(["git", "-C", str(self.root), *args], capture_output=True,
+                             input=input, text=text,
+                             env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})})
+        if check and out.returncode != 0:
+            err = out.stderr if text else out.stderr.decode(errors="replace")
+            raise GitError(f"git {args[0]}: {err.strip()}")
+        return out.stdout.strip() if text else out.stdout
+
+    def rev(self, ref: str) -> str | None:
+        """The commit `ref` names, or None."""
+        out = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--verify", "--quiet",
+                              f"{ref}^{{commit}}"], capture_output=True, text=True)
+        return out.stdout.strip() if out.returncode == 0 else None
+
+    # -- branches ---------------------------------------------------------------
+
+    def check_branch(self, branch: str) -> str:
+        """`branch` if the app may write it, else BadBranch."""
+        if not isinstance(branch, str) or not _BRANCH.match(branch) or branch in PROTECTED:
+            raise BadBranch(f"branch '{branch}' is not writable: use a new branch name "
+                            f"like feat/<slug> (never {', '.join(sorted(PROTECTED - {'HEAD'}))})")
+        out = subprocess.run(["git", "check-ref-format", f"refs/heads/{branch}"],
+                             capture_output=True, text=True, cwd=tempfile.gettempdir())
+        if out.returncode != 0:
+            raise BadBranch(f"'{branch}' is not a valid branch name")
+        return branch
+
+    def base_commit(self) -> str:
+        for ref in (f"refs/remotes/origin/{self.base}", f"refs/heads/{self.base}", "HEAD"):
+            sha = self.rev(ref)
+            if sha:
+                return sha
+        raise GitError("the workspace has no commits")
+
+    def parent(self, branch: str | None, base: str | None = None) -> str:
+        """The commit a save on `branch` builds on (and a read of it shows):
+        its tip; for a new branch, `base` (a commit) if given, else the
+        base branch."""
+        if branch:
+            for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+                sha = self.rev(ref)
+                if sha:
+                    return sha
+        return base or self.base_commit()
+
+    def branch_tip(self, branch: str) -> str | None:
+        """The commit a save on `branch` would move (local, else origin's
+        copy); None for a branch that doesn't exist yet."""
+        for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+            sha = self.rev(ref)
+            if sha:
+                return sha
+        return None
+
+    def owner(self, commit: str) -> str | None:
+        """Who saved `commit`: its Vhil-User trailer, else the login of a
+        GitHub noreply author address; None when neither says."""
+        raw = self.git("cat-file", "commit", commit)
+        header, _, message = raw.partition("\n\n")
+        last = message.strip().split("\n\n")[-1]
+        for line in reversed(last.splitlines()):
+            key, sep, value = line.partition(":")
+            if sep and key.strip().lower() == OWNER_TRAILER.lower() and _LOGIN.match(value.strip()):
+                return value.strip()
+        for line in header.splitlines():
+            if line.startswith("author "):
+                email = line.rsplit("<", 1)[-1].split(">", 1)[0]
+                m = _NOREPLY.match(email)
+                return m.group(1) if m else None
+        return None
+
+    def checked_out(self) -> set[str]:
+        """Branches checked out in the workspace or any of its worktrees."""
+        out = self.git("worktree", "list", "--porcelain")
+        return {line.split(" ", 1)[1].removeprefix("refs/heads/")
+                for line in out.splitlines() if line.startswith("branch ")}
+
+    # -- content ----------------------------------------------------------------
+
+    def read(self, commit: str, path: str) -> str | None:
+        out = subprocess.run(["git", "-C", str(self.root), "cat-file", "blob", f"{commit}:{path}"],
+                             capture_output=True)
+        return out.stdout.decode() if out.returncode == 0 else None
+
+    def extract(self, commit: str, paths: list[str], dest: Path) -> None:
+        """Write `paths` (directories) as of `commit` under `dest`."""
+        data = self.git("archive", "--format=tar", commit, "--", *paths, text=False)
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(dest, filter="data")
+            else:   # Python < 3.11.4; git archive writes no links out of the tree
+                tar.extractall(dest)
+
+    def commit_file(self, branch: str, path: str, text: str, message: str,
+                    author: tuple[str, str], must_not_exist: bool = False,
+                    trailers: dict[str, str] | None = None,
+                    expect_parent: str | None = None, base: str | None = None) -> dict:
+        """Commit `text` as `path` on `branch` (created from `base`, a commit,
+        if new, else from the base branch).
+        `trailers` end the message (e.g. {OWNER_TRAILER: login}); with
+        `expect_parent`, the save is refused (Conflict) if the branch no longer
+        builds on that commit: what the caller checked is what it moves.
+        Returns {ref, branch, parent, created, changed}."""
+        self.check_branch(branch)
+        message = clean_message(message)
+        if not message.strip():
+            raise GitError("a commit needs a message")
+        if trailers:
+            message = message.rstrip() + "\n\n" + "".join(
+                f"{k}: {v}\n" for k, v in trailers.items())
+        name, email = author
+        with self._lock:
+            if branch in self.checked_out():
+                raise Conflict(f"branch '{branch}' is checked out in the workspace; "
+                               f"save to another branch")
+            local = self.rev(f"refs/heads/{branch}")
+            parent = self.parent(branch, base)
+            if expect_parent is not None and parent != expect_parent:
+                raise Conflict(f"branch '{branch}' moved during the save; retry")
+            if must_not_exist and self.read(parent, path) is not None:
+                raise Conflict(f"{path} already exists on {branch if local else self.base}")
+            blob = self.git("hash-object", "-w", "--stdin", input=text)
+            with tempfile.TemporaryDirectory(prefix="vhil-index-") as tmp:
+                env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+                self.git("read-tree", parent, env=env)
+                self.git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}", env=env)
+                tree = self.git("write-tree", env=env)
+            if tree == self.git("rev-parse", f"{parent}^{{tree}}"):
+                # Nothing to save: no empty commit, and no new branch either.
+                return {"ref": parent, "branch": branch, "parent": parent, "created": False,
+                        "changed": False}
+            who = {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+                   "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+            commit = self.git("commit-tree", tree, "-p", parent, "-F", "-", input=message,
+                              env=who)
+            try:
+                # Old value "" = the branch must not exist yet.
+                self.git("update-ref", "-m", f"vhil: save {path}", f"refs/heads/{branch}",
+                         commit, local or "")
+            except GitError as e:
+                raise Conflict(f"branch '{branch}' moved during the save; retry ({e})")
+            return {"ref": commit, "branch": branch, "parent": parent, "created": local is None,
+                    "changed": True}

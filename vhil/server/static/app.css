@@ -1,0 +1,8 @@
+/* The front page (/), on tokens.css (loaded first): only a redirect into the
+   workspace (/editor/), or the "logged out" note. */
+body { margin: 0; background: var(--bg-0); color: var(--fg); font-family: var(--font-ui);
+       font-size: var(--fs-base); line-height: 1.45; }
+main { padding: var(--sp-4); max-width: 72rem; margin: 0 auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

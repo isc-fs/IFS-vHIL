@@ -1,0 +1,214 @@
+# Co-simulation port
+
+How a **plant** (something outside the electronics: a driver, an inverter
+and motor, the vehicle) exchanges signals with a system on the virtual
+bench. This is the contract MingoCIL attaches through ([#14](https://github.com/isc-fs/IFS-vHIL/issues/14),
+vision principle 6). It is engine-agnostic: the vHIL side is Renode today,
+and the plant side can be Python (`vhil/plants.py`) or an external engine.
+
+## Signals
+
+A system declares its port: a step and named signals, each one of five kinds.
+
+```yaml
+port:
+  step_ms: 10
+  signals:
+    apps1:      {analog: ecu.PF8}                    # plant -> system: volts on an analog input
+    start:      {gpio_in: ecu.PB5}                   # plant -> system: level on a GPIO input
+    rtds:       {gpio_out: ecu.PB4}                  # system -> plant: level of a GPIO output
+    inv_cmd:    {can_rx: {bus: can_inv, id: 0x360}}  # system -> plant: frames sent on a bus
+    inv_state:  {can_tx: {bus: can_inv, id: 0x461}}  # plant -> system: frames to put on a bus
+```
+
+| Kind | Direction | Value | Meaning |
+|---|---|---|---|
+| `analog` | plant → system | volts (float) | Held on the pin until changed. |
+| `gpio_in` | plant → system | bool | Held on the input until changed. |
+| `gpio_out` | system → plant | bool | The output's level at the step boundary. |
+| `can_rx` | system → plant | frames | Every frame with that ID the system sent on the bus during the last step, with its virtual timestamp (µs) and data. |
+| `can_tx` | plant → system | frames | Standard frames to put on the bus at the start of the next step, in order. They are offered then and go out as the bus lets them; on a bus with `arbitration: false` (Renode's hub) they arrive at once ([`can-bus.md`](can-bus.md)). |
+
+Endpoints are board connectors from the catalogue (`<board>.<pin>`, e.g.
+`ecu.PF8`); which car signal a pin carries on its backplane (`ecu.PF8` is
+APPS_1) is in [`backplanes/`](backplanes/). CAN signals name a bus of the
+system. `python -m vhil.system validate` checks
+that each endpoint is of the kind its signal says.
+
+## Time
+
+Virtual time advances in steps of `step_ms`, and only the vHIL advances it.
+At each step boundary `t`:
+
+1. Each plant reads what the system did during `[t − step, t)`: the frames
+   it sent, and its outputs' levels at `t`.
+2. Each plant writes what it drives: voltages and input levels take effect
+   at `t`, and frames are sent at `t`.
+3. The system runs `[t, t + step)`.
+
+While plants compute, virtual time stands still, so a plant may take as long
+as it needs. That lock-step makes a run deterministic: the same firmware,
+system, plants and inputs give the same frames at the same virtual times
+(`tests/sim/test_cosim.py::test_the_loop_is_deterministic`).
+
+The step bounds a plant's reaction time. At 10 ms a plant answers a frame
+within 10–20 ms of virtual time; choose the step from the fastest loop the
+plant closes. Lock-step costs wall time, about 15 s per virtual second on a
+desktop at 10 ms, mostly synchronisation, not emulation.
+
+## In Python
+
+```python
+from vhil.sim import Sim
+from vhil.cosim import Port
+from vhil.plants import AcuStimulus, Inverter, Pedals
+
+with Sim("systems/ecu.yaml", {"ecu": "ECU08.elf", "ecu.bootloader": "CAN_BL.elf"}) as sim:
+    t0 = sim.wait_for_app()     # after the bootloader's 2 s auto-jump window
+    port = Port(sim)
+    inverter = Inverter()
+    port.run([AcuStimulus(), Pedals(driver, start_us=t0), inverter], ms=5000)
+```
+
+A plant is any object with `step(port, t_us)`. Inside it, `port.received(name)`,
+`port.level(name)`, `port.set_voltage(name, v)`, `port.set_level(name, b)` and
+`port.send(name, data)` act on the signals by name.
+
+## Event-driven plants
+
+A plant with `event_driven = True` is stepped only when something can
+change for it, not every `step_ms`: at the run's start, when one of the
+gpio_out signals its `triggers(port)` names changes level, at its own
+`next_us`, and whenever the lock-step plants are. Stopping the emulation
+every step costs host CPU (a 10 ms step on ecu-ams is +20-30 %,
+[`m8-plan.md`](m8-plan.md#time-and-determinism)); such a plant costs a stop
+only when it has something to do. It uses:
+
+- `port.edges(name)`: a gpio_out signal's level changes since the last call,
+  each with its time (the start of the sync quantum the board wrote the pin
+  in), so an edge between two steps is applied when it happened, not when
+  the plant heard of it;
+- `port.driven(name)`: the level a scenario row or a test holds on a gpio_in
+  signal;
+- `port.schedule(name, entries, period_ms)`: a can_tx signal sent every
+  `period_ms` by the emulation itself, its payload changing at future times
+  ([(t_us, data or None)], None for no frame). A later call replaces what is
+  still pending from its first entry on. The plant hands over its forecast
+  in one call, and the run doesn't stop for each frame.
+
+The run returns at the sync point after a triggering edge
+(`Sim.run_until_trigger`, `models/renode/VhilRunner.cs`): the same quanta and
+sync points as `run_for`, so a run with no edge computes exactly what
+`run_for` would, and the plant hears of an edge at most one quantum (0.5 ms)
+after it.
+
+## An FMU as a plant
+
+`vhil/fmi.py` is an FMI 3.0 co-simulation master: `FmuPlant(Fmu("x.fmu"))`
+runs an FMU on the port as one more event-driven plant. It maps the FMU's
+variables to the port by name, which is the contract's (the tractive-system
+FMU's are [`m8-plan.md`](m8-plan.md)'s), and sets the catalogue's parameters
+on the FMU's parameters of the same names (a null as 0). The master uses
+only the standard's C API through ctypes: no dependency, a Linux binary
+(`binaries/<arch>-linux/`) in the FMU.
+
+The FMU steps on a fixed grid (its `DefaultExperiment` step, else 5 ms) with
+its inputs held. An input change takes effect at the first grid point at or
+after it. To forecast the inverter's reports the master steps the FMU ahead
+of the emulation. When an edge then arrives for a time the FMU has passed, it
+goes back to the state it saved at its last exchange
+(`fmi3GetFMUState`/`fmi3SetFMUState`), or, for an FMU that can't, resets
+it and replays every input change from the start. The result is what a
+lock-step master would compute (`tests/unit/test_fmi.py`, both ways).
+
+A reference FMU of the tractive system (`tests/fmu/ts_reference.c`, built
+by the tests with the host's C compiler, `vhil.fmi.build_reference_fmu`)
+tests the master: it computes the stand-in's link on the same inputs to
+1e-9, and on ecu-ams the car arms on it as on the stand-in
+(`tests/sim/test_fmi_plant.py`). IFSSIM's FMU (isc-fs/IFSSIM#669) replaces
+it.
+
+## For an external engine (MingoCIL)
+
+The exchange is the same, carried by a transport instead of a Python call:
+at each boundary the vHIL sends the engine `t` and the system → plant values,
+and waits for the plant → system values before stepping. That transport is
+not built yet. When MingoCIL needs it, it should be a thin adapter that
+presents the engine as one more plant, so the timing contract above stays as
+it is. The port is one surface of the
+[integration contract](integration-contract.md), with the scenario schema,
+the session ops and the trace, and is versioned with them.
+
+## Scripted plants today
+
+- **`Inverter`**: the traction inverter's application-state machine as the
+  ECU firmware's bench notes describe it (Standby → Ready → TorqueEnable, the
+  fault-reset sequences, Shutdown), its 0x461/0x466/0x463 frames, and a
+  first-order motor speed. The motor model is a placeholder for the vehicle.
+- **`Pedals`**: a scripted driver over the car's calibrated APPS and brake
+  sensor spans and the START button.
+- **`AcuStimulus`**: *not a plant*. It stands in for the AMS on `ecu.yaml`,
+  which has none. `ecu-ams.yaml` has the real AMS; a tractive-system plant
+  closing precharge through the AMS's contactor outputs is the faithful next
+  step.
+
+- **`TsPlant`** (`vhil/plant_ts.py`, M8 #147): the tractive system. AIR+,
+  AIR- and the precharge relay follow the AMS's coil drives (PB5/PB6/PB7,
+  with PF9's coil supply) after their delays; the DC link charges through
+  the precharge resistor, follows the pack with both AIRs closed, and
+  bleeds while the shutdown circuit is open or the ECU secures it (PB6).
+  The inverter's 0x466 reports it (`v_link`), or an `Inverter(dc_link=...)`
+  does. Closed form, event-driven, parameters cited or "uncommissioned" in
+  [`catalog/plants/tractive-system.yaml`](../catalog/plants/tractive-system.yaml).
+  Its contract is the IFSSIM electrical FMU's, which it stands in for:
+  [`m8-plan.md`](m8-plan.md). `ecu-ams.yaml` and `ecu-ams-udv.yaml` declare
+  its signals; `tests/sim/test_plant_ts.py` arms the car on it.
+
+- **`SdcPlant`** (`vhil/plant_sdc.py`, TS-2): the shutdown circuit. The
+  AMS backplane's IMD and AMS latch relays (K4, K5: closed by an RST_EXT
+  press with IMD_OK / AMS_OK high, dropped when it falls) and the harness's
+  switches in series, ending in AIR+_VCC, which it drives on `ams.PF9`
+  (`sdc_closed`) for the AMS and as the tractive system's coil supply.
+  Event-driven on AMS_OK's edges; its inputs are scenario rows.
+  [`m8-plan.md`](m8-plan.md#ts-2-the-shutdown-circuit).
+
+## Cell source
+
+The AMS reads its cells and NTCs from the LTC6811 chain model
+(`models/renode/IsoSpi.cs`). A native test on a system without a pack sets
+them through the monitor (`SetCell`, `SetAllCells`, `SetTemperature`,
+`SetAuxRaw` per chip; `SetAllCells`, `StopReply` on the bridge), as
+`tests/sim/test_ams_*.py` do. There is no Pico LTC emulator on the virtual
+bench and won't be (#150).
+
+On a system whose tractive-system plant has `pack: true` (`ecu-ams`,
+`ecu-ams-udv`; M9 prep, #318) the plant is the cell source
+(`vhil/plant_pack.py`, [`m8-plan.md`](m8-plan.md#m9-prep-the-measurement-chain)):
+
+- `SetPlantCells` on the bridge takes all ten chips' twelve inputs in
+  100 uV (the LTC6811's LSB) in one call, `SetPlantTemperatures` all 32 mux
+  channels in 0.1 C; the plant calls each only when some value moved by
+  that much, so a pack at rest costs nothing after its first push. A chip a
+  plant drives keeps its cells and NTCs over an AMS reset (they are the
+  battery's, not the chip's).
+- Each chip accounts its balance switches' (DCC) on-time in virtual time;
+  the plant takes it (`TakeBleed`) and removes that charge through the bleed
+  resistor. `BleedTrigger`, armed while nothing bleeds, ends a
+  `RunForUntilTrigger` when a chip's DCC goes from none to some, so the
+  plant hears that balancing started without polling.
+- The pack current reaches the current sensor's legs through the port's
+  analog signals (`i_pack_p`, `i_pack_n`), from the sensor's catalogue
+  model, when it changes.
+
+An FMU with `v_cell[k]`, `t_sensor[n]`, `i_pack` outputs and `cell_bleed[k]`
+inputs drives the same calls (`FmuPlant(..., chain=, current=)`). The model
+keeps no other writer while a plant drives it.
+
+Failures of the link are not the battery's and stay test API: a chip that
+stops answering or a cut cable (`Respond`, `BreakDownstream`, `StopReply`), a
+reply with a bad PEC (`CorruptPec`, `CorruptNextReplies`), a WRCFGA a chip
+discards (`CorruptConfigWrites`, `CorruptNextConfigWrites`: its DCC bits
+stay as they were), and on the host side an SPI1 transfer that never runs
+(`sysbus.spi1 Stall` / `StallNextTransfers n`, `models/renode/Stm32H7Spi.cs`:
+the HAL times out). `tests/sim/test_ams_chain.py` and
+`tests/sim/test_ams_spi_faults.py` use them.

@@ -1,0 +1,79 @@
+kind: firmware
+id: ecu
+description: Vehicle control unit application, run behind the CAN bootloader.
+repo: isc-fs/IFS08-CE-ECU
+ref: dev
+submodules: false
+build:
+  toolchain: Arm GNU 14.2.Rel1
+  configure: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake
+  build: cmake --build build -j
+  elf: build/ECU08.elf
+  recipe_source: IFS_HIL configs/firmware/ecu.yaml
+load:
+  # Linked at 0x08020000 behind the bootloader, and never sets VTOR itself:
+  # the bootloader does that before jumping, so the loader must too.
+  vector_table: 0x08020000
+cpu:
+  # docs/cpu-timing.md, #246. The ECU runs from flash with the I- and D-caches
+  # off (no SCB_EnableICache/DCache, none in ECU.ioc), SYSCLK 528 MHz, AXI
+  # 264 MHz, FLASH_LATENCY_3 (main.c SystemClock_Config); data and stack in
+  # RAM_D1, uncached AXI SRAM (STM32H733ZGTX_FLASH.ld). Every fetch goes to
+  # the flash's single 256-bit read buffer, which reads a new flash word in
+  # 4 AXI clocks = 8 CPU cycles (RM0468 Rev 3 4.3.8 and Table 16). Its
+  # bit-banged nRF24's delay (nrf24.c NRF24_BitBangDelay, the SCK
+  # half-period) runs 7 instructions an iteration over two flash words, at
+  # least 16 cycles before its stack loads over AXI: at most
+  # 528 * 7 / 16 = 231 MIPS. That bound, until the chip's own number is
+  # measured (#246).
+  mips: 231
+can:
+  # Every message in the .def contract rides FDCAN2, the ACU bus: each DSL
+  # frame is built with CanBus::Acu (control_task.cpp:318 0x100,
+  # udv_tx.cpp:17, gps_tx.cpp:15, pit_diag.cpp:29), the contract is decoded
+  # off the ACU bus only (vehicle_service.cpp:238, bootloader.hpp:80), and
+  # all_messages.inc places the uDV/GPS frames there. FDCAN1 carries the
+  # inverter frames, not in the DSL yet (all_messages.inc TODO(inverter)),
+  # and FDCAN3 the dash frames 0x510-0x521 (telemetry_task.cpp:54-177),
+  # whose ids collide with the uDV's 0x510/0x511 on the ACU bus.
+  contract: [FDCAN2]
+state_view:
+  # What the state panel shows of an ECU (docs/state-view.md). Citations are
+  # IFS08-CE-ECU at the catalogue ref (dev).
+  #
+  # The start / ready-to-drive FSM, ControlTask's output every 10 ms cycle
+  # (app_globals.cpp:16, control_task.cpp:195): ecu::CtrlState (control.hpp:49-57).
+  - {label: State, kind: state, source: "symbol:g_last_ctrl_state", enum: "ecu::CtrlState"}
+  # RTDS, active-high (control_task.cpp:369-371, main.h:82-83).
+  - {label: RTDS, kind: relay, source: "pin:PB4"}
+  # START as the FSM sees it: PB5 set (io_signals.cpp:60, main.h:84-85),
+  # debounced (io_signals.cpp:62), mirrored every cycle (control_task.cpp:199,
+  # app_globals.cpp:21).
+  - {label: START, kind: relay, source: "symbol:g_last_start_button"}
+  # The DC-link discharge coil interrupt, set = secure, bleed on
+  # (control_task.cpp:296-301, main.h:86-87).
+  - {label: Discharge, kind: relay, source: "pin:PB6"}
+  # APPS disagreement past its 100 ms window, T.11.8.9 (control_task.cpp:200,
+  # control.hpp:188).
+  - {label: APPS T.11.8.9, kind: fault, source: "symbol:g_last_t11_8_9"}
+  # The discharge hold timed out without the link falling
+  # (app_globals.h:50-54, control_task.cpp:303).
+  - {label: Discharge fault, kind: fault, source: "symbol:g_discharge_fault"}
+  # The fault latched before the last reset, on the ungated 0x704 every second
+  # (pit_diag_health.def:32-35, :75, :92-99; ecu::FaultCode, error_latch.hpp:19-28).
+  - {label: Last reset fault, kind: fault, source: "frame:FDCAN2.PitDiag_health.last_fault"}
+  # The commanded torque, 0..100 % (control_task.cpp:194, app_globals.cpp:15).
+  - {label: Torque request, source: "symbol:g_last_torque_pct", unit: "%"}
+  # Raw 12-bit pedal and brake ADC, as ControlTask read them this cycle
+  # (control_task.cpp:196-198, app_globals.cpp:18-20).
+  - {label: APPS1, source: "symbol:g_last_apps1_raw", unit: adc}
+  - {label: APPS2, source: "symbol:g_last_apps2_raw", unit: adc}
+  - {label: Brake, source: "symbol:g_last_brake_raw", unit: adc}
+  # The inverter's App_State as the ECU last decoded it (vehicle_service.cpp:58,
+  # :142). Only the pit-diag stream carries it (pit_diag.cpp:40-42,
+  # pit_diag_status.def:17-19, :50-56), sent once 0x7E0 arms it
+  # (can_rx_task.cpp:87, control_task.cpp:378): "no data" until then.
+  - {label: Inverter, source: "frame:FDCAN2.PitDiag_status.inv_state"}
+  # The DC-bus voltage on the 0x100 heartbeat, every 10 ms in every state
+  # (vcu_heartbeat.def:12-13).
+  - {label: DC bus, source: "frame:FDCAN2.VCU_heartbeat.dc_bus_voltage", unit: V}

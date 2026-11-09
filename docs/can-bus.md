@@ -1,0 +1,168 @@
+# CAN buses in virtual time
+
+Every CAN bus of a system is the vHIL's bus model,
+[`models/renode/VhilCanBus.cs`](../models/renode/VhilCanBus.cs) (#174):
+frames wait for the bus and lose arbitration, they take their bit time, a
+node nobody acknowledges goes error-passive, and the bus timeline and load
+are exact in virtual time. A firmware sees what it would see on the car's
+bus.
+
+A bus can opt out with `arbitration: false`, and is then Renode's CAN hub:
+
+```yaml
+buses:
+  can_acu: {kind: can, nodes: [ecu.FDCAN2, ams.FDCAN1], host_netdev: can2, arbitration: false}
+```
+
+The hub hands each frame to every other node the instant it is sent. It has
+no bit time, no contention, no capacity and no ACK, and a frame from another
+board lands at the next sync point (every `time.quantum_s`, 500 µs), so its
+timestamps sit on the sync grid. Keep it for what truly needs it:
+renode-test's CAN Tester keywords attach only to a hub (Renode's
+`CANKeywords.cs`, `TestersProvider<CANTester, CANHub>`), so the smoke suites
+render their script with `python -m vhil.system render --can-hub`, which
+puts the hub on every bus. A test can opt out for one run with
+`Sim(..., hub=["can_acu"])`. Test bus load, priority, ACK and frame timing
+on the bus model, never on the hub.
+
+The bus model was opt-in at first (`arbitration: true`, which now says what
+the default says). Making it the default (#182) changed what some tests saw:
+a frame is stamped at its end on the bus, not at a sync point, so periods
+carry the firmware's own jitter. Such tests assert
+a cadence (`vhil.sim.assert_cadence`: a fixed grid, no drift, no missing
+frame, jitter under one kernel tick), not exact 10 000 µs intervals.
+
+## What the bus does
+
+The model works at frame granularity, with no bit-level physics. It follows
+ISO 11898-1 (Bosch CAN 2.0B) for the bus, and RM0468's FDCAN chapter for the
+controller (`Stm32H7Fdcan.cs`).
+
+| | |
+|---|---|
+| Offers | Each FDCAN offers the request its Tx handler would send next: dedicated buffers and the Tx queue by lowest ID, the Tx FIFO in order. Each offer is stamped with the virtual time `TXBAR` was written. The probe and the SocketCAN bridge offer what they send, in order. |
+| Arbitration | When the bus goes idle, every node with an offer starts. The arbitration field decides, dominant bit first: base ID, RTR/SRR, IDE, the ID extension, RTR. The losers wait for the next idle bus. A controller with `CCCR.DAR` set (`AutoRetransmission = DISABLE`) cancels a frame that loses instead (`TXBCF`). |
+| Frame time | SOF to EOF at the transmitter's bit rate, from NBTP on the 24 MHz kernel clock. It counts the exact stuff bits for the frame's contents, then 3 bits of intermission. A receiver gets the frame at the next-to-last EOF bit; the transmitter completes at the last (`TXBTO`, `IR.TC`, the FIFO slot freed). |
+| ACK | A frame no other node acknowledges gets an ACK error: error flag, delimiter and intermission, then a retry (or with DAR, a cancel). A node acknowledges when it is running: not in INIT, bus-off or bus monitoring mode, and at the same bit rate. The probe acknowledges unless `set_ack(False)` makes it listen only. |
+| Errors | ACK errors only. The transmitter's TEC rises by 8 per error, but not once it is error-passive (rule 3, exception 1), and falls by 1 per good frame. An error-passive transmitter waits 8 extra bits after each frame. `ECR.TEC`, `PSR.LEC/EW/EP` read the result. A lone node climbs to 128, error-passive, and stays there, retrying. |
+| Load | Busy time (frames, error frames, intermission) over a window: `CanBus.load()`. The worker writes it per bus and slice to the run's trace as `bus_load`, and the editor's Bus tab shows it. |
+
+**Not modelled:**
+- Bit, stuff, CRC and form errors.
+- REC.
+- Bus-off reached from errors. `ForceBusOff` still forces it.
+- CAN FD frames, which are timed as classic frames.
+- The FDCAN's Tx and error interrupts (`IR.TC/TCF/TFE`, the Tx event FIFO, `IR.EP/EW/BO/PEA`), and the Tx event FIFO itself.
+
+The model logs these once when a firmware asks for them. Neither firmware does: both poll `PSR`, `TXFQS` and `TXBRP`.
+
+## Virtual time and the sync quantum
+
+Each board is its own Renode machine. The machines run in parallel and meet
+at a sync point every quantum. An offer from one board is therefore known to
+the others only at the next sync point, so the bus decides a frame only once
+every offer that could compete with it is known:
+
+- **One board on the bus** (and the probe, which only sends at sync points):
+  the bus decides as the board offers, and every effect is exact.
+- **Several boards:** the bus decides at each sync point, for the frames that
+  start before it.
+
+The bus timeline (`CanBus.timeline()`: offer, start, end and idle again,
+outcome) is exact in virtual time either way. Each effect in a machine (RX,
+TX complete, error state) is scheduled at the frame's virtual time while that
+is still ahead. Otherwise it happens at the sync point, at most one quantum
+late and never early. `CanBus.stats()["late"]` counts those effects. On
+`ecu-ams` at 500 µs, about 60 % of cross-board effects are late, by up to
+about 390 µs.
+
+**The lag bound.** Every system file and the whole gate (the scenarios, the
+identity fingerprint, the sim, smoke and native suites, the IFS_HIL virtual
+suites, every required check) sync every **500 µs**, so a cross-board effect
+is at most 500 µs late. A non-gate run may opt in to a **1 ms** quantum
+([#348](https://github.com/isc-fs/IFS-vHIL/issues/348)): about 12-25 % faster
+in steady state, and what a board sees of another (CAN included) can then lag
+by up to 1 ms. Only those two values are accepted
+(`vhil.system.quantum_us`). It is chosen per run: `Sim(..., quantum_us=1000)`,
+a run's `quantum_us` (the editor's **Sync**, for Run and Live), or
+`--quantum-us 1000` on `python -m vhil.system render` and
+`scripts/speed.py`. The run's summary records which it used
+(`summary.quantum_us`). A scenario file can't set it, and the test tree, the
+fingerprint script and the IFS_HIL plugin refuse 1 ms
+(`require_gate_quantum`), except the opt-in's own determinism test (below).
+A 1 ms run's timeline is not the 500 µs one, so it has no fingerprint
+reference.
+
+A quantum under the shortest frame (44 bit times, 88 µs at 500 kbit/s) would
+make them all exact. With two boards it costs 3x to 5x in wall time, and it
+slows the ECU's control loop, so the model doesn't do it. The spike numbers
+are on [#174](https://github.com/isc-fs/IFS-vHIL/issues/174).
+
+### Determinism
+
+The same system, images and inputs give the same bus timeline on every run:
+the same frames in the same order, the same offer, start and end times, the
+same arbitration outcomes, the same late effects
+(`test_two_board_runs_give_the_same_bus_timeline`). The 1 ms opt-in repeats
+all the same (`test_two_board_runs_at_the_1ms_quantum_give_the_same_bus_timeline`,
+in CI's guard beside it).
+
+That needs each board on a time source of its own
+([`VhilMachine.cs`](../models/renode/VhilMachine.cs), #209), which `vhil.sim`
+renders for every system of more than one board. Renode's `mach create` puts
+every machine on the emulation's master time source, whose virtual time is
+the minimum of what all CPUs have executed. A board's clock (its timers,
+interrupts and scheduled actions) then advanced only as far as the slowest
+CPU, on whichever CPU thread moved that minimum: a board's timer interrupts
+came late in its own instruction stream, by however far the host had run
+the other board. Twenty runs of `ecu-ams` gave twenty different ACU
+timelines, diverging about 20 ms after the apps started (the ECU's
+`HAL_Delay` loop left at a different instruction), on the hub as on the bus
+model, and even with the two boards on separate buses. A board on its own
+time source runs alone between sync points, as in a single-board system,
+which was already deterministic; the boards meet only at sync points, where
+the bus decides.
+
+Two Renode 1.17 limits come with it. A machine on its own time source runs
+only whole quanta: a shorter grant (the last part of a `RunFor` that is not a
+whole number of quanta) is kept for later and the board falls behind, so
+`Sim.run_for` runs such a remainder with the quantum set to it. And the
+wall-clock bench (`vhil.bench`, the broker) pauses one board's machine to
+power-cycle it, which hung on a machine with its own time source; the bench
+keeps `mach create`, so a multi-board bench run is not deterministic (it is
+paced to wall time anyway). `emulation SetGlobalSerialExecution true` is
+deterministic on the shared time source too, but about 3.5x slower, and its
+timers are later still: each board ran its whole quantum before the other
+ran, so the shared time (and every timer) moved only when the second had,
+and the timeline changed character (30 arbitration contests in 3 s, where
+each board on its own time source gives 168).
+
+What is not deterministic is wall time, and anything read from Renode's
+master time source in the middle of a quantum (it is the slowest board's
+progress); the bus reads it only in the sync phase. A single-board bus wakes
+in its board's own thread; a wake that found the bus taken would be retried
+1 µs later (#207, the old lock-order deadlock), which would be host timing,
+so `CanBus.stats()["wake_retries"]` counts them and the test asserts none.
+`emulation SetGlobalSerialExecution true` also made `ecu-ams` deterministic,
+but ran it about 4.5x slower.
+
+## Using it from a test
+
+```python
+with Sim("systems/ecu-ams.yaml", fw) as sim:
+    can = sim.can("can_acu")
+    logger = can.node("logger")        # a second probe: its own queue, ACK, TEC
+    can.set_ack(False)                 # the main probe listens only
+    ...
+    for f in can.timeline(since_us=t0):   # BusFrame: start_ns, end_ns, free_ns, offer_ns,
+        ...                               # node, id, outcome ("ok", "ack", "lost"), data
+    can.load(t0, t1); can.stats(); can.nodes()   # nodes(): per node TEC, sent, ack errors, lost
+```
+
+On an arbitrated bus, `frames()` stamps each frame at the receiver's
+next-to-last EOF bit, and `sent()` at the probe's own frame's last EOF bit.
+A frame waiting for the bus is in neither. `vhil/canframe.py` computes a
+frame's bits in Python, the same way as the model.
+[`tests/sim/test_can_bus.py`](../tests/sim/test_can_bus.py) has one test per
+exit criterion of #174, including a LOGFS-style flood on the ACU bus against
+the ECU's heartbeat and the AMS's VcuStale.

@@ -1,0 +1,29 @@
+kind: model
+id: sd-card
+description: >-
+  SD card on an SD/MMC controller (Renode's SD.SDCard, as VhilSDCard in
+  models/renode/Stm32H7Sdmmc.cs), in memory or backed by a card image
+  (param image). The firmware does not format cards: give it a FAT32 image
+  to see it log. Param dead: the card sits in the slot (card detect low)
+  but never answers, so the controller times its commands out (CMDSENT /
+  CTIMEOUT / DTIMEOUT, as with no card attached). Test API (monitor, on
+  the device): Respond (false: dead from now on, true: answers again),
+  Flush (the image file and the card in step, to read or rewrite the image
+  mid-run).
+interface: {sdmmc: true}
+params:
+  capacity: 0x8000000      # 128 MiB
+  # A card image file to back the card with ("" = in memory). Writes go to
+  # the file, so a test can read the card after a run.
+  image: ""
+  # In the slot but not answering from power-on (a dead or unpowered card).
+  dead: false
+# The image is opened read-write, so it must be a file inside a card-image
+# directory ($VHIL_CARD_DIR, default build/cards; vhil.system.card_dirs).
+param_formats: {image: card-image}
+backend: renode
+renode:
+  source: models/renode/Stm32H7Sdmmc.cs
+  type: SD.VhilSDCard
+  params: {image: imageFile}
+  set_also: {image: {persistent: true}}

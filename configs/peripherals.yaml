@@ -1,0 +1,71 @@
+# Unmodelled hardware the firmware is allowed to touch, and why that is safe.
+#
+# Renode drops writes to, and returns 0 for reads from, registers it does not
+# model. vhil/peripheral_guard.py fails a run when firmware touches anything
+# not listed here. Add an entry only with a reason the access cannot change
+# what a test observes. Otherwise, model the hardware.
+# A gap that is tracked but not yet modelled may be listed with "KNOWN GAP
+# #<issue>" in its reason, so a run stays honest about it without failing; the
+# entry goes when the issue closes.
+#
+#   peripheral: <name or glob>   offsets: [<register offsets>]  (omit = any)
+#   tag: <tagged sysbus region>
+#   address: <unmapped address>
+#   machine: <board instance>  (optional; omit = any board)
+
+- peripheral: usb1
+  why: "USB OTG HS (Renode's STM_USB). The ECU and the AMS initialise it (MX_USB_OTG_HS_PCD_Init) and never use it. The uDV runs micro-ROS over USB CDC to the DVPC (IFS09-DV-uDV usb_cdc_transport.c), and no system attaches a USB host: the core initialises and never sees a bus reset or enumeration, so the uDV's agent ping fails and it retries (ros_task.c), as on the car with the DVPC off. The dropped bits (PHY select, device speed, FIFO sizes, endpoint interrupt masks) only matter once a host enumerates the device"
+
+- peripheral: fdcan1*
+  offsets: [0x108]
+  why: "TT-CAN TTOCF. HAL_FDCAN_Init clears its OM bits on FDCAN1 (stm32h7xx_hal_fdcan.c:583) and HAL reads it to test for TT mode; reading 0 means event-driven, which is the firmware's real configuration"
+
+- peripheral: rcc
+  offsets: [0x2C, 0x54, 0xDC, 0xEC, 0xF0]
+  why: "PLLCFGR fractional/range bits (0x2C), D2CCIP2R USBSEL (0x54), and the H72x/H73x-only enable bits the H743 RCC model treats as reserved: AHB2ENR.CORDICEN bit 17 (0xDC, the uDV), APB1HENR.TIM23EN bit 24 (0xEC) and APB2ENR.USART10EN bit 7 (0xF0), per stm32h733xx.h. Renode does not gate clocks, so those peripherals run regardless; frequencies come from the PLL dividers, which are modelled"
+
+- peripheral: rcc
+  offsets: [0xD0, 0x130]
+  why: "RCC_RSR and its RCC_C1_RSR mirror are owned by models/renode/VhilResetFlags.cs through bus hooks: reads return its flags and an RMVF write clears them there. The RCC model's own field underneath is shadowed, so its unhandled-bit warning is moot"
+
+- peripheral: syscfg
+  offsets: [0x4]
+  why: "SYSCFG_PMCR.PC2SO (bit 26, stm32h733xx.h): the uDV's HAL_ADC_MspInit opens the analog switch between PC2 and PC2_C (IFS09-DV-uDV adc.c:141). It decides whether the digital PC2 pad joins ADC3 INP0's PC2_C; the model reads PC2_C's voltage on channel 0 either way (catalog/boards/mainlite.yaml), and the uDV samples channels 2, 3, 6, 7, 10 and 11, never 0 (hardware_io.c:100-147), so the switch cannot change a reading"
+
+- peripheral: usart10
+  offsets: [0x08, 0x2C]
+  why: "CR3.EIE (error interrupt) and PRESC, which the F7-family USART model lacks. Baud rate is not modelled, so the prescaler cannot change what a test sees"
+
+# The AMS's accesses, visible since the guard reads machine-prefixed lines.
+
+- peripheral: spi1
+  offsets: [0x0, 0x8, 0xC, 0x18]
+  why: "SPI1 to the LTC6820: CR1.SSI, CFG1.MBR (baud divider), CFG2.MSSI/SSM/SSOM (hardware NSS) and CFG2.COMM (TX-only during writes), IFCR.TXTFC. Renode does not model SPI clocking or hardware NSS, and the LTC chip select is a GPIO (PB9). COMM would only matter if the model kept bytes the TX-only hardware would not receive; the chain reads back with zero PEC errors, so it does not"
+
+- peripheral: gpioPortF
+  offsets: [0x4]
+  why: "OTYPER OT0/OT1: open-drain on PF0/PF1 (I2C2 to the BMI088). The I2C model works at transaction level (models/renode/Stm32H7I2c.cs), with no electrical bus for the pin drive to act on"
+
+- peripheral: usart*
+  offsets: [0x2C]
+  why: "PRESC, which the F7-family USART model lacks (as for usart10). Baud rate is not modelled, so the prescaler cannot change what a test sees"
+
+- peripheral: sdmmc1
+  offsets: [0x2C]
+  why: "DCTRL.DTEN, which Renode's SDMMC base defines as a tag. The H7 HAL starts the data path with CMD.CMDTRANS, which the model handles; DTEN does not change what moves"
+
+# The CAN bootloader's accesses (every MainLite carries it in sector 0).
+
+- peripheral: flashController_h7
+  offsets: [0xC]
+  why: "CR1.PSIZE1, the programming parallelism (x8..x64). It sets how fast a flash word programs, not what is written, and the model programs instantly"
+
+# The Cortex-M7 core's system registers (every board).
+
+- peripheral: nvic
+  offsets: [0xF50]
+  why: "ICIALLU, invalidate the whole I-cache (SCB_EnableICache, CMSIS cachel1_armv7.h). models/renode/VhilCaches.cs counts it through a bus hook; the NVIC model underneath defines no register there, hence its warning. Renode has no cache, so every fetch already sees memory: the invalidation's effect on what runs is the architected one"
+
+- peripheral: dwt
+  offsets: [0xFB0]
+  why: "DWT_LAR, the CoreSight software lock (0xC5ACCE55 unlocks). The car's H733 counts CYCCNT without it: the CAN bootloader enables CYCCNT with no LAR write (main.c:489-491) and measured 1822 ms sector erases with it on bench-01 (stm32-can-bootloader#138). Renode's DWT has no lock, so dropping the unlock is what the silicon does with it"

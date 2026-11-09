@@ -1,0 +1,462 @@
+name: IFS_HIL ECU and AMS suites (virtual)
+
+# Runs IFS_HIL's own ECU suite, unmodified, against systems/ecu.yaml: the ECU
+# built from the source the system declares (IFS_HIL's recipe), provisioned as
+# the car's (the MainLite's CAN bootloader in sector 0, node 0x1), Renode
+# bridged to vcan can0/can1/can2 and the virtual broker answering IFS_HIL's
+# broker protocol (issue #1).
+
+# Heavy CI runs only in special cases (owner, 2026-10-06; docs/ci.md): a
+# pull request labelled `full-ci` runs the jobs its changes select
+# (ci/impact.yaml), `full-ci-all`, a release pull request into main, the
+# nightly run on dev and a manual dispatch run all three. Otherwise a job is
+# skipped, which counts as passing for required checks (`ecu` is one); unit
+# tests (unit.yml) run on every pull request.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: '30 2 * * *'   # nightly, on dev (see the checkout ref)
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "IFS_HIL ECU suite name (configs/suites.yaml) or test path"
+        required: false
+        default: smoke
+      ecu_ref:
+        description: "ECU firmware ref (default: the ref in catalog/firmware/ecu.yaml)"
+        required: false
+      ifs_hil_ref:
+        description: "IFS_HIL ref (branch, tag or SHA) whose suite runs; default dev"
+        required: false
+        default: dev
+      ams_suite:
+        description: "IFS_HIL AMS suite name (configs/suites.yaml) or test path"
+        required: false
+        default: full
+
+# The jobs run code from other repos (IFS_HIL, the firmware repos): the token
+# can only read this one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # IFS_HIL's suite tracks its `dev` branch on purpose: these jobs check that
+  # the bench's tests still pass against the virtual boards, so they follow
+  # what the physical bench runs. Pull requests and pushes always use `dev`;
+  # a dispatch may pick another ref (ifs_hil_ref). Pinning a SHA here would
+  # trade that tracking for a fixed, reviewed input.
+  IFS_HIL_REF: ${{ inputs.ifs_hil_ref || 'dev' }}
+
+jobs:
+  # What this event runs (scripts/ci-select.py over ci/impact.yaml).
+  select:
+    uses: ./.github/workflows/select.yml
+
+  # Renode as the image builds it (docker/renode/,
+  # .github/actions/setup-renode), into the Actions cache once; the jobs below
+  # read it from there.
+  renode:
+    name: renode build
+    needs: select
+    if: needs.select.outputs.ifs_hil_any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-renode
+        with:
+          save: ${{ needs.select.outputs.renode_save }}
+
+      # The firmware the jobs below build, into the firmware cache once
+      # (.github/actions/firmware-cache, vhil/fwcache.py): they copy each
+      # image from there (its SHA-256 checked) instead of building it, and
+      # build it themselves when it is not there (this step failed, a ref
+      # moved since). Failing here fails nothing: the jobs build.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Arm GNU toolchain (pinned like IFS_HIL's recipe)
+        uses: carlosperate/arm-none-eabi-gcc-action@49f4db4520f840e77ab1e99b24cfac2c540a21b1 # v1.14.1
+        with:
+          release: '14.2.Rel1'
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: restore
+          scope: ifs-hil
+      - name: Build the firmware the jobs below build
+        continue-on-error: true
+        env:
+          ECU_REF: ${{ inputs.ecu_ref }}
+          JOB_ECU: ${{ needs.select.outputs.ifs_hil_ecu }}
+          JOB_ECU_AMS: ${{ needs.select.outputs.ifs_hil_ecu_ams }}
+          JOB_AMS: ${{ needs.select.outputs.ifs_hil_ams }}
+        run: |
+          pip install -q pyyaml "jsonschema>=4"
+          if [ "$JOB_ECU" = true ]; then
+            python -m vhil.system build systems/ecu.yaml --workdir "$RUNNER_TEMP/fw" \
+              ${ECU_REF:+--ref "ecu=$ECU_REF"}
+          fi
+          if [ "$JOB_ECU_AMS" = true ]; then
+            python -m vhil.system build systems/ecu-ams.yaml --workdir "$RUNNER_TEMP/fw" \
+              ${ECU_REF:+--ref "ecu=$ECU_REF"}
+          fi
+          if [ "$JOB_AMS" = true ]; then
+            python -m vhil.system build systems/ams.yaml --workdir "$RUNNER_TEMP/fw"
+          fi
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: save
+          scope: ifs-hil
+
+  # The ECU boots through its CAN bootloader, as every MainLite does, so the
+  # smoke suite's boot block (A-002 discover, A-006 round trip, A-003 flash
+  # and jump through can-flasher over vcan, #4) runs here: a skip in it fails
+  # the job, as it would mean the flashing path never ran.
+  ecu:
+    needs: [select, renode]
+    # After the build, which a failed `renode` doesn't skip: the job then
+    # builds Renode itself (and fails loudly if it can't).
+    # Runs when the selection failed too, to fail (not skip) the check.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.ifs_hil_ecu == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CAN_FLASHER_VERSION: 3.1.1
+      # GitHub's sha256 digest for the release asset (gh release view v3.1.1 -R
+      # isc-fs/can-flasher --json assets), checked against a download.
+      CAN_FLASHER_SHA256: 8e3412b846a3ced9abd34b9a2a5665232c2fb72f089fcf55fdcccb5635c87b5e
+    steps:
+      - name: The selection ran
+        env:
+          SELECT: ${{ needs.select.result }}
+        run: test "$SELECT" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+          persist-credentials: false
+
+      - name: Check out IFS_HIL
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: isc-fs/IFS_HIL
+          ref: ${{ env.IFS_HIL_REF }}
+          path: ifs_hil
+
+      - name: Arm GNU toolchain (pinned like IFS_HIL's recipe)
+        uses: carlosperate/arm-none-eabi-gcc-action@49f4db4520f840e77ab1e99b24cfac2c540a21b1 # v1.14.1
+        with:
+          release: '14.2.Rel1'
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: restore
+          scope: ifs-hil
+
+      - name: Build the ECU and its bootloader from systems/ecu.yaml
+        id: fw
+        env:
+          ECU_REF: ${{ inputs.ecu_ref }}
+        run: |
+          pip install -q pyyaml "jsonschema>=4"
+          python -m vhil.system build systems/ecu.yaml --workdir "$RUNNER_TEMP/fw" \
+            ${ECU_REF:+--ref "ecu=$ECU_REF"} | tee built.txt
+          echo "elf=$(sed -n 's/^ecu=//p' built.txt)" >> "$GITHUB_OUTPUT"
+          echo "bootloader=$(sed -n 's/^ecu.bootloader=//p' built.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: save
+          scope: ifs-hil
+
+      # Renode 1.17.0 + docker/renode's patches, as the image builds it.
+      - name: Renode (vHIL build)
+        uses: ./.github/actions/setup-renode
+
+      - name: Install can-flasher ${{ env.CAN_FLASHER_VERSION }}
+        run: |
+          curl -fsSL -o can-flasher.tar.gz \
+            "https://github.com/isc-fs/can-flasher/releases/download/v${CAN_FLASHER_VERSION}/can-flasher-v${CAN_FLASHER_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${CAN_FLASHER_SHA256}  can-flasher.tar.gz" | sha256sum -c -
+          tar xzf can-flasher.tar.gz -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/can-flasher-v${CAN_FLASHER_VERSION}-x86_64-unknown-linux-gnu/can-flasher" /usr/local/bin/can-flasher
+          can-flasher --version
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Install IFS_HIL (core deps only, as off-bench)
+        run: pip install -q -e ifs_hil
+
+      - name: Create vcan can0 / can1 / can2
+        run: scripts/ci-vcan.sh can-utils
+
+      - name: Capture all CAN traffic
+        run: |
+          nohup candump -L -t a can0 can1 can2 > candump.log 2>&1 &
+
+      - name: Run IFS_HIL's ECU suite against the virtual ECU
+        env:
+          SUITE: ${{ inputs.suite || 'smoke' }}
+          RENODE: ${{ runner.temp }}/renode/renode
+          VHIL_FIRMWARE: ecu.bootloader=${{ steps.fw.outputs.bootloader }}
+          ECU_ELF: ${{ steps.fw.outputs.elf }}
+        run: |
+          set +e
+          scripts/run-ifs-hil.sh ifs_hil "$ECU_ELF" "$SUITE" \
+            --vhil-log="$GITHUB_WORKSPACE/vhil-renode.log" \
+            --junitxml="$GITHUB_WORKSPACE/junit.xml" | tee pytest.txt
+          rc=${PIPESTATUS[0]}
+          # A missing bus must never pass as a skip.
+          if grep -q "SocketCAN interface .* not present" pytest.txt; then
+            echo "::error::tests skipped for a missing SocketCAN interface"; exit 1
+          fi
+          if grep -q "^SKIPPED.*test_block_a_boot" pytest.txt; then
+            echo "::error::a boot-block test skipped: the flashing path did not run"; exit 1
+          fi
+          exit $rc
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ifs-hil-ecu-virtual
+          path: |
+            junit.xml
+            pytest.txt
+            vhil-renode.log
+            candump.log
+          if-no-files-found: ignore
+
+  # M3 (#11): the ECU and the AMS on one ACU bus (systems/ecu-ams.yaml), and
+  # IFS_HIL's real-AMS block against the emulated AMS. Every test must run:
+  # a skip here means the live AMS was not there.
+  ecu-ams:
+    needs: [select, renode]
+    # After the build, which a failed `renode` doesn't skip: the job then
+    # builds Renode itself (and fails loudly if it can't).
+    # Runs when the selection failed too, to fail (not skip) the check.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.ifs_hil_ecu_ams == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: The selection ran
+        env:
+          SELECT: ${{ needs.select.result }}
+        run: test "$SELECT" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+          persist-credentials: false
+
+      - name: Check out IFS_HIL
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: isc-fs/IFS_HIL
+          ref: ${{ env.IFS_HIL_REF }}
+          path: ifs_hil
+
+      - name: Arm GNU toolchain (pinned like IFS_HIL's recipe)
+        uses: carlosperate/arm-none-eabi-gcc-action@49f4db4520f840e77ab1e99b24cfac2c540a21b1 # v1.14.1
+        with:
+          release: '14.2.Rel1'
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: restore
+          scope: ifs-hil
+
+      - name: Build the ECU and AMS firmware from systems/ecu-ams.yaml
+        id: fw
+        env:
+          ECU_REF: ${{ inputs.ecu_ref }}
+        run: |
+          pip install -q pyyaml "jsonschema>=4"
+          python -m vhil.system build systems/ecu-ams.yaml --workdir "$RUNNER_TEMP/fw" \
+            ${ECU_REF:+--ref "ecu=$ECU_REF"} | tee built.txt
+          echo "ecu=$(sed -n 's/^ecu=//p' built.txt)" >> "$GITHUB_OUTPUT"
+          echo "ams=$(sed -n 's/^ams=//p' built.txt)" >> "$GITHUB_OUTPUT"
+          echo "bootloader=$(sed -n 's/^ecu.bootloader=//p' built.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: save
+          scope: ifs-hil
+
+      # Renode 1.17.0 + docker/renode's patches, as the image builds it.
+      - name: Renode (vHIL build)
+        uses: ./.github/actions/setup-renode
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Install IFS_HIL (core deps only, as off-bench)
+        run: pip install -q -e ifs_hil
+
+      - name: Create vcan can0 / can1 / can2
+        run: |
+          # dosfstools, mtools: the AMS's card image (vhil/bench_operator.py)
+          scripts/ci-vcan.sh can-utils dosfstools mtools
+          nohup candump -L -t a can0 can1 can2 > candump.log 2>&1 &
+
+      - name: Run IFS_HIL's real-AMS block against the virtual ECU + AMS
+        env:
+          RENODE: ${{ runner.temp }}/renode/renode
+          VHIL_SYSTEM: systems/ecu-ams.yaml
+          VHIL_FIRMWARE: >-
+            ams=${{ steps.fw.outputs.ams }}
+            ecu.bootloader=${{ steps.fw.outputs.bootloader }}
+            ams.bootloader=${{ steps.fw.outputs.bootloader }}
+          ECU_ELF: ${{ steps.fw.outputs.ecu }}
+        run: |
+          set +e
+          scripts/run-ifs-hil.sh ifs_hil "$ECU_ELF" \
+            tests/hil/vcu/test_block_f_real_ams.py \
+            --vhil-log="$GITHUB_WORKSPACE/vhil-renode.log" \
+            --junitxml="$GITHUB_WORKSPACE/junit.xml" | tee pytest.txt
+          rc=${PIPESTATUS[0]}
+          if grep -q "^SKIPPED" pytest.txt; then
+            echo "::error::a real-AMS test skipped: the live AMS was not exercised"; exit 1
+          fi
+          exit $rc
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ifs-hil-ecu-ams-virtual
+          path: |
+            junit.xml
+            pytest.txt
+            vhil-renode.log
+            candump.log
+          if-no-files-found: ignore
+
+  # IFS_HIL's AMS suite (`full`, minus its soak cases: IFS_HIL pyproject.toml
+  # addopts) against systems/ams.yaml: the AMS built from the source the
+  # system declares, behind its CAN bootloader (node 0x2, flashed over
+  # FDCAN1), with bench-01's AMS-slot wiring (relay, INA, DAC4 pack-current
+  # pair, IOEXP2 TSMS/DASH_CHG, ADC3 relay readback, the Pico's cell seed).
+  # What the virtual bench can't run yet is skipped with its reason from
+  # configs/gaps.yaml.
+  ams:
+    needs: [select, renode]
+    # After the build, which a failed `renode` doesn't skip: the job then
+    # builds Renode itself (and fails loudly if it can't).
+    # Runs when the selection failed too, to fail (not skip) the check.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.ifs_hil_ams == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      CAN_FLASHER_VERSION: 3.1.1
+      CAN_FLASHER_SHA256: 8e3412b846a3ced9abd34b9a2a5665232c2fb72f089fcf55fdcccb5635c87b5e
+    steps:
+      - name: The selection ran
+        env:
+          SELECT: ${{ needs.select.result }}
+        run: test "$SELECT" = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+          persist-credentials: false
+
+      - name: Check out IFS_HIL
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: isc-fs/IFS_HIL
+          ref: ${{ env.IFS_HIL_REF }}
+          path: ifs_hil
+
+      - name: Arm GNU toolchain (pinned like IFS_HIL's recipe)
+        uses: carlosperate/arm-none-eabi-gcc-action@49f4db4520f840e77ab1e99b24cfac2c540a21b1 # v1.14.1
+        with:
+          release: '14.2.Rel1'
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: restore
+          scope: ifs-hil
+
+      - name: Build the AMS and its bootloader from systems/ams.yaml
+        id: fw
+        run: |
+          pip install -q pyyaml "jsonschema>=4"
+          python -m vhil.system build systems/ams.yaml --workdir "$RUNNER_TEMP/fw" | tee built.txt
+          echo "elf=$(sed -n 's/^ams=//p' built.txt)" >> "$GITHUB_OUTPUT"
+          echo "bootloader=$(sed -n 's/^ams.bootloader=//p' built.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/firmware-cache
+        with:
+          step: save
+          scope: ifs-hil
+
+      # Renode 1.17.0 + docker/renode's patches, as the image builds it.
+      - name: Renode (vHIL build)
+        uses: ./.github/actions/setup-renode
+
+      - name: Install can-flasher ${{ env.CAN_FLASHER_VERSION }}
+        run: |
+          curl -fsSL -o can-flasher.tar.gz \
+            "https://github.com/isc-fs/can-flasher/releases/download/v${CAN_FLASHER_VERSION}/can-flasher-v${CAN_FLASHER_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${CAN_FLASHER_SHA256}  can-flasher.tar.gz" | sha256sum -c -
+          tar xzf can-flasher.tar.gz -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/can-flasher-v${CAN_FLASHER_VERSION}-x86_64-unknown-linux-gnu/can-flasher" /usr/local/bin/can-flasher
+          can-flasher --version
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+
+      - name: Install IFS_HIL (core deps only, as off-bench)
+        run: pip install -q -e ifs_hil
+
+      - name: Create vcan can0 / can1 / can2
+        run: |
+          # dosfstools, mtools: the AMS's card image (vhil/bench_operator.py)
+          scripts/ci-vcan.sh can-utils dosfstools mtools
+          nohup candump -L -t a can0 can1 can2 > candump.log 2>&1 &
+
+      - name: Run IFS_HIL's AMS suite against the virtual AMS
+        env:
+          SUITE: ${{ inputs.ams_suite || 'full' }}
+          RENODE: ${{ runner.temp }}/renode/renode
+          VHIL_DUT: ams
+          VHIL_FIRMWARE: ams.bootloader=${{ steps.fw.outputs.bootloader }}
+          AMS_ELF: ${{ steps.fw.outputs.elf }}
+        run: |
+          set +e
+          scripts/run-ifs-hil.sh ifs_hil "$AMS_ELF" "$SUITE" \
+            --vhil-log="$GITHUB_WORKSPACE/vhil-renode.log" \
+            --junitxml="$GITHUB_WORKSPACE/junit.xml" --durations=25 | tee pytest.txt
+          rc=${PIPESTATUS[0]}
+          if grep -q "SocketCAN interface .* not present" pytest.txt; then
+            echo "::error::tests skipped for a missing SocketCAN interface"; exit 1
+          fi
+          exit $rc
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ifs-hil-ams-virtual
+          path: |
+            junit.xml
+            pytest.txt
+            vhil-renode.log
+            candump.log
+          if-no-files-found: ignore

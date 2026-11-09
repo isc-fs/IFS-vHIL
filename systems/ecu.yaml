@@ -1,0 +1,63 @@
+kind: system
+id: ecu
+description: >-
+  One ECU (a MainLite on the ECU backplane) with its three CAN buses: what IFS_HIL's ECU
+  suites expect from bench-01 slot 4.
+time:
+  # 500 us sync quantum (Renode default 100 us) keeps one H7 at about real
+  # time on a desktop; still 20x finer than the firmware's 10 ms period.
+  quantum_s: 0.0005
+boards:
+  # A MainLite in the ECU role: the ECU firmware, node 0x1, flashed over
+  # FDCAN2 (the role's, catalog/boards/mainlite.yaml). It boots through its
+  # CAN bootloader, then jumps to the app after the 2 s auto-jump window, as
+  # on the car.
+  ecu: {board: mainlite, role: ecu}
+buses:
+  # Bus names are what tests attach to. host_netdev follows bench-01's
+  # netdev names, so IFS_HIL's suites open the same interfaces.
+  can_inv:  {kind: can, nodes: [ecu.FDCAN1], host_netdev: can0}  # CAN_H/L_INV, J1.9/J1.10 (docs/backplanes/ecu.md)
+  can_dash: {kind: can, nodes: [ecu.FDCAN3], host_netdev: can1}  # net CAN_H/L_SENS (stale name), J1.13/J1.14 (docs/backplanes/ecu.md)
+  can_acu:  {kind: can, nodes: [ecu.FDCAN2], host_netdev: can2}  # net CAN_H/L_TEL (stale name), J1.11/J1.12 (docs/backplanes/ecu.md)
+devices:
+  # The nRF24L01+ telemetry radio on the backplane, which the ECU bit-bangs
+  # over GPIOs (IFS08-CE-ECU dev 544b651 nrf24.c:49-79): its TelemetryTask
+  # sends the radio snapshot as five 32-byte payloads every 200 ms
+  # (telemetry_task.cpp:23-25, :233-245; tests/sim/test_ecu_radio.py).
+  radio: {model: nrf24l01p, pins: {csn: ecu.PB0, sck: ecu.PA5, mosi: ecu.PA7, miso: ecu.PA6, ce: ecu.PC5, irq: ecu.PC4}}  # NRF24_CS/SCK/MOSI/MISO/CE/IRQ, on board (docs/backplanes/ecu.md)
+port:
+  # The co-simulation port (vhil/cosim.py): what the ECU's plants exchange
+  # with it. Pedal sensors and START are the driver; FDCAN1 is the inverter.
+  # The AMS frames are for a stimulus standing in for the AMS, which this
+  # system lacks (ecu-ams.yaml has the real one).
+  step_ms: 10
+  signals:
+    apps1:      {analog: ecu.PF8}  # APPS_1, J1.3 (docs/backplanes/ecu.md)
+    apps2:      {analog: ecu.PF9}  # APPS_2, J1.6 (docs/backplanes/ecu.md)
+    brake:      {analog: ecu.PF7}  # S_BRAKE_FIL <- J1.18 (docs/backplanes/ecu.md)
+    start:      {gpio_in: ecu.PB5}  # START_FIL <- J1.19 (docs/backplanes/ecu.md)
+    rtds:       {gpio_out: ecu.PB4}  # RTDS -> J1.20 (docs/backplanes/ecu.md)
+    discharge:  {gpio_out: ecu.PB6}  # DC-link discharge coil-interrupt, header J3.18 only (docs/backplanes/ecu.md)
+    inv_cmd:    {can_rx: {bus: can_inv, id: 0x360}}
+    inv_torque: {can_rx: {bus: can_inv, id: 0x362}}
+    inv_state:  {can_tx: {bus: can_inv, id: 0x461}}
+    inv_vdc:    {can_tx: {bus: can_inv, id: 0x466}}
+    inv_rpm:    {can_tx: {bus: can_inv, id: 0x463}}
+    ams_ok_precharge: {can_tx: {bus: can_acu, id: 0x020}}
+    ams_status:       {can_tx: {bus: can_acu, id: 0x4A0}}
+bench:
+  power:
+    # Slot 4: relay = TCA 0x20 port 0 pin 3, current monitor INA 0x45.
+    - {board: ecu, slot: 4, relay: {addr: 0x20, port: 0, pin: 3}, ina_addr: 0x45, current_A: 0.13}
+  dac_routes:
+    # bench DAC1 -> pedal inputs (vcu_profile: brake, APPS1, APPS2)
+    - {dac: 0, channel: 0, to: ecu.PF7}  # S_BRAKE_FIL (docs/backplanes/ecu.md)
+    - {dac: 0, channel: 1, to: ecu.PF8}  # APPS_1 (docs/backplanes/ecu.md)
+    - {dac: 0, channel: 2, to: ecu.PF9}  # APPS_2 (docs/backplanes/ecu.md)
+  gpio_routes:
+    # IOEXP3 (TCA 0x22) P10 -> START (vcu_profile start_btn_tca_*). Used when
+    # the profile sets start_btn_via_can: false (IFS_HIL#150).
+    - {tca: 0x22, port: 1, pin: 0, to: ecu.PB5}  # START_FIL <- J1.19 (docs/backplanes/ecu.md)
+  adc_routes:
+    # bench ADC1 (MCP3208 idx 0) ch0 taps the RTDS output (vcu_profile rtds_adc_*)
+    - {adc: 0, channel: 0, from: ecu.PB4}  # RTDS, J1.20 (docs/backplanes/ecu.md)

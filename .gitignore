@@ -5,3 +5,16 @@ report.html
 results/
 snapshots/
 logs/
+__pycache__/
+build/
+
+# deploy/compose.prod.yaml: the host's settings and secrets (deploy/.env.example)
+deploy/.env
+deploy/secrets/
+deploy/.smoke-secrets.*/
+
+# Keys, certificates and env files never belong in the repo
+*.pem
+*.key
+.env
+**/secrets/

@@ -1,0 +1,18 @@
+# Build context of docker/editor.Dockerfile (the repository root): only the
+# editor's sources, never a local build's outputs.
+*
+!editor/pipeline-manager
+editor/pipeline-manager/**/node_modules
+editor/pipeline-manager/**/dist
+editor/pipeline-manager/**/__pycache__
+editor/pipeline-manager/**/.env.local
+editor/pipeline-manager/pipeline_manager/frontend/src/vhil/shell
+# The shell's tokens, fonts, run request, virtual-table window, frame
+# decoder and plots (with uPlot), which the editor's build takes from here.
+!vhil/server/static/tokens.css
+!vhil/server/static/editor-run.js
+!vhil/server/static/vtable.js
+!vhil/server/static/decode.js
+!vhil/server/static/plot.js
+!vhil/server/static/vendor/uplot
+!vhil/server/static/fonts
