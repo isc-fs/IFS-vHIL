@@ -71,7 +71,8 @@ function render() {
     step("workspace", "fail", info.managed ? "Not downloaded yet (about 25 MB)." : `${where} has no bin/vhil.`,
       info.managed && t.git ? [{ label: "Download", task: "workspace" }] : []);
   } else {
-    step("workspace", "ok", info.managed ? `The app's copy, at ${info.workspace_ref}: ${where}` : `Your clone: ${where}`,
+    step("workspace", info.synced ? "ok" : "warn",
+      info.managed ? (info.synced ? `The app's copy, at ${info.workspace_ref}: ${where}` : `The app's copy needs moving to ${info.workspace_ref}.`) : `Your clone: ${where}`,
       info.managed ? [{ label: "Update", task: "workspace" }] : []);
   }
 
@@ -208,16 +209,35 @@ $("#cli").onclick = async () => {
   }
 };
 
+// A newer app on the team's update channel: install it in place. The
+// download is checked against the signing key built into the app.
 async function checkUpdate() {
-  const tag = await invoke("latest_release");
-  if (!tag || tag === `v${info.version}`) return;
+  const up = await invoke("check_update");
+  if (!up) return;
   const b = $("#update");
-  b.replaceChildren(`A newer vHIL app is out: ${tag}. `);
+  b.replaceChildren(`vHIL ${up.version} is out (you have ${info.version}). `);
   const btn = document.createElement("button");
-  btn.textContent = "Download";
-  btn.onclick = () => invoke("open_release", { tag });
+  btn.textContent = "Install and restart";
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = "Installing…";
+    try {
+      await invoke("install_update");
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "Install and restart";
+      b.append(` ${e}`);
+    }
+  };
   b.append(btn);
   b.hidden = false;
 }
 
-refresh().then(checkUpdate);
+// After an update the app's own copy moves to the new release first.
+async function start() {
+  await refresh();
+  if (info.managed && info.present && !info.synced && !running) runTask("workspace");
+  checkUpdate();
+}
+
+start();

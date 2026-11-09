@@ -27,9 +27,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
+use tauri_plugin_updater::UpdaterExt;
 
 const REPO_URL: &str = "https://github.com/isc-fs/IFS-vHIL.git";
-const RELEASES_API: &str = "https://api.github.com/repos/isc-fs/IFS-vHIL/releases/latest";
 const APP_URL: &str = "http://localhost:8080/";
 const APP_ADDR: &str = "127.0.0.1:8080";
 const UI_TIMEOUT: Duration = Duration::from_secs(300);
@@ -53,6 +53,10 @@ fn workspace_ref() -> &'static str {
 struct Settings {
     /// A developer's own clone (a WSL path on Windows). None: the app's own.
     workspace: Option<String>,
+    /// The ref the app's own clone was last moved to. After an update the
+    /// app's ref is newer, and the set-up page moves the clone first.
+    #[serde(default)]
+    synced_ref: Option<String>,
 }
 
 #[derive(Default)]
@@ -225,7 +229,17 @@ fn pipe_lines(app: AppHandle, task: String, out: impl Read + Send + 'static) -> 
 
 /// Runs a long task in the background: each output line is a `log` event,
 /// the end a `done` event with the exit code.
-fn spawn_task(app: &AppHandle, task: &str, mut cmd: Command) -> Result<(), String> {
+fn spawn_task(app: &AppHandle, task: &str, cmd: Command) -> Result<(), String> {
+    spawn_task_then(app, task, cmd, |_| {})
+}
+
+/// spawn_task, and `ok` runs (before the `done` event) when the task succeeds.
+fn spawn_task_then(
+    app: &AppHandle,
+    task: &str,
+    mut cmd: Command,
+    ok: impl FnOnce(&AppHandle) + Send + 'static,
+) -> Result<(), String> {
     let state: State<AppState> = app.state();
     {
         let mut busy = state.busy.lock().unwrap();
@@ -247,6 +261,9 @@ fn spawn_task(app: &AppHandle, task: &str, mut cmd: Command) -> Result<(), Strin
     thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
         let _ = (out.join(), err.join());
+        if code == 0 {
+            ok(&app);
+        }
         *app.state::<AppState>().busy.lock().unwrap() = false;
         let _ = app.emit("done", Done { task, code });
     });
@@ -262,6 +279,8 @@ struct Info {
     workspace: Option<String>,
     managed: bool,
     present: bool,
+    /// The app's own clone is at the app's ref (always true for your own clone).
+    synced: bool,
     workspace_ref: &'static str,
     tools: Tools,
 }
@@ -282,11 +301,14 @@ async fn info(app: AppHandle) -> Result<Info, String> {
         let wsl = wsl_ready();
         let usable = !WSL || wsl;
         let ws = if usable { workspace(&app).ok() } else { None };
+        let settings = load_settings(&app);
         Ok(Info {
+            synced: settings.workspace.is_some()
+                || settings.synced_ref.as_deref() == Some(workspace_ref()),
             version: env!("CARGO_PKG_VERSION"),
             platform: PLATFORM,
             present: ws.as_deref().map(is_checkout).unwrap_or(false),
-            managed: load_settings(&app).workspace.is_none(),
+            managed: settings.workspace.is_none(),
             workspace: ws,
             workspace_ref: workspace_ref(),
             tools: Tools {
@@ -315,7 +337,9 @@ async fn set_workspace(app: AppHandle, path: Option<String>) -> Result<(), Strin
             }
             None => None,
         };
-        save_settings(&app, &Settings { workspace })
+        let mut s = load_settings(&app);
+        s.workspace = workspace;
+        save_settings(&app, &s)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -372,6 +396,13 @@ fn run(app: AppHandle, task: String) -> Result<(), String> {
         "setup" => vhil(&workspace(&app)?, &["setup"]),
         _ => return Err(format!("unknown task {task}")),
     };
+    if task == "workspace" {
+        return spawn_task_then(&app, &task, cmd, |app| {
+            let mut s = load_settings(app);
+            s.synced_ref = Some(workspace_ref().to_string());
+            let _ = save_settings(app, &s);
+        });
+    }
     spawn_task(&app, &task, cmd)
 }
 
@@ -444,27 +475,36 @@ fn open_app(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// The latest release's tag, or None when there is none (or no network).
-#[tauri::command]
-async fn latest_release() -> Option<String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
-        let out = command(curl).args(["-fsSL", "-m", "5", RELEASES_API]).output().ok()?;
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-        v.get("tag_name")?.as_str().map(str::to_string)
-    })
-    .await
-    .ok()
-    .flatten()
+#[derive(Serialize)]
+struct Update {
+    version: String,
+    notes: Option<String>,
 }
 
-/// A release's page in the browser (the update banner's link).
+/// A newer release on the team's update channel (iskapps' vhil/latest.json),
+/// or None: none, offline, or no manifest yet. Never an error to the page.
 #[tauri::command]
-fn open_release(tag: String) -> Result<(), String> {
-    if !tag.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c)) {
-        return Err(format!("bad tag {tag}"));
-    }
-    open_url(&format!("https://github.com/isc-fs/IFS-vHIL/releases/tag/{tag}"))
+async fn check_update(app: AppHandle) -> Option<Update> {
+    let update = app.updater().ok()?.check().await.ok()??;
+    Some(Update { version: update.version.clone(), notes: update.body.clone() })
+}
+
+/// Downloads the update, checks its signature against the key built into
+/// the app (tauri.conf.json), installs it and restarts. The app's containers
+/// stop first; the clone moves to the new ref on the next start.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("no update")?;
+    let stop = app.clone();
+    tauri::async_runtime::spawn_blocking(move || stop_containers(&stop)).await.map_err(|e| e.to_string())?;
+    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
+    app.restart();
 }
 
 /// Links `vhil` where a terminal finds it: Homebrew's bin on macOS,
@@ -547,6 +587,7 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             info,
@@ -554,8 +595,8 @@ fn main() {
             doctor,
             run,
             open_app,
-            latest_release,
-            open_release,
+            check_update,
+            install_update,
             install_cli
         ])
         .setup(|app| {
