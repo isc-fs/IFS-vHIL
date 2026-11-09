@@ -5,7 +5,8 @@
 // SRAM2 write protection) register a named handler here and switch it on
 // only while they need it; the CPU's hook is installed while any handler is
 // on and removed when none is. Handlers run after the access has landed, in
-// the order they were registered.
+// the order they were registered. Switching the hook on flushes the CPU's
+// TLB and translation cache, so no access already translated skips it.
 //
 using System.Collections.Generic;
 using System.Linq;
@@ -51,6 +52,28 @@ namespace Antmicro.Renode.Testing
             foreach(var cpu in machine.SystemBus.GetCPUs().OfType<ICPUWithMemoryAccessHooks>())
             {
                 cpu.SetHookAtMemoryAccess(on ? (MemoryAccessHook)OnAccess : null);
+                if(on && cpu is TranslationCPU translation)
+                {
+                    Retranslate(translation);
+                }
+            }
+        }
+
+        // Switched on from a store the CPU is executing (FLASH_KEYR, SYSCFG_SWPR),
+        // the hook would miss later accesses of the same translation block whose
+        // page is already in the TLB (seen on x86 hosts: the stores after the
+        // first one to a flash page went unchecked). So: flush the TLB, end
+        // the block after this instruction and translate again.
+        private static void Retranslate(TranslationCPU cpu)
+        {
+            cpu.FlushTlb();
+            if(cpu.RequestTranslationBlockRestart(quiet: true))
+            {
+                cpu.RequestTranslationCacheClearing();
+            }
+            else
+            {
+                cpu.ClearTranslationCache();   // from the monitor: the CPU is not running
             }
         }
 
