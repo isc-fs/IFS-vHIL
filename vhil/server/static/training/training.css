@@ -122,6 +122,7 @@ svg.ee .vtrack { fill: none; stroke: var(--line); }
 svg.ee .vbar { fill: var(--status-warn); }
 svg.ee .sw circle { fill: var(--fg); }
 svg.ee .sw .hit { fill: transparent; stroke: transparent; }
+svg.ee .res { fill: var(--bg-1); stroke: var(--fg-muted); stroke-width: 1.5; }
 svg.ee .sw .blade { stroke: var(--fg-muted); stroke-width: 3; transform-box: fill-box; transform-origin: left center;
                     transition: transform .15s; }
 svg.ee .sw.open .blade { stroke: var(--status-failed); transform: rotate(-28deg); }

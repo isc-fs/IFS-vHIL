@@ -24,6 +24,7 @@ export const INFO = {
   "ts.air_pos": { title: "AIR+", text: "Accumulator isolation relay, positive side. The AMS drives its coil low side on PB5. It closes last, after precharge, when the DC link is above 95 % of the pack.", part: "ts.air_pos" },
   "ts.air_neg": { title: "AIR-", text: "Accumulator isolation relay, negative side (AMS PB6). It closes first, together with the precharge relay.", part: "ts.air_neg" },
   "ts.pre": { title: "Precharge relay and resistor", text: "Charges the inverter's DC-link capacitor slowly through a resistor (AMS PB7) so closing AIR+ doesn't cause a huge inrush. The AMS watches the link voltage rise (relayed by the ECU on 0x100) and closes AIR+ at 95 %.", part: "ts.precharge" },
+  "ts.discharge": { title: "Discharge relay and resistor", text: "Empties the DC link when the car is switched off. Its relay is normally closed and is held open while AIR+_VCC is on, so the resistor sits across the link whenever the shutdown circuit is open (or the ECU asks for a discharge). While precharging, it must be open: otherwise the precharge and discharge resistors form a voltage divider and the link can never reach 95 % of the pack. Nothing senses this relay; you see it only in the link voltage.", part: "ts.discharge" },
   "ts.link": { title: "DC link", text: "The inverter's input capacitor. Its voltage is what precharge charges. The inverter reports it on CAN 0x466; the ECU relays it to the AMS in the 0x100 heartbeat.", part: "ts.precharge" },
   "acc": { title: "Accumulator", text: "95 cells in series, in 5 modules of 19. Each module has two LTC6811 cell monitors (upper LTC_1 and lower LTC_2) that measure every cell voltage and, through an ADG731 multiplexer, 20 NTC temperature sensors each: 40 per module, numbered slot 0..39 (0..19 on the upper chip, 20..39 on the lower).", part: "ams.ntc" },
   "acc.chain": { title: "isoSPI daisy chain", text: "The AMS talks to the 10 LTC6811s through one LTC6820 over isoSPI: a two-wire, transformer-isolated link that runs from chip to chip. A break silences every chip after it.", part: "ams.isospi" },
@@ -179,6 +180,16 @@ export class Diagram {
     el("line", { x1: 825, y1: 340, x2: 855, y2: 340, class: "cap" }, link);
     el("line", { x1: 840, y1: 340, x2: 840, y2: 420, class: "wire hv" }, link);
     el("text", { x: 862, y: 340, class: "tiny muted" }, link, "C link");
+    const dis = this.part("ts.discharge", el("g", { class: "sw" }, ts));
+    el("rect", { x: 790, y: 270, width: 30, height: 140, rx: 4, class: "hit" }, dis);
+    el("line", { x1: 805, y1: 260, x2: 805, y2: 295, class: "wire hv" }, dis);
+    el("rect", { x: 798, y: 295, width: 14, height: 34, rx: 2, class: "res" }, dis);
+    el("line", { x1: 805, y1: 329, x2: 805, y2: 352, class: "wire hv" }, dis);
+    el("circle", { cx: 805, cy: 355, r: 3 }, dis);
+    el("line", { x1: 805, y1: 355, x2: 805, y2: 385, class: "blade" }, dis);
+    el("circle", { cx: 805, cy: 385, r: 3 }, dis);
+    el("line", { x1: 805, y1: 388, x2: 805, y2: 420, class: "wire hv" }, dis);
+    el("text", { x: 805, y: 446, "text-anchor": "middle", class: "tiny muted" }, dis, "DIS + R");
     const inv = this.part("inv", el("g", {}, s));
     el("rect", { x: 880, y: 280, width: 100, height: 120, rx: 10, class: "box board inv" }, inv);
     el("text", { x: 930, y: 345, "text-anchor": "middle", class: "title" }, inv, "Inverter");

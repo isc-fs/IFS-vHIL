@@ -14,7 +14,8 @@ brief: |
   time."
 
   Run the car. Watch the tractive system on the right of the diagram: the AIRs, the
-  precharge relay, and the DC-link bar. Find **which part** failed and name it.
+  precharge relay, the discharge circuit and the DC-link bar. Find **which part**
+  failed and name it.
 
   Out of scope: analog and physical effects (EMI, noise, soldering).
 drive:
@@ -37,24 +38,30 @@ drive:
     - {check: always, name: sdc-closed-in-run, at_ms: 10800, signal: "plant:sdc.sdc_closed", value: 1}
     - {check: always, name: air-plus-closed, at_ms: 10800, signal: "pin:ams.PB5", value: high}
     - {check: always, name: air-minus-closed, at_ms: 10800, signal: "pin:ams.PB6", value: high}
-# The seeded fault: the precharge path never conducts (the resistor is open).
+# The seeded fault: the discharge relay never opens (its NC contact is stuck
+# closed), so the discharge resistor stays across the DC link while it
+# precharges: a divider, r_dis / (r_pre + r_dis) = 6500 / 7190 = 90 % of the
+# pack (catalog/plants/tractive-system.yaml), under the AMS's 95 %.
 faults:
-  - {kind: plant, name: precharge-open, at_ms: 0, plant: ts, set: {pre_open_circuit: true}}
+  - {kind: plant, name: discharge-stuck, at_ms: 0, plant: ts, set: {discharge_stuck_closed: true}}
 hints:
-  - "Precharge charges the inverter's DC-link capacitor through a resistor before AIR+ closes. Scope the DC-link voltage (plant ts.v_link): does it rise?"
-  - "The AMS drives the precharge relay (PB7 high) and AIR- (PB6 high), but the link stays at 0 V. So the command is fine: the current never flows."
-  - "After PrechargeMaxMs (5 s) without reaching 95 % of the pack, the AMS gives up: Error, reason 12."
+  - "Precharge charges the inverter's DC-link capacitor through a resistor before AIR+ closes. Scope the DC-link voltage (plant ts.v_link): what does it do, and where does it stop?"
+  - "The link rises, then flattens out short of 95 % of the pack and stays there. A capacitor charged through a resistor ends at the source voltage, unless something else draws current from it. What else is connected across the link?"
+  - "Work out the ratio: the link stops at about 90 % of the pack. With 690 ohm of precharge resistor, what resistor across the link gives that divider?"
 answer:
-  part: ts.precharge
+  part: ts.discharge
   explain: |
-    The precharge resistor was open. The AMS did everything right: AIR- and the
-    precharge relay closed and it waited for the DC link to reach 95 % of the pack.
-    With no path for current the link stayed at 0 V, and after PrechargeMaxMs (5 s)
-    the AMS latched Error (reason 12, FsmError) and opened everything. AIR+ was
-    never closed, which is the point of precharge: never connect the pack to an
-    empty capacitor. On the car: measure the resistor, then the relay's contacts.
+    The discharge relay never opened. It is normally closed and should open as soon
+    as AIR+_VCC comes on, taking the discharge resistor off the DC link. Stuck closed,
+    the resistor stayed across the link while it precharged, and the two resistors
+    made a voltage divider: the link settled at v_pack x R_dis / (R_pre + R_dis) =
+    6500 / (690 + 6500), about 90 % of the pack. The AMS needs 95 % to close AIR+, so
+    after PrechargeMaxMs (5 s) it latched Error (reason 12, FsmError) and opened
+    everything. AIR+ never closed onto a link short of the pack: precharge did its job of
+    protecting the car. On the car: with LV on and TS off, check that the discharge
+    relay clicks open when the SDC closes, and measure across its contacts.
 sources:
-  - systems/ecu-ams.scenarios/precharge-never-conducts.yaml
   - catalog/plants/tractive-system.yaml
+  - systems/ecu-ams.scenarios/precharge-never-conducts.yaml
 solved:
   - "training/tests/test_puzzles.py::test_solved[precharge-never-finishes]"

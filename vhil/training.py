@@ -69,6 +69,8 @@ PARTS: dict[str, dict] = {
     "sdc.interlocks": {"label": "HV interlock loop", "fields": {}, "where": "Shutdown circuit"},
     "ts.precharge": {"label": "Precharge relay / resistor", "fields": {},
                      "where": "Tractive system"},
+    "ts.discharge": {"label": "Discharge relay / resistor", "fields": {},
+                     "where": "Tractive system, across the DC link"},
     "ts.air_pos": {"label": "AIR+", "fields": {}, "where": "Tractive system"},
     "ts.air_neg": {"label": "AIR-", "fields": {}, "where": "Tractive system"},
     "can.acu": {"label": "ACU CAN bus (ECU <-> AMS)", "fields": {}, "where": "CAN"},
