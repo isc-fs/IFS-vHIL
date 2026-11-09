@@ -55,6 +55,11 @@ context=${VHIL_DOCKER_CONTEXT:-colima-$profile}
 base_image=${VHIL_IMAGE:-ifs-vhil}
 editor_image=$base_image-editor
 image=$base_image
+# The tags every job runs: this checkout's keys once ensure_images has run
+# (`latest` for a checkout with uncommitted docker/ changes). Jobs and the
+# compose stack run by key, never by `latest`, so two checkouts on different
+# images can't pick up each other's.
+base_tag=latest editor_tag=latest
 docker=(docker --context "$context")
 registry=${VHIL_REGISTRY:-ghcr.io/isc-fs}
 # The web app's services, behind one proxy on one origin (docker/compose.yaml).
@@ -137,19 +142,26 @@ pull_images() {
 ensure_images() {
     image_keys
     if [ "$clean" != true ]; then
+        echo "docker/ or the editor's sources have uncommitted changes: using the local \`latest\` images" >&2
         if ! have "$base_image" || ! have "$editor_image"; then build_images; fi
+        base_tag=latest editor_tag=latest
         return
     fi
-    if have "$base_image:$base" && have "$editor_image:$editor"; then
-        "${docker[@]}" tag "$base_image:$base" "$base_image"
-        "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
-        return
+    if ! have "$base_image:$base" || ! have "$editor_image:$editor"; then
+        echo "pulling the images of this checkout ($registry, ifs-vhil:$base)" >&2
+        pull_images || {
+            echo "no published image for this checkout: building it (Renode from source, ~30 min)" >&2
+            build_images
+        }
     fi
-    echo "pulling the images of this checkout ($registry, ifs-vhil:$base)" >&2
-    pull_images || {
-        echo "no published image for this checkout: building it (Renode from source, ~30 min)" >&2
-        build_images
-    }
+    if ! have "$base_image:$base" || ! have "$editor_image:$editor"; then
+        echo "error: no ifs-vhil:$base / ifs-vhil-editor:$editor after pulling or building" >&2
+        exit 1
+    fi
+    # `latest` follows the last checkout used, for docker compose run by hand.
+    "${docker[@]}" tag "$base_image:$base" "$base_image"
+    "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
+    base_tag=$base editor_tag=$editor
 }
 
 # Run a script in the container. For vcan jobs, host networking puts
@@ -157,6 +169,8 @@ ensure_images() {
 # --privileged lets the container create them.
 in_container() {
     ensure_images
+    local ref=$base_image:$base_tag
+    [ "$image" = "$editor_image" ] && ref=$editor_image:$editor_tag
     local tty=()
     [ -t 0 ] && [ -t 1 ] && tty=(-it)
     "${docker[@]}" run --rm ${tty[@]+"${tty[@]}"} ${run_args[@]+"${run_args[@]}"} \
@@ -166,7 +180,7 @@ in_container() {
         -e VHIL_SYSTEM="${VHIL_SYSTEM:-}" -e VHIL_DUT="${VHIL_DUT:-ecu}" \
         ${VHIL_FAST_FORWARD:+-e VHIL_FAST_FORWARD="$VHIL_FAST_FORWARD"} \
         -e VHIL_MODELS_CACHE=/vhil/renode-models ${VHIL_MODELS:+-e VHIL_MODELS="$VHIL_MODELS"} \
-        "$image" bash -c "$1" vhil "${@:2}"
+        "$ref" bash -c "$1" vhil "${@:2}"
 }
 
 # ELF paths of the last firmware build, as board=elf lines.
@@ -276,7 +290,7 @@ editor)
     # check). It publishes no port of its own and runs nothing: Run is the
     # web app's (`worker` executes it).
     ensure_images
-    VHIL_IMAGE=$base_image exec "${compose[@]}" up editor proxy ;;
+    VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy ;;
 editor-check)
     # Pipeline Manager's ./validate (its frontend's load) on each system's
     # dataflow, in the editor image where the patched checkout lives.
@@ -288,7 +302,7 @@ server)
     # The api listens on 0.0.0.0 in its container, reached only through the
     # proxy, whose port is on the host's 127.0.0.1 only (docker/compose.yaml).
     ensure_images
-    VHIL_IMAGE=$base_image exec "${compose[@]}" up api proxy ;;
+    VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up api proxy ;;
 worker)
     in_container 'export VHIL_DATA=/vhil/server VHIL_FW_DIR=/vhil/fw; exec python -m vhil.worker "$@"' "$@" ;;
 prune)
