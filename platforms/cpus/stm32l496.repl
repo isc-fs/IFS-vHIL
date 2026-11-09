@@ -1,0 +1,345 @@
+// STM32L496RG: the MCU of the SensorHub (IFS09-CE-SENSORHUB, U4, LQFP64).
+//
+// Renode 1.17 ships no STM32L4 platform. This file is written for the L496
+// from ST's stm32l496xx.h (STMicroelectronics/cmsis_device_l4 ca0bfa2,
+// Include/stm32l496xx.h): every address is the header's <PERIPH>_BASE macro
+// and every IRQ its <name>_IRQn (IRQn_Type, stm32l496xx.h:66-167), as named
+// in each block. It reuses Renode's models of the IP the L4 shares with other
+// parts (L5 SPI and ADC, F7 USART, the L0/L1 DMA, STM32_GPIOPort,
+// STM32_Timer, bxCAN), and the vHIL's own models for what the L4 does
+// differently: RCC, PWR, FLASH, DMA_CSELR and DBGMCU (models/renode/Stm32L4*.cs)
+// and the I2C master that NACKs (Stm32H7I2c.cs, the same I2C IP).
+//
+// Clocks: Renode clocks each timer, UART and the SysTick at a fixed rate, not
+// from the RCC. This file assumes the HAL's maximum configuration, SYSCLK =
+// HCLK = PCLK1 = PCLK2 = 80 MHz (PLL from the 16 MHz HSE: M 1, N 10, R 2),
+// the CubeMX default for an L496 on HSE. A firmware that runs the core
+// slower than 80 MHz needs these rates changed with it (docs/boards/sensorhub.md).
+
+// --- Core: Cortex-M4 with FPU, 4 NVIC priority bits (__NVIC_PRIO_BITS 4,
+// stm32l496xx.h:179).
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m4f"
+    nvic: nvic
+    PerformanceInMips: 80
+
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    priorityMask: 0xF0
+    systickFrequency: 80000000
+    IRQ -> cpu@0
+
+// --- Memory (stm32l496xx.h:1195-1215): 1 MB flash, SRAM1 256 KB, SRAM2 64 KB.
+// The flash also answers at 0 (boot from main flash, nBOOT0/BOOT0 default).
+// SRAM2 sits at SRAM2_BASE 0x10000000 and again right after SRAM1, at
+// 0x20040000, where it is the same memory (RM0351 "Memory map").
+
+flash: Memory.MappedMemory @ { sysbus 0x08000000; sysbus 0x0 }
+    size: 0x100000
+
+sram1: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x40000
+
+sram2: Memory.MappedMemory @ { sysbus 0x10000000; sysbus 0x20040000 }
+    size: 0x10000
+
+// The engineering data block (PACKAGE_BASE 0x1FFF7500, UID_BASE 0x1FFF7590,
+// FLASHSIZE_BASE 0x1FFF75E0; stm32l496xx.h:1384-1386). The HAL's FLASH_SIZE
+// reads its flash size word; catalog/platforms/stm32l496.yaml writes the
+// values at load.
+engineering: Memory.MappedMemory @ sysbus 0x1FFF7000
+    size: 0x1000
+
+// --- Reset and clocks, power, flash (models/renode/Stm32L4*.cs).
+
+// RCC_BASE; RCC_IRQn 5. The SensorHub's crystals: HSE 16 MHz, no LSE
+// (schematic v2, WO 6.2); the board overrides these when it says otherwise.
+rcc: Miscellaneous.STM32L4_RCC @ sysbus 0x40021000
+    pwr: pwr
+    hseFrequency: 16000000
+    lseFrequency: 0
+    IRQ -> nvic@5
+
+// PWR_BASE.
+pwr: Miscellaneous.STM32L4_PWR @ sysbus 0x40007000
+
+// FLASH_R_BASE; FLASH_IRQn 4.
+flashController: MTD.STM32L4_FlashController @ sysbus 0x40022000
+    flash: flash
+    IRQ -> nvic@4
+
+// DBGMCU_BASE.
+dbgmcu: Miscellaneous.STM32L4_DBGMCU @ sysbus 0xE0042000
+
+// IWDG_BASE; clocked by the 32 kHz LSI (RM0351 "LSI clock").
+iwdg: Timers.STM32_IndependentWatchdog @ sysbus 0x40003000
+    frequency: 32000
+
+// --- EXTI (EXTI_BASE). Its first bank (IMR1 0x00 .. PR1 0x14) has the F4's
+// layout. GPIO lines 0-15: EXTI0..4_IRQn 6-10, EXTI9_5_IRQn 23,
+// EXTI15_10_IRQn 40. Every port drives every line, as in Renode's F4 and H7
+// platforms (SYSCFG_EXTICR's port selection is not modelled).
+
+exti: IRQControllers.STM32F4_EXTI @ sysbus 0x40010400
+    numberOfOutputLines: 16
+    [0-4] -> nvic@[6-10]
+    [5-9] -> nvicInput23@[0-4]
+    [10-15] -> nvicInput40@[0-5]
+
+nvicInput23: Miscellaneous.CombinedInput @ none
+    numberOfInputs: 5
+    -> nvic@23
+
+nvicInput40: Miscellaneous.CombinedInput @ none
+    numberOfInputs: 6
+    -> nvic@40
+
+// SYSCFG_BASE: EXTICR and the rest, stored.
+syscfg: Miscellaneous.STM32_SYSCFG @ sysbus 0x40010000
+
+// --- GPIO (GPIOx_BASE, AHB2). Reset values from RM0351 "GPIO registers":
+// every pin analog (MODER 11) but the debug pins: PA13/PA14 SWD and PA15
+// JTDI on port A, PB3 JTDO and PB4 NJTRST on port B; port H MODER
+// 0x0000000F (PH0/PH1 analog).
+
+gpioPortA: GPIOPort.STM32_GPIOPort @ sysbus <0x48000000, +0x400>
+    modeResetValue: 0xABFFFFFF
+    outputSpeedResetValue: 0x0C000000
+    pullUpPullDownResetValue: 0x64000000
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortB: GPIOPort.STM32_GPIOPort @ sysbus <0x48000400, +0x400>
+    modeResetValue: 0xFFFFFEBF
+    pullUpPullDownResetValue: 0x00000100
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortC: GPIOPort.STM32_GPIOPort @ sysbus <0x48000800, +0x400>
+    modeResetValue: 0xFFFFFFFF
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortD: GPIOPort.STM32_GPIOPort @ sysbus <0x48000C00, +0x400>
+    modeResetValue: 0xFFFFFFFF
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortE: GPIOPort.STM32_GPIOPort @ sysbus <0x48001000, +0x400>
+    modeResetValue: 0xFFFFFFFF
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortF: GPIOPort.STM32_GPIOPort @ sysbus <0x48001400, +0x400>
+    modeResetValue: 0xFFFFFFFF
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortG: GPIOPort.STM32_GPIOPort @ sysbus <0x48001800, +0x400>
+    modeResetValue: 0xFFFFFFFF
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortH: GPIOPort.STM32_GPIOPort @ sysbus <0x48001C00, +0x400>
+    modeResetValue: 0x0000000F
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+gpioPortI: GPIOPort.STM32_GPIOPort @ sysbus <0x48002000, +0x400>
+    modeResetValue: 0xFFFFFFFF
+    numberOfAFs: 16
+    [0-15] -> exti@[0-15]
+
+// --- DMA (DMA1_BASE, DMA2_BASE). Renode's STM32LDMA is the L0/L1 IP: ISR,
+// IFCR and channel n at 0x08 + 0x14 (n-1). It is registered over 0x00-0xA7
+// so the L4's CSELR (DMAx_CSELR_BASE) is its own peripheral. It has 8
+// channels; the L4's 7 are 0-6. DMA1_Channel1..7_IRQn 11-17;
+// DMA2_Channel1..5_IRQn 56-60, DMA2_Channel6/7_IRQn 68, 69.
+
+dma1: DMA.STM32LDMA @ sysbus <0x40020000, +0xA8>
+    [0-6] -> nvic@[11-17]
+
+dma1Cselr: DMA.STM32L4_DMA_CSELR @ sysbus 0x400200A8
+
+dma2: DMA.STM32LDMA @ sysbus <0x40020400, +0xA8>
+    [0-4] -> nvic@[56-60]
+    [5-6] -> nvic@[68-69]
+
+dma2Cselr: DMA.STM32L4_DMA_CSELR @ sysbus 0x400204A8
+
+// --- CAN (CAN1_BASE, CAN2_BASE): bxCAN. CAN2 shares CAN1's filter banks
+// (CAN2SB in CAN1's FMR). Outputs 0-3 are TX, RX0, RX1, SCE:
+// CAN1_TX/RX0/RX1/SCE_IRQn 19-22, CAN2_TX/RX0/RX1/SCE_IRQn 86-89.
+
+can1: CAN.STMCAN @ sysbus <0x40006400, +0x400>
+    [0-3] -> nvic@[19-22]
+
+can2: CAN.STMCAN @ sysbus <0x40006800, +0x400>
+    master: can1
+    [0-3] -> nvic@[86-89]
+
+// --- SPI (SPIx_BASE): the L4's SPI has the L5's data FIFO and DS field.
+// SPI1_IRQn 35, SPI2_IRQn 36, SPI3_IRQn 51.
+
+spi1: SPI.STM32SPI @ sysbus 0x40013000
+    series: STM32Series.L5
+    IRQ -> nvic@35
+
+spi2: SPI.STM32SPI @ sysbus 0x40003800
+    series: STM32Series.L5
+    IRQ -> nvic@36
+
+spi3: SPI.STM32SPI @ sysbus 0x40003C00
+    series: STM32Series.L5
+    IRQ -> nvic@51
+
+// --- I2C (I2Cx_BASE): the I2C v2 IP of the F7/H7. I2Cn_EV_IRQn / _ER_IRQn:
+// I2C1 31/32, I2C2 33/34, I2C3 72/73, I2C4 83/84.
+
+i2c1: I2C.STM32H7_I2C @ sysbus 0x40005400
+    EventInterrupt -> nvic@31
+    ErrorInterrupt -> nvic@32
+
+i2c2: I2C.STM32H7_I2C @ sysbus 0x40005800
+    EventInterrupt -> nvic@33
+    ErrorInterrupt -> nvic@34
+
+i2c3: I2C.STM32H7_I2C @ sysbus 0x40005C00
+    EventInterrupt -> nvic@72
+    ErrorInterrupt -> nvic@73
+
+i2c4: I2C.STM32H7_I2C @ sysbus 0x40008400
+    EventInterrupt -> nvic@83
+    ErrorInterrupt -> nvic@84
+
+// --- USART/UART/LPUART (the F7's USART IP), clocked at PCLK 80 MHz.
+// USART1_IRQn 37, USART2_IRQn 38, USART3_IRQn 39, UART4_IRQn 52,
+// UART5_IRQn 53, LPUART1_IRQn 70.
+
+usart1: UART.STM32F7_USART @ sysbus 0x40013800
+    frequency: 80000000
+    IRQ -> nvic@37
+
+usart2: UART.STM32F7_USART @ sysbus 0x40004400
+    frequency: 80000000
+    IRQ -> nvic@38
+
+usart3: UART.STM32F7_USART @ sysbus 0x40004800
+    frequency: 80000000
+    IRQ -> nvic@39
+
+uart4: UART.STM32F7_USART @ sysbus 0x40004C00
+    frequency: 80000000
+    IRQ -> nvic@52
+
+uart5: UART.STM32F7_USART @ sysbus 0x40005000
+    frequency: 80000000
+    IRQ -> nvic@53
+
+lpuart1: UART.STM32F7_USART @ sysbus 0x40008000
+    frequency: 80000000
+    IRQ -> nvic@70
+
+// --- Timers (TIMx_BASE), clocked at 80 MHz (PCLK1 = PCLK2 = 80 MHz, APB
+// prescalers 1, so no x2). TIM2 and TIM5 are 32-bit. TIM1 shares its break,
+// update and trigger/commutation lines with TIM15, TIM16 and TIM17:
+// TIM1_BRK_TIM15_IRQn 24, TIM1_UP_TIM16_IRQn 25, TIM1_TRG_COM_TIM17_IRQn 26,
+// TIM1_CC_IRQn 27; TIM2..5_IRQn 28, 29, 30, 50; TIM6_DAC_IRQn 54,
+// TIM7_IRQn 55; TIM8_BRK/UP/TRG_COM/CC_IRQn 43-46.
+
+timer1: Timers.STM32_Timer @ sysbus 0x40012C00
+    BreakInterrupt -> nvicInput24@0
+    UpdateInterrupt -> nvicInput25@0
+    [TriggerInterrupt, CommutationInterrupt] -> nvicInput26@[0, 1]
+    CaptureCompareInterrupt -> nvic@27
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+timer15: Timers.STM32_Timer @ sysbus 0x40014000
+    -> nvicInput24@1
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+timer16: Timers.STM32_Timer @ sysbus 0x40014400
+    -> nvicInput25@1
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+timer17: Timers.STM32_Timer @ sysbus 0x40014800
+    -> nvicInput26@2
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+nvicInput24: Miscellaneous.CombinedInput @ none
+    numberOfInputs: 2
+    -> nvic@24
+
+nvicInput25: Miscellaneous.CombinedInput @ none
+    numberOfInputs: 2
+    -> nvic@25
+
+nvicInput26: Miscellaneous.CombinedInput @ none
+    numberOfInputs: 3
+    -> nvic@26
+
+timer2: Timers.STM32_Timer @ sysbus 0x40000000
+    -> nvic@28
+    frequency: 80000000
+    initialLimit: 0xFFFFFFFF
+
+timer3: Timers.STM32_Timer @ sysbus 0x40000400
+    -> nvic@29
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+timer4: Timers.STM32_Timer @ sysbus 0x40000800
+    -> nvic@30
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+timer5: Timers.STM32_Timer @ sysbus 0x40000C00
+    -> nvic@50
+    frequency: 80000000
+    initialLimit: 0xFFFFFFFF
+
+timer6: Timers.STM32_Timer @ sysbus 0x40001000
+    -> nvic@54
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+timer7: Timers.STM32_Timer @ sysbus 0x40001400
+    -> nvic@55
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+timer8: Timers.STM32_Timer @ sysbus 0x40013400
+    BreakInterrupt -> nvic@43
+    UpdateInterrupt -> nvic@44
+    [TriggerInterrupt, CommutationInterrupt] -> nvic@[45, 45]
+    CaptureCompareInterrupt -> nvic@46
+    frequency: 80000000
+    initialLimit: 0xFFFF
+
+// --- ADC (ADC1_BASE; ADC1_2_IRQn 18): the L5's ADC IP. Only ADC1 for now;
+// ADC2/ADC3 and the common registers' dual mode are not placed. Its DMA
+// request is DMA1 channel 1 (RM0351 "DMA1 requests for each channel"; the
+// model counts channels from 1).
+
+adc1: Analog.STM32L5_ADC @ sysbus <0x50040000, +0x100>
+    referenceVoltage: 3.3
+    externalEventFrequency: 1000
+    dmaChannel: 1
+    dmaPeripheral: dma1
+    IRQ -> nvic@18
+
+// --- CRC (CRC_BASE), RNG (RNG_BASE; RNG_IRQn 80). The L4's CRC is the
+// F0/F7 one with a programmable polynomial and size (Renode's F7 platform
+// places it the same way).
+
+crc: CRC.STM32_CRC @ sysbus 0x40023000
+    series: STM32Series.F0
+    configurablePoly: true
+
+rng: Miscellaneous.STM32_RNG @ sysbus 0x50060800
+    series: STM32Series.F7
+    -> nvic@80

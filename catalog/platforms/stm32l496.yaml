@@ -1,0 +1,36 @@
+kind: platform
+id: stm32l496
+description: >-
+  STM32L496RG (Cortex-M4F, 1 MB flash, 320 KB SRAM), the SensorHub's MCU.
+  Renode ships no STM32L4, so this is a new platform: Renode's models of the
+  IP the L4 shares with other parts (GPIO, L5 SPI and ADC, F7 USART, L0/L1
+  DMA, timers, bxCAN CAN1/CAN2, IWDG, CRC, RNG), the vHIL's I2C master, and
+  new models of the L4's RCC (ready flags, clock switch, crystals of the
+  board), PWR, FLASH (wait states, erase, option bytes), DMA_CSELR and
+  DBGMCU. Timers, UARTs and the SysTick run at 80 MHz, the HAL's maximum
+  configuration. Addresses and IRQs from ST's stm32l496xx.h.
+backend: renode
+renode:
+  repl: platforms/cpus/stm32l496.repl
+  cpu: cpu
+  sources:
+    # I2C master that NACKs an unanswered address: the L4 has the same I2C IP
+    # as the H7. Device models for I2C targets build on it, so it loads first.
+    - models/renode/Stm32H7I2c.cs
+    # PWR before the RCC, which reads PWR_CR1.DBP for the backup domain.
+    - models/renode/Stm32L4Pwr.cs
+    - models/renode/Stm32L4Rcc.cs
+    - models/renode/Stm32L4Flash.cs
+    - models/renode/Stm32L4DmaCselr.cs
+    - models/renode/Stm32L4Dbgmcu.cs
+  # After each board's platform loads: the engineering data the HAL reads.
+  # FLASHSIZE_BASE 0x1FFF75E0 holds the flash size in KB (FLASH_SIZE,
+  # stm32l496xx.h:1217-1220): 0x0400 for the 1 MB L496RG. PACKAGE_BASE
+  # 0x1FFF7500 PKG [4:0] 0 is LQFP64 (RM0351 "Package data register").
+  setup:
+    - sysbus WriteWord 0x1FFF75E0 0x0400
+    - sysbus WriteWord 0x1FFF7500 0x0000
+  # Every reset clears BASEPRI's masking, which Renode 1.17's CPU reset does
+  # not (renode/renode#1021; invariant 6, catalog/platforms/stm32h733.yaml).
+  reset:
+    - '{cpu} SetRegister "BasePri" 0x0'
