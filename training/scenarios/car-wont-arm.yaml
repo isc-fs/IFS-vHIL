@@ -1,0 +1,58 @@
+kind: training
+title: "The car won't arm"
+summary: "Reset, TSMS on, DASH_CHG: nothing happens. No precharge, no clicks from the AIRs. Find the part that stops it."
+level: 1
+fault: hardware
+topics: [shutdown circuit, TSMS, arming]
+system: ecu-ams
+firmware:
+  ecu: 44610a5366ad5c785751a6eccb1cf4a8616890ca
+  ams: 94b59a9e5bc5a5fe90705018ebcd8e6a23e851d0
+brief: |
+  **From the test-day log:** "LV on, pressed RST_EXT, TSMS on, pressed DASH_CHG. Nothing.
+  The AIRs never clicked. The AMS just sits there, no error."
+
+  Run the car. Scrub the timeline and watch the shutdown circuit at the top of the
+  diagram: a closed switch is green, an open one red. Then find **which part** is
+  stopping the car from arming, and name it.
+
+  Out of scope: analog and physical effects (EMI, noise, soldering).
+drive:
+  # RST_EXT, TSMS on, one DASH_CHG press: how the car is armed.
+  virtual_ms: 12000
+  stimuli:
+    - {kind: plant, name: sdc-reset, at_ms: 5400, plant: sdc, set: {reset: true}}
+    - {kind: plant, name: sdc-reset-release, at_ms: 5450, plant: sdc, set: {reset: false}}
+    - {kind: plant, name: tsms-on, at_ms: 5500, plant: sdc, set: {tsms: true}}
+    - {kind: gpio, name: dash-press, at_ms: 5600, board: ams, pin: PF10, level: true}
+    - {kind: gpio, name: dash-release, at_ms: 5650, board: ams, pin: PF10, level: false}
+  watch:
+    - {kind: symbol, board: ams, name: g_state_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_reason_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ecu, name: g_last_ctrl_state, size: 1, period_ms: 10}
+  # A healthy car: what the repaired one must do (test_solved).
+  expect:
+    - {check: never, name: no-ams-error, at_ms: 0, signal: "symbol:ams.g_state_telemetry", value: 5}
+    - {check: eventually, name: ams-run, at_ms: 5600, until_ms: 10600, signal: "symbol:ams.g_state_telemetry", value: 3}
+    - {check: always, name: sdc-closed-in-run, at_ms: 10800, signal: "plant:sdc.sdc_closed", value: 1}
+    - {check: always, name: air-plus-closed, at_ms: 10800, signal: "pin:ams.PB5", value: high}
+    - {check: always, name: air-minus-closed, at_ms: 10800, signal: "pin:ams.PB6", value: high}
+# The seeded fault: the HV interlock loop is open (a connector not fully mated).
+faults:
+  - {kind: plant, name: interlock-open, at_ms: 0, plant: sdc, set: {hv_interlock: false}}
+hints:
+  - "The AIRs' coils get their supply from AIR+_VCC, the end of the shutdown circuit. Is AIR+_VCC ever on?"
+  - "Every switch in the shutdown circuit is in series: one open switch is enough. Go along the loop and find the one that never closes."
+  - "Probe AMS PF9 (TSMS): the AMS reads AIR+_VCC there. While it's low, the AMS won't even start precharge, which is why it shows no error."
+answer:
+  part: sdc.interlocks
+  explain: |
+    The HV interlock loop was open: a connector in the loop not fully mated. The
+    shutdown circuit is a series loop, so AIR+_VCC never came on. The AMS reads it on
+    PF9 (TSMS_FIL) and won't precharge without it, so nothing happened and nothing
+    errored. On the car: walk the loop with a multimeter, connector by connector.
+sources:
+  - docs/backplanes/ams.md (PF9, TSMS_FIL)
+  - catalog/plants/shutdown-circuit.yaml
+solved:
+  - "training/tests/test_puzzles.py::test_solved[car-wont-arm]"

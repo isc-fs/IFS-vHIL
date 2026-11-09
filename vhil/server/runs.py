@@ -143,7 +143,9 @@ class QueueFull(Exception):
 # A git ref we pass to `git clone -b` and use in a directory name: no option
 # look-alikes, no path climbing.
 _REF = re.compile(r"^(?!-)(?!.*\.\.)[\w./-]{1,100}\Z", re.ASCII)
-_SELECT = re.compile(r"^tests/(?!.*\.\.)[\w/.-]+\.py(::[\w\[\]\-.,=]+)*$")
+# Under tests/, or a training puzzle's grading tests (training/tests/,
+# training/README.md): outside testpaths, so never collected by the gate.
+_SELECT = re.compile(r"^(tests|training/tests)/(?!.*\.\.)[\w/.-]+\.py(::[\w\[\]\-.,=]+)*$")
 _HEX = re.compile(r"^([0-9a-fA-F]{2})*$")
 # Names a scenario uses to point into its system: a board or bus instance
 # (schema $defs/name) and a board connector or pin. They are matched against
@@ -417,7 +419,8 @@ class PytestScenario(_Model):
     @classmethod
     def _select(cls, v: str) -> str:
         if not _SELECT.match(v):
-            raise ValueError("select must be a test node id under tests/ (tests/…/x.py[::name])")
+            raise ValueError("select must be a test node id under tests/ or training/tests/ "
+                             "(tests/…/x.py[::name])")
         return v
 
 
@@ -1139,6 +1142,75 @@ def check_limits(req: RunRequest, limits: Limits) -> list[str]:
     return errors
 
 
+def _login(request: Request) -> str:
+    user = getattr(request.state, "user", None) or {}
+    return user.get("login") or ""
+
+
+def submit(req: RunRequest, request: Request, settings, workspace, store: "RunStore",
+           limits: Limits) -> int:
+    """Queue a run as POST /api/runs does (checked against the limits, the
+    system and its firmware refs): its id. The training API's runs come here
+    too (vhil/server/training.py)."""
+    from vhil.server.workspace import NotFound
+    login = _login
+    sc = req.scenario
+    if isinstance(sc, RunScenario) and sc.live and "virtual_ms" not in sc.model_fields_set:
+        # Open-ended: until stopped, idle, or this server's cap.
+        req = req.model_copy(update={"scenario": sc.model_copy(
+            update={"virtual_ms": limits.max_live_ms})})
+    over = check_limits(req, limits)
+    if over:
+        raise HTTPException(422, over)
+    head = workspace.ref()
+    commit = head
+    if req.ref:
+        if not _REF.match(req.ref):
+            raise HTTPException(422, f"ref {req.ref!r} is not a plain git ref")
+        commit = resolve_ref(workspace.root, req.ref) if head else None
+        if not commit:
+            raise HTTPException(422, f"no ref '{req.ref}' in the workspace "
+                                     f"({'no git' if not head else 'not a branch, tag or commit'})")
+    with tempfile.TemporaryDirectory(prefix="vhil-run-") as tmp:
+        if commit and commit != head:
+            # Runs at a saved ref (above): the ref's system file, this tree's code.
+            if isinstance(req.scenario, PytestScenario):
+                raise HTTPException(422, f"a pytest scenario runs the workspace's tests and "
+                                         f"systems as checked out: ref {req.ref} is not HEAD")
+            changed = code_changes(workspace.root, head, commit)
+            if changed:
+                raise HTTPException(422, code_mismatch(workspace.root, head, commit, req.ref,
+                                                       req.system, changed))
+            try:
+                path = materialise_system(workspace.root, commit, req.system, Path(tmp))
+            except RuntimeError:
+                raise HTTPException(422, f"no system '{req.system}' at {req.ref}")
+        else:
+            try:
+                path = workspace.system_path(req.system)
+            except NotFound:
+                raise HTTPException(422, f"no system '{req.system}' in the workspace")
+        try:
+            system = System(path)
+        except SystemError as e:
+            raise HTTPException(422, f"system '{req.system}' does not validate: {e}")
+    errors = check_against_system(req, system, workspace.root)
+    if errors:
+        raise HTTPException(422, errors)
+    # Each image's ref as the commit it is at now: the run builds and
+    # runs that commit, whatever the branch does next (vhil.worker).
+    fw_commits = firmware_commits(request, system, req.firmware)
+    try:
+        run_id = store.create(req.system, commit, req.firmware, req.scenario.model_dump(),
+                              ref_name=req.ref or "", owner=login(request),
+                              max_active=limits.max_active,
+                              max_active_per_user=limits.max_active_per_user,
+                              firmware_commits=fw_commits)
+    except QueueFull as e:
+        raise HTTPException(429, str(e))
+    return run_id
+
+
 def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
     """/api/runs over settings.db and settings.results."""
     from vhil.server.workspace import NotFound
@@ -1172,61 +1244,7 @@ def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
 
     @r.post("", status_code=201)
     def create(req: RunRequest, request: Request):
-        sc = req.scenario
-        if isinstance(sc, RunScenario) and sc.live and "virtual_ms" not in sc.model_fields_set:
-            # Open-ended: until stopped, idle, or this server's cap.
-            req = req.model_copy(update={"scenario": sc.model_copy(
-                update={"virtual_ms": limits.max_live_ms})})
-        over = check_limits(req, limits)
-        if over:
-            raise HTTPException(422, over)
-        head = workspace.ref()
-        commit = head
-        if req.ref:
-            if not _REF.match(req.ref):
-                raise HTTPException(422, f"ref {req.ref!r} is not a plain git ref")
-            commit = resolve_ref(workspace.root, req.ref) if head else None
-            if not commit:
-                raise HTTPException(422, f"no ref '{req.ref}' in the workspace "
-                                         f"({'no git' if not head else 'not a branch, tag or commit'})")
-        with tempfile.TemporaryDirectory(prefix="vhil-run-") as tmp:
-            if commit and commit != head:
-                # Runs at a saved ref (above): the ref's system file, this tree's code.
-                if isinstance(req.scenario, PytestScenario):
-                    raise HTTPException(422, f"a pytest scenario runs the workspace's tests and "
-                                             f"systems as checked out: ref {req.ref} is not HEAD")
-                changed = code_changes(workspace.root, head, commit)
-                if changed:
-                    raise HTTPException(422, code_mismatch(workspace.root, head, commit, req.ref,
-                                                           req.system, changed))
-                try:
-                    path = materialise_system(workspace.root, commit, req.system, Path(tmp))
-                except RuntimeError:
-                    raise HTTPException(422, f"no system '{req.system}' at {req.ref}")
-            else:
-                try:
-                    path = workspace.system_path(req.system)
-                except NotFound:
-                    raise HTTPException(422, f"no system '{req.system}' in the workspace")
-            try:
-                system = System(path)
-            except SystemError as e:
-                raise HTTPException(422, f"system '{req.system}' does not validate: {e}")
-        errors = check_against_system(req, system, workspace.root)
-        if errors:
-            raise HTTPException(422, errors)
-        # Each image's ref as the commit it is at now: the run builds and
-        # runs that commit, whatever the branch does next (vhil.worker).
-        fw_commits = firmware_commits(request, system, req.firmware)
-        try:
-            run_id = store.create(req.system, commit, req.firmware, req.scenario.model_dump(),
-                                  ref_name=req.ref or "", owner=login(request),
-                                  max_active=limits.max_active,
-                                  max_active_per_user=limits.max_active_per_user,
-                                  firmware_commits=fw_commits)
-        except QueueFull as e:
-            raise HTTPException(429, str(e))
-        return {"run_id": run_id}
+        return {"run_id": submit(req, request, settings, workspace, store, limits)}
 
     @r.get("")
     def history(request: Request, limit: int = Query(100, ge=1, le=1000),

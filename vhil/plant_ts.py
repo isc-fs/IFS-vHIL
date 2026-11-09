@@ -14,6 +14,10 @@ Physics (closed form, exact between events):
     the AMS senses on PF9) is present. Faults: a welded contact stays
     closed; `air_external_open` drops both AIRs' contacts with their coils
     still driven; `pre_open_circuit` is a precharge path that never conducts;
+    `discharge_stuck_closed` is a discharge relay whose NC contact never
+    opens (a welded contact or a coil that never pulls in), so the bleed
+    stays across the link and precharge settles at the divider
+    v_pack * r_discharge / (r_precharge + r_discharge);
   - the DC link is a capacitor, c_link * c_scale. With AIR- and AIR+ closed
     it is the pack's voltage (the pack's own resistance, ~0.3 ohm against
     400 uF, is a 0.1 ms time constant: not modelled). With AIR- and the
@@ -50,7 +54,7 @@ CATALOG = REPO / "catalog" / "plants"
 INPUTS = ("air_pos_cmd", "air_neg_cmd", "pre_cmd", "discharge_cmd", "sdc_closed",
           "v_pack", "i_inverter_dc")
 FAULTS = ("welded_air_pos", "welded_air_neg", "pre_open_circuit", "air_external_open",
-          "c_scale", "r_leak")
+          "discharge_stuck_closed", "c_scale", "r_leak")
 # Inputs a scenario row scripts (IFSSIM#669 §3): the inverter's and the
 # charger's DC current (A, + = discharge / + = into the pack) and the ambient
 # temperature (K).
@@ -74,7 +78,8 @@ CONTACTS = ("air_pos", "air_neg", "pre")
 # Each fault input's value with no fault, which is also its type for the
 # editor's controls (the system contract's `plants`, vhil/server/decode.py).
 FAULT_DEFAULTS = {"welded_air_pos": False, "welded_air_neg": False, "pre_open_circuit": False,
-                  "air_external_open": False, "c_scale": 1.0, "r_leak": None}
+                  "air_external_open": False, "discharge_stuck_closed": False,
+                  "c_scale": 1.0, "r_leak": None}
 
 
 @dataclass(frozen=True)
@@ -210,7 +215,8 @@ class TractiveSystem:
 
     def fault(self, name: str, value, t_us: Optional[int] = None) -> None:
         """Set a fault input (test API): welded_air_pos, welded_air_neg,
-        pre_open_circuit, air_external_open (bool); c_scale (x c_link);
+        pre_open_circuit, air_external_open, discharge_stuck_closed (bool);
+        c_scale (x c_link);
         r_leak (ohm, None for none)."""
         if name not in FAULTS:
             raise KeyError(f"no fault '{name}' (faults: {', '.join(FAULTS)})")
@@ -264,8 +270,10 @@ class TractiveSystem:
 
     def bleeding(self) -> bool:
         """The discharge bleed is across the link: SDC open (its coil
-        unpowered, NC contact closed) or the ECU securing it."""
-        return (not self.inputs["sdc_closed"]) or self.inputs["discharge_cmd"]
+        unpowered, NC contact closed), the ECU securing it, or its contact
+        stuck closed (fault)."""
+        return ((not self.inputs["sdc_closed"]) or self.inputs["discharge_cmd"]
+                or bool(self.faults["discharge_stuck_closed"]))
 
     def _segment(self) -> tuple[str, float, float]:
         """('tied', v_pack, 0) | ('hold', v, inf) | ('rc', v_eq, tau) for the
