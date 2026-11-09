@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# vhil: one front door to the vHIL on your machine (#373). The same commands
+# run headless (CI, a terminal) and behind the desktop app. Everything runs in
+# Docker through scripts/vhil-docker.sh; this adds set-up checks and plain
+# verbs on top.
+#
+#   vhil doctor                 check Docker/Colima, the images, firmware, disk
+#   vhil setup [boards...]      VM (macOS), the images, firmware (default: ecu ams udv)
+#   vhil test [pytest args]     native tests in virtual time (tests/sim)
+#   vhil test unit              host-only tests + validate every system
+#   vhil test smoke <ecu|ams>   the Robot smoke suite of one board
+#   vhil scenario [pytest args] every committed scenario (tests/scenarios)
+#   vhil ui                     the app and the system editor, opened in the browser
+#   vhil version                this checkout's commit and image keys
+#   vhil <other> [args]         anything scripts/vhil-docker.sh runs (shell, fw, pull, ...)
+#
+# Add bin/ to PATH, or run it as bin/vhil. On Linux it uses the default Docker
+# context unless VHIL_DOCKER_CONTEXT says otherwise.
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+wrapper=$repo/scripts/vhil-docker.sh
+profile=${VHIL_COLIMA_PROFILE:-vhil}
+mac=false; [ "$(uname -s)" = Darwin ] && mac=true
+if [ "$mac" = false ] && [ -z "${VHIL_DOCKER_CONTEXT:-}" ]; then
+    export VHIL_DOCKER_CONTEXT=default
+fi
+context=${VHIL_DOCKER_CONTEXT:-colima-$profile}
+docker=(docker --context "$context")
+registry=${VHIL_REGISTRY:-ghcr.io/isc-fs}
+port=${VHIL_WEB_PORT:-8080}
+
+keys() { "$repo/scripts/image-key.sh"; }
+key() { keys | sed -n "s/^$1=//p"; }
+
+doctor() {
+    local fail=0
+    local g='' y='' r='' n=''
+    [ -t 1 ] && g=$'\033[32m' y=$'\033[33m' r=$'\033[31m' n=$'\033[0m'
+    ok() { printf '  %sok%s    %s\n' "$g" "$n" "$*"; }
+    warn() { printf '  %swarn%s  %s\n' "$y" "$n" "$*"; }
+    bad() { printf '  %sfail%s  %s\n' "$r" "$n" "$*"; fail=1; }
+
+    echo "vhil doctor ($repo)"
+    if command -v docker >/dev/null; then ok "docker CLI"; else bad "docker CLI missing (macOS: brew install docker colima)"; fi
+    if [ "$mac" = true ]; then
+        if ! command -v colima >/dev/null; then
+            bad "colima missing: brew install colima"
+        elif colima status "$profile" >/dev/null 2>&1; then
+            ok "Colima VM '$profile' running"
+        else
+            bad "Colima VM '$profile' not running: vhil setup (or scripts/vhil-docker.sh vm)"
+        fi
+    fi
+    if "${docker[@]}" info >/dev/null 2>&1; then
+        ok "Docker reachable (context $context)"
+    else
+        bad "Docker not reachable on context $context"
+        echo; echo "fix the above, then run vhil doctor again"; return 1
+    fi
+
+    local base editor clean
+    base=$(key base); editor=$(key editor); clean=$(key clean)
+    if [ "$clean" != true ]; then
+        warn "docker/ or the editor's sources have uncommitted changes: the images build locally"
+    fi
+    if "${docker[@]}" image inspect "ifs-vhil:$base" >/dev/null 2>&1 \
+        && "${docker[@]}" image inspect "ifs-vhil-editor:$editor" >/dev/null 2>&1; then
+        ok "images of this checkout present (ifs-vhil:$base)"
+    elif docker buildx imagetools inspect "$registry/ifs-vhil:$base" >/dev/null 2>&1; then
+        warn "images not pulled yet (published as $registry/ifs-vhil:$base): vhil setup"
+    else
+        warn "no published image for ifs-vhil:$base (or the registry needs a login): vhil setup builds it (~30 min)"
+    fi
+
+    if "${docker[@]}" image inspect ifs-vhil >/dev/null 2>&1; then
+        if "${docker[@]}" run --rm -v vhil-data:/vhil ifs-vhil test -s /vhil/fw/built.txt 2>/dev/null; then
+            ok "firmware built ($("${docker[@]}" run --rm -v vhil-data:/vhil ifs-vhil \
+                sh -c "cut -d= -f1 /vhil/fw/built.txt | sort -u | tr '\n' ' '"))"
+        else
+            warn "no firmware built yet: vhil setup"
+        fi
+    fi
+
+    local avail
+    if [ "$mac" = true ]; then
+        avail=$(colima ssh -p "$profile" -- df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc 0-9)
+    else
+        avail=$(df -BG --output=avail "$("${docker[@]}" info -f '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null | tail -1 | tr -dc 0-9)
+    fi
+    if [ -z "$avail" ]; then warn "free disk unknown"
+    elif [ "$avail" -lt 10 ]; then bad "only ${avail} GB free for Docker (the images and firmware need ~10 GB)"
+    else ok "${avail} GB free for Docker"
+    fi
+
+    echo
+    if [ "$fail" = 0 ]; then echo "ready"; else echo "fix the failures above"; fi
+    return "$fail"
+}
+
+open_when_up() {
+    local url=http://localhost:$port/
+    for _ in $(seq 1 120); do
+        if curl -fsS -o /dev/null "$url" 2>/dev/null; then
+            echo "vHIL app: $url (editor: ${url}editor/)" >&2
+            if [ "$mac" = true ]; then open "$url"
+            elif command -v xdg-open >/dev/null; then xdg-open "$url" >/dev/null 2>&1 || true
+            fi
+            return
+        fi
+        sleep 1
+    done
+    echo "the app didn't answer on $url after 2 min" >&2
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+doctor) doctor ;;
+setup)
+    [ $# -gt 0 ] || set -- ecu ams udv
+    [ "$mac" = true ] && "$wrapper" vm
+    "$wrapper" pull || echo "nothing published to pull: the first job builds the images" >&2
+    "$wrapper" fw "$@"
+    doctor ;;
+test)
+    case "${1:-}" in
+    unit) exec "$wrapper" unit ;;
+    smoke) shift; exec "$wrapper" smoke "$@" ;;
+    *) exec "$wrapper" sim "$@" ;;
+    esac ;;
+scenario|scenarios) exec "$wrapper" scenarios "$@" ;;
+ui)
+    open_when_up &
+    exec "$wrapper" editor ;;
+version)
+    echo "vhil $(git -C "$repo" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+    keys ;;
+help|-h|--help) sed -n '2,/^set -euo/{/^#/p;}' "$0" | sed 's/^# \{0,1\}//' ;;
+*) exec "$wrapper" "$cmd" "$@" ;;
+esac
