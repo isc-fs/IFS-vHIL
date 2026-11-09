@@ -76,7 +76,9 @@ doctor() {
     if "${docker[@]}" info >/dev/null 2>&1; then
         ok "Docker reachable (context $context)"
     else
-        bad "Docker not reachable on context $context"
+        if [ "$mac" = true ]; then bad "Docker not reachable on context $context"
+        else bad "Docker not reachable on context $context: start it, and add yourself to the docker group (Linux) or turn on Docker Desktop's WSL integration (Windows)"
+        fi
         finish; return
     fi
 

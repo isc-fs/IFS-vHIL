@@ -36,24 +36,37 @@ const worst = (cs) =>
 
 function render() {
   const t = info.tools;
+  const mac = info.platform === "macos";
+  const win = info.platform === "windows";
   $("#version").textContent = `app ${info.version} · ${info.workspace_ref}`;
 
-  // 1. Tools
+  // 1. Tools. macOS: Homebrew installs them. Linux: the distribution's
+  // packages. Windows: WSL2, with Docker Desktop's WSL integration.
   const missing = ["git", "docker"].filter((k) => !t[k]);
-  if (t.mac && !t.colima) missing.push("colima");
-  if (missing.length === 0) {
-    step("tools", "ok", "Git, Docker" + (t.mac ? " and Colima are installed." : " are installed."));
-  } else if (t.brew) {
+  if (mac && !t.colima) missing.push("colima");
+  const inWsl = win ? " in WSL" : "";
+  if (win && !t.wsl) {
+    step("tools", "fail",
+      "WSL isn't set up. In an administrator terminal run `wsl --install -d Ubuntu`, restart, open Ubuntu once to create your user, then reopen the app.");
+  } else if (missing.length === 0) {
+    step("tools", "ok", `Git and Docker${mac ? " (Colima)" : ""} are installed${inWsl}.`);
+  } else if (mac && t.brew) {
     step("tools", "fail", `Missing: ${missing.join(", ")}.`, [
       { label: "Install with Homebrew", task: "tools" },
     ]);
-  } else {
+  } else if (mac) {
     step("tools", "fail", `Missing: ${missing.join(", ")}. Install Homebrew (brew.sh), then reopen the app.`);
+  } else if (win) {
+    step("tools", "fail",
+      `Missing in WSL: ${missing.join(", ")}. Docker: install Docker Desktop and turn on Settings → Resources → WSL integration for your distribution. Git: \`sudo apt install git\` in WSL. Then reopen the app.`);
+  } else {
+    step("tools", "fail",
+      `Missing: ${missing.join(", ")}. Install them with your package manager (Docker Engine: docs.docker.com/engine/install), add yourself to the docker group, log out and in, then reopen the app.`);
   }
-  const toolsOk = missing.length === 0;
+  const toolsOk = (!win || t.wsl) && missing.length === 0;
 
   // 2. Workspace
-  const where = info.workspace;
+  const where = info.workspace || "";
   if (!info.present) {
     step("workspace", "fail", info.managed ? "Not downloaded yet (about 25 MB)." : `${where} has no bin/vhil.`,
       info.managed && t.git ? [{ label: "Download", task: "workspace" }] : []);
@@ -63,7 +76,7 @@ function render() {
   }
 
   // 3. VM (macOS) and 4. images + firmware: from `vhil doctor`
-  $("#step-vm").hidden = !t.mac;
+  $("#step-vm h2").textContent = mac ? "Docker VM" : "Docker";
   if (!toolsOk || !info.present) {
     step("vm", "", "After the tools and files.");
     step("setup", "", "After the VM.");
@@ -74,8 +87,10 @@ function render() {
   } else {
     const vm = checksOf(isVm);
     const vmLevel = worst(vm);
-    step("vm", vmLevel, vmLevel === "ok" ? "Running." : vm.find((c) => c.level !== "ok")?.message || "",
-      vmLevel === "ok" ? [] : [{ label: "Start", task: "vm" }]);
+    const down = vm.find((c) => c.level !== "ok")?.message || "";
+    const hint = mac ? "" : win ? " Start Docker Desktop, then Check again." : " Start it (sudo systemctl start docker), then Check again.";
+    step("vm", vmLevel, vmLevel === "ok" ? "Running." : down + hint,
+      vmLevel === "ok" ? [] : mac ? [{ label: "Start", task: "vm" }] : [{ label: "Check again", run: refresh }]);
     const rest = checksOf((m) => !isVm(m));
     const level = vmLevel === "ok" ? worst(rest) : "";
     step("setup", level, level === "ok" ? "Ready." : "Pulls the images and builds the firmware (~15 min the first time).",
@@ -94,6 +109,9 @@ function render() {
   const fwMissing = checksOf((m) => /no firmware built/.test(m)).length > 0;
   $("#open").disabled = !ready || Boolean(running) || fwMissing;
   $("#ws").placeholder = info.managed ? where : "";
+  $("#ws-label").textContent = win
+    ? "Use your own clone, as a path in WSL (empty: the app's own copy)"
+    : "Use your own clone of the repository (empty: the app's own copy)";
   if (!info.managed && !$("#ws").value) $("#ws").value = where;
 
   if (ready && !fwMissing && !stay && !autoOpened && !running) {

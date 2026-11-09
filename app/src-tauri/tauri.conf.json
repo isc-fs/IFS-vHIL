@@ -25,10 +25,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "app",
-      "dmg"
-    ],
+    "targets": "all",
     "category": "DeveloperTool",
     "shortDescription": "Virtual hardware-in-the-loop bench",
     "icon": [
@@ -41,6 +38,18 @@
     "macOS": {
       "signingIdentity": "-",
       "minimumSystemVersion": "11.0"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "git"
+        ]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

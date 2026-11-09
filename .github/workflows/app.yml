@@ -1,13 +1,16 @@
 name: App
 
-# The desktop app (app/, #373): a universal macOS build (Apple silicon and
-# Intel) on every pull request that changes it, and on a release tag, the
-# .dmg attached to that tag's release. The app is ad-hoc signed, not
-# notarised: app/README.md says how a teammate opens it the first time.
+# The desktop app (app/, #373) on every pull request that changes it, and on
+# a release tag, attached to that tag's release:
 #
-# The runner's preinstalled rustup and Node build it; the Tauri crates and
-# CLI are pinned in app/src-tauri/Cargo.toml (+ Cargo.lock) and
-# app/package-lock.json.
+#   macOS    vHIL_<v>_universal.dmg          Apple silicon + Intel, ad-hoc signed
+#   Linux    vhil_<v>_amd64.deb, .AppImage   x86_64
+#   Windows  vHIL_<v>_x64-setup.exe          per-user NSIS installer; runs bin/vhil in WSL2
+#
+# None is notarised or code-signed with a certificate: app/README.md says how
+# a teammate opens it the first time. The runners' preinstalled rustup and
+# Node build it; the Tauri crates and CLI are pinned in
+# app/src-tauri/Cargo.toml (+ Cargo.lock) and app/package-lock.json.
 
 on:
   pull_request:
@@ -20,20 +23,49 @@ permissions:
   contents: read
 
 jobs:
-  macos:
-    runs-on: macos-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+            out: app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          - os: linux
+            # The oldest supported Ubuntu: the AppImage and .deb then run on
+            # newer distributions too (glibc).
+            runner: ubuntu-22.04
+            args: --bundles deb,appimage
+            out: |
+              app/src-tauri/target/release/bundle/deb/*.deb
+              app/src-tauri/target/release/bundle/appimage/*.AppImage
+          - os: windows
+            runner: windows-latest
+            args: --bundles nsis
+            out: app/src-tauri/target/release/bundle/nsis/*-setup.exe
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
-      contents: write   # attach the .dmg to a release
+      contents: write   # attach the bundles to a release
     defaults:
       run:
+        shell: bash
         working-directory: app
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Rust targets
+      - name: Rust targets (macOS universal)
+        if: matrix.os == 'macos'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: System libraries (Linux; Tauri's prerequisites)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+              librsvg2-dev libayatana-appindicator3-dev patchelf file
       - run: npm ci --no-audit --no-fund
       - name: Release version
         # A release build follows its tag: the app's version, and the ref its
@@ -45,30 +77,39 @@ jobs:
           npm pkg set version="${TAG#v}"
           echo "VHIL_APP_REF=$TAG" >> "$GITHUB_ENV"
       - name: Build
-        run: npx tauri build --target universal-apple-darwin --bundles app,dmg
-      - name: The bundle
-        id: dmg
+        env:
+          ARGS: ${{ matrix.args }}
         run: |
-          dmg=$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
-          lipo -archs src-tauri/target/universal-apple-darwin/release/bundle/macos/vHIL.app/Contents/MacOS/vhil-app
-          codesign -dv src-tauri/target/universal-apple-darwin/release/bundle/macos/vHIL.app 2>&1 | grep -E "Signature|Identifier"
-          echo "path=app/$dmg" >> "$GITHUB_OUTPUT"
+          read -ra args <<<"$ARGS"
+          npx tauri build "${args[@]}"
+      - name: Check the macOS bundle
+        if: matrix.os == 'macos'
+        run: |
+          app=src-tauri/target/universal-apple-darwin/release/bundle/macos/vHIL.app
+          lipo -archs "$app/Contents/MacOS/vhil-app"
+          codesign -dv "$app" 2>&1 | grep -E "Signature|Identifier"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: vHIL-macos
-          path: ${{ steps.dmg.outputs.path }}
+          name: vHIL-${{ matrix.os }}
+          path: ${{ matrix.out }}
+          if-no-files-found: error
           retention-days: 14
       - name: Attach to the release
-        # The release is Raúl's to create; the .dmg joins it if it exists.
+        # The release is Raúl's to create; the bundles join it if it exists.
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          DMG: ${{ steps.dmg.outputs.path }}
+          OUT: ${{ matrix.out }}
         working-directory: .
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-              gh release upload "$TAG" "$DMG" --clobber
-          else
-              echo "no release $TAG yet: the .dmg is the run's artifact" >> "$GITHUB_STEP_SUMMARY"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+              echo "no release $TAG yet: the bundles are the run's artifacts" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
           fi
+          files=()
+          while read -r glob; do
+              [ -n "$glob" ] || continue
+              while read -r f; do files+=("$f"); done < <(compgen -G "$glob")
+          done <<<"$OUT"
+          gh release upload "$TAG" "${files[@]}" --clobber

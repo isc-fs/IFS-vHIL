@@ -8,12 +8,13 @@ started locally by `vhil ui`.
 What it does, each step a `bin/vhil` command a teammate could run by hand:
 
 1. **Tools:** checks Git, Docker and (macOS) Colima, and installs the last two
-   with Homebrew on a click.
+   with Homebrew on a click. On Linux and Windows it says what to install.
 2. **vHIL files:** clones this repository into the app's data folder
    (`~/Library/Application Support/org.iscfs.vhil/IFS-vHIL`) at the app's
    release tag (`dev` for a dev build), and moves it on **Update**. Settings
    can point it at your own clone instead.
-3. **Docker VM:** starts Colima (`vhil vm`), on its own on later launches.
+3. **Docker:** on macOS starts the Colima VM (`vhil vm`), on its own on later
+   launches; elsewhere checks that Docker answers.
 4. **Images and firmware:** `vhil setup`, with `vhil doctor --json` as the
    checklist.
 5. **Open the vHIL:** `vhil ui --no-browser`, shown in the window once it
@@ -25,10 +26,19 @@ The menu's **Set-up and Status** (⌘,) returns to the wizard. **Install the
 
 ## Install (teammates)
 
-Download `vHIL_<version>_universal.dmg` from the release, drag vHIL to
-Applications. The app is not notarised (that needs an Apple developer
-account, #373's "later" list), so macOS blocks the first launch: open it
-once, then **System Settings → Privacy & Security → Open Anyway**.
+Download yours from the release. None is signed with a certificate (that
+needs paid developer accounts, #373's "later" list), so each OS warns once.
+
+| OS | File | Needs first | First launch |
+|---|---|---|---|
+| macOS | `vHIL_<v>_universal.dmg`: drag vHIL to Applications | Homebrew (the app installs Colima and Docker with it) | open it once, then **System Settings → Privacy & Security → Open Anyway** |
+| Linux | `vhil_<v>_amd64.deb` (`sudo apt install ./vhil_*.deb`) or `vHIL_<v>_amd64.AppImage` (`chmod +x`) | Git and Docker Engine, with you in the `docker` group | none |
+| Windows | `vHIL_<v>_x64-setup.exe` (installs for your user, no admin) | WSL2 with Ubuntu (`wsl --install -d Ubuntu`), Docker Desktop with **WSL integration** on for it, Git in WSL | SmartScreen: **More info → Run anyway** |
+
+On Windows the app runs `bin/vhil` inside WSL (it is bash): its own copy of
+the repository lives in WSL at `~/IFS-vHIL`, and a clone of your own must be
+a WSL path too (`/home/<you>/...`; `/mnt/c/...` works but is slow). WSL
+forwards the vHIL's `localhost:8080` to Windows.
 
 ## Build
 
