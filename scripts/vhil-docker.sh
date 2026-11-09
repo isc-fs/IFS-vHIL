@@ -5,7 +5,8 @@
 # VHIL_DOCKER_CONTEXT=default and load vcan on the host.
 #
 #   scripts/vhil-docker.sh vm                    create/start the VM, with vcan
-#   scripts/vhil-docker.sh image                 (re)build the images (docker/)
+#   scripts/vhil-docker.sh pull                  pull the published images of this checkout
+#   scripts/vhil-docker.sh image                 (re)build the images (docker/) locally
 #   scripts/vhil-docker.sh fw [ecu ams udv ...]  build firmware from systems/<s>.yaml
 #   scripts/vhil-docker.sh unit                  tests/unit + validate every system
 #   scripts/vhil-docker.sh smoke <ecu|ams>       tests/<s>_smoke.robot
@@ -41,6 +42,12 @@
 # fast-forward (docs/performance.md). The models' assembly (vhil/models.py)
 # is cached in the volume (/vhil/renode-models): compiled on the first start
 # after a model changes; VHIL_MODELS=prebuilt passes through.
+#
+# Images: every job uses the images of this checkout, named by content key
+# (scripts/image-key.sh). When they aren't local, it pulls them from
+# $VHIL_REGISTRY (default ghcr.io/isc-fs, published by
+# .github/workflows/image.yml) and builds them only when none is published
+# or docker/ has uncommitted changes.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 profile=${VHIL_COLIMA_PROFILE:-vhil}
@@ -49,6 +56,7 @@ base_image=${VHIL_IMAGE:-ifs-vhil}
 editor_image=$base_image-editor
 image=$base_image
 docker=(docker --context "$context")
+registry=${VHIL_REGISTRY:-ghcr.io/isc-fs}
 # The web app's services, behind one proxy on one origin (docker/compose.yaml).
 compose=("${docker[@]}" compose -f "$repo/docker/compose.yaml")
 # Unprivileged on Docker's default network unless a job needs vcan: only
@@ -84,21 +92,71 @@ vm() {
     fi
 }
 
+# base, editor and clean of this checkout (scripts/image-key.sh).
+base='' editor='' clean=''
+image_keys() {
+    local out
+    out=$("$repo/scripts/image-key.sh")
+    base=$(sed -n 's/^base=//p' <<<"$out")
+    editor=$(sed -n 's/^editor=//p' <<<"$out")
+    clean=$(sed -n 's/^clean=//p' <<<"$out")
+}
+have() { "${docker[@]}" image inspect "$1" >/dev/null 2>&1; }
+
 build_images() {
+    image_keys
     "${docker[@]}" build -t "$base_image" "$repo/docker"
     "${docker[@]}" build -t "$editor_image" --build-arg BASE="$base_image" \
         -f "$repo/docker/editor.Dockerfile" "$repo"
+    if [ "$clean" = true ]; then
+        "${docker[@]}" tag "$base_image" "$base_image:$base"
+        "${docker[@]}" tag "$editor_image" "$editor_image:$editor"
+    fi
 }
 
-ensure_image() {
-    "${docker[@]}" image inspect "$image" >/dev/null 2>&1 || build_images
+# The published images of this checkout, tagged locally as the images and as
+# their keys. Fails when docker/ has uncommitted changes or none is published.
+pull_images() {
+    image_keys
+    if [ "$clean" != true ]; then
+        echo "docker/ or the editor's sources have uncommitted changes: build them (\`image\`)" >&2
+        return 1
+    fi
+    local name key
+    for name in ifs-vhil ifs-vhil-editor; do
+        key=$base; [ "$name" = ifs-vhil-editor ] && key=$editor
+        "${docker[@]}" pull "$registry/$name:$key" || return 1
+    done
+    "${docker[@]}" tag "$registry/ifs-vhil:$base" "$base_image:$base"
+    "${docker[@]}" tag "$registry/ifs-vhil-editor:$editor" "$editor_image:$editor"
+    "${docker[@]}" tag "$base_image:$base" "$base_image"
+    "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
+}
+
+# The images of this checkout: local by key, else pulled, else built.
+ensure_images() {
+    image_keys
+    if [ "$clean" != true ]; then
+        if ! have "$base_image" || ! have "$editor_image"; then build_images; fi
+        return
+    fi
+    if have "$base_image:$base" && have "$editor_image:$editor"; then
+        "${docker[@]}" tag "$base_image:$base" "$base_image"
+        "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
+        return
+    fi
+    echo "pulling the images of this checkout ($registry, ifs-vhil:$base)" >&2
+    pull_images || {
+        echo "no published image for this checkout: building it (Renode from source, ~30 min)" >&2
+        build_images
+    }
 }
 
 # Run a script in the container. For vcan jobs, host networking puts
 # can0..can2 in the VM's namespace, where they outlive the container, and
 # --privileged lets the container create them.
 in_container() {
-    ensure_image
+    ensure_images
     local tty=()
     [ -t 0 ] && [ -t 1 ] && tty=(-it)
     "${docker[@]}" run --rm ${tty[@]+"${tty[@]}"} ${run_args[@]+"${run_args[@]}"} \
@@ -120,6 +178,7 @@ need_elf() { [ -n "$(elf "$1")" ] || { echo "no $1 firmware: run \`scripts/vhil-
 cmd=${1:-help}; shift || true
 case "$cmd" in
 vm) vm ;;
+pull) pull_images ;;
 image) build_images ;;
 fw)
     [ $# -gt 0 ] || set -- ecu ams
@@ -216,7 +275,7 @@ editor)
     # proxy (docker/compose.yaml; the api comes up with it, for the login
     # check). It publishes no port of its own and runs nothing: Run is the
     # web app's (`worker` executes it).
-    "${docker[@]}" image inspect "$editor_image" >/dev/null 2>&1 || build_images
+    ensure_images
     VHIL_IMAGE=$base_image exec "${compose[@]}" up editor proxy ;;
 editor-check)
     # Pipeline Manager's ./validate (its frontend's load) on each system's
@@ -228,7 +287,7 @@ server)
     # the auth settings pass through when set (docs/development/web-app.md).
     # The api listens on 0.0.0.0 in its container, reached only through the
     # proxy, whose port is on the host's 127.0.0.1 only (docker/compose.yaml).
-    ensure_image
+    ensure_images
     VHIL_IMAGE=$base_image exec "${compose[@]}" up api proxy ;;
 worker)
     in_container 'export VHIL_DATA=/vhil/server VHIL_FW_DIR=/vhil/fw; exec python -m vhil.worker "$@"' "$@" ;;
@@ -236,5 +295,5 @@ prune)
     in_container 'export VHIL_DATA=/vhil/server VHIL_FW_DIR=/vhil/fw; exec python -m vhil.worker prune "$@"' "$@" ;;
 shell) in_container 'exec bash' ;;
 run) in_container 'exec "$@"' "$@" ;;
-*) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; [ "$cmd" = help ] ;;
+*) sed -n '2,/^set -euo/{/^#/p;}' "$0" | sed 's/^# \{0,1\}//'; [ "$cmd" = help ] ;;
 esac
