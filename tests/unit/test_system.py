@@ -537,7 +537,10 @@ def test_every_mainlite_boots_through_the_can_bootloader(path):
     2026-10-05; PROVISIONING.md step 1.3). No system boots its app directly."""
     system = System(path)
     roles = {"ecu": (1, "FDCAN2"), "ams": (2, "FDCAN1"), "udv": (3, "FDCAN2")}
-    for b in system.boards.values():
+    mainlites = [b for b in system.boards.values() if b.board["id"] == "mainlite"]
+    if not mainlites:
+        pytest.skip("no MainLite in this system")
+    for b in mainlites:
         assert b.bootloader["id"] == "can-bootloader"
         assert f"{b.name}.bootloader" in system.images()
         assert (b.node_id, b.flash_bus) == roles[b.role]
@@ -623,8 +626,16 @@ def test_a_board_without_roles_names_its_firmware(tmp_path):
     p = tmp_path / "r.yaml"
     p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain, firmware: ams}\n")
     assert System(p, catalog).boards["a"].firmware["id"] == "ams"
+    # Without one (a firmware not in the catalogue yet, the SensorHub's) its
+    # image is given at render, and there is nothing to build.
     p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain}\n")
-    with pytest.raises(SystemError, match="has no roles, so it needs a firmware"):
+    system = System(p, catalog)
+    assert system.boards["a"].firmware is None and system.images() == ["a"]
+    assert "running the image given at render" in system.render_renode({"a": Path("a.elf")})
+    with pytest.raises(SystemError, match="no firmware in the catalogue to build"):
+        system.build_firmware(tmp_path / "fw")
+    p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain, firmware_ref: dev}\n")
+    with pytest.raises(SystemError, match="a firmware_ref needs a firmware"):
         System(p, catalog)
 
 
@@ -733,6 +744,25 @@ def test_a_single_ended_transfer_other_than_identity_is_rendered():
     script = system.render_renode()
     assert "sysbus.adc3_h73x SingleEndedTransfer 7 0.98 -3" in script
     assert "SingleEndedNoise" not in script
+
+
+def test_a_board_without_roles_takes_its_own_front_end():
+    """The SensorHub's 0-5 V inputs: 5k11 / 10k dividers (R15/R16) on PC0-PC3,
+    so 5 V at J1 is 3.31 V at the pin (catalog/boards/sensorhub.yaml)."""
+    system = System(REPO / "systems" / "sensorhub.yaml")
+    assert system.sensor_to_pin("sensorhub.PC0", 5.0) == pytest.approx(3.309, abs=1e-3)
+    assert system.sensor_to_pin("sensorhub.PC3", 0.0) == 0.0
+
+
+def test_a_power_cut_wipes_what_the_platform_says():
+    """vbat: false runs the platform's power_cut first (the RTC backup
+    registers of each MCU); a board with VBAT runs nothing."""
+    hub, ams = System(REPO / "systems" / "sensorhub.yaml"), System(REPO / "systems" / "ams.yaml")
+    assert hub.power_cut("sensorhub")[0] == "sysbus WriteDoubleWord 0x40002850 0x0"
+    assert ams.power_cut("ams")[0] == "sysbus WriteDoubleWord 0x58004050 0x0"
+    assert ams.power_cut("ams")[-1] == "sysbus.backupSram ZeroAll"
+    ams.boards["ams"].board = dict(ams.boards["ams"].board, vbat=True)
+    assert ams.power_cut("ams") == []
 
 
 def test_a_sensor_side_voltage_reaches_the_pin_through_the_front_end():

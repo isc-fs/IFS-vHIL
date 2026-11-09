@@ -1,0 +1,17 @@
+kind: system
+id: sensorhub
+description: >-
+  One SensorHub on its two CAN buses, nothing attached yet. Its firmware is
+  not in the catalogue, so a run gives the image at render
+  (`--firmware sensorhub=<elf>`). The base for SensorHub tests: add the
+  sensors a test needs as devices.
+time:
+  quantum_s: 0.0005
+boards:
+  # The board has no roles and no CAN bootloader: its image boots from the
+  # vector table at 0x08000000.
+  sensorhub: {board: sensorhub}
+buses:
+  # Which car bus each one joins is not traced yet (docs/boards/sensorhub.md).
+  can1: {kind: can, nodes: [sensorhub.CAN1]}  # CAN1_H/L, J1.9/J1.10
+  can2: {kind: can, nodes: [sensorhub.CAN2]}  # CAN2_H/L, J1.11/J1.12

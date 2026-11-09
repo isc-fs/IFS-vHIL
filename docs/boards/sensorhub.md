@@ -20,10 +20,11 @@ A universal sensor hub: it reads sensors around the car and puts them on CAN.
 | MCU | **STM32L496RGT6** (Cortex-M4F, LQFP64), U4 | schematic; WO 6.2 |
 | Clock | 16 MHz HSE crystal | WO |
 | CAN | **2 × bxCAN** (not FDCAN): CAN1 PB9/PB8 (TX/RX), CAN2 PB6/PB5, 1 Mbit/s | schematic nets; WO |
-| IMU | BMI088 on **SPI**: CS_ACCEL PC4, CS_GYRO PC5, INT1 PC6 | schematic |
-| Analog in | ADC_IN1..4 on PC0..PC3 (RC + BAT54S clamp, 5 V → 3.3 V divider), ADC_TEST on PA0 | schematic; WO 6.6 |
-| External buses | I2C1 PB10/PB11 and SPI (+ CS_EXT) out to the AMPSEAL connector | schematic; WO 6.5 |
-| Debug | USART on PA2/PA3, SWD, heartbeat LED PB13, USB-C (DFU) | schematic |
+| IMU | BMI088 on **SPI3** (PC10/PC11/PC12): CS_ACCEL PC4, CS_GYRO PC5, INT1–INT3 PC6–PC8 | schematic netlist |
+| Analog in | ADC_IN1..4 (J1.19–22) on PC0..PC3, ADC123_IN1..4: 5k11 / 10k divider (ratio 0.6618), 10 nF, BAT54S clamp to 3V3. ADC_TEST (PA0) is a label on U4.14 alone | schematic netlist; WO 6.6 |
+| External buses | **I2C2** PB10/PB11 (J1.13/14) and **SPI1** PA5/PA6/PA7 + CS_EXT PA4 (J1.15–18) out to the AMPSEAL connector | schematic netlist; WO 6.5 |
+| Debug | USART2 on PA2/PA3, SWD, heartbeat LED PB13, USB-C (DFU) | schematic |
+| Backup domain | VBAT (U4.1) tied to 3V3, no LSE (PC14/PC15 unconnected): a power cut wipes it | schematic netlist |
 | Connector | TE AMPSEAL 23-pin: 24 V in, 12/5/3.3 V out, CAN1, CAN2, I2C, SPI, ADC1..4 | WO 6.5 |
 
 The PCB layout hasn't started (`SensorHub.kicad_pcb` is empty), and **there
@@ -36,11 +37,11 @@ is no firmware yet**. Open hardware questions are in the repo's
 |---|---|---|
 | Firmware | **Missing.** Prerequisite. | The vHIL runs the car's image (invariant 1). Bring-up can start once the firmware repo has CubeMX init + a heartbeat on CAN. |
 | Platform `stm32l496` | **Started** ([below](#platform-stm32l496)) | Renode 1.17 ships no STM32L4 platform. The closest is `stm32l552.repl` (same peripheral generation): GPIO `STM32_GPIOPort`, USART `STM32F7_USART`, SPI `STM32SPI`, timers `STM32_Timer`, IWDG, ADC `STM32L5_ADC`. Every address and IRQ from ST's `stm32l496xx.h` and RM0351 (invariant 10). The L4's I2C is the same IP as the F7's (check Renode's `STM32F7_I2C`), its DMA has CSELR and no DMAMUX, and its RCC is different. |
-| bxCAN on the bus model | **Done** at platform level | `models/renode/Stm32BxCan.cs`: Renode's `STMCAN` (filters, RX FIFOs) with the transmit side on the vHIL's arbitrated bus (`IVhilCanController`, as the H7 FDCAN). Next: the board's system entry puts CAN1/CAN2 on a bus. |
+| bxCAN on the bus model | **Done** at platform level | `models/renode/Stm32BxCan.cs`: Renode's `STMCAN` (filters, RX FIFOs) with the transmit side on the vHIL's arbitrated bus (`IVhilCanController`, as the H7 FDCAN). `systems/sensorhub.yaml` puts CAN1/CAN2 on buses `can1`/`can2` (`tests/sim/test_sensorhub_system.py`). |
 | BMI088 | Reuse + extend | `models/renode/Bmi088.cs` is I2C-only (the MainLite's). The SensorHub wires it on SPI: add the SPI interface (one CS per die, the accelerometer's dummy byte on reads, datasheet ch. 6). |
-| ADC inputs | To check | Analog sources (`catalog/models/*` with backend `analog`) drive pins already; the L4 ADC model must deliver them. |
+| ADC inputs | **Done** | The L4 ADC takes pin voltages (`SetVoltage`, what analog devices render) and keeps them through a reset. The board's divider is `analog_in` `front_end_ratio` (`System.sensor_to_pin`). |
 | Pin model | Later | Optional at first. `vhil/pin_model.py` reads only the MainLite schema. |
-| Board, firmware, system entries | To write | `catalog/boards/sensorhub.yaml`, `catalog/firmware/sensorhub.yaml`, `systems/sensorhub.yaml`. |
+| Board, system entries | **Done** | `catalog/boards/sensorhub.yaml`, `systems/sensorhub.yaml`. No firmware entry: a board without roles may name none, and its image is given at render (`render --firmware sensorhub=<elf>`; `build` refuses). The entry comes with the firmware. |
 
 ## How it is structured in the vHIL
 
@@ -50,7 +51,7 @@ Decided 2026-11-09 (Raúl):
   has one `sensorhub` board and one system, with plain port names. Unlike
   the MainLite, there are no roles.
 - **The board is what the schematic fixes.** That covers the MCU, the
-  on-board BMI088 (SPI), CAN1/CAN2, and the AMPSEAL ports: ADC_IN1..4, I2C1,
+  on-board BMI088 (SPI3), CAN1/CAN2, and the AMPSEAL ports: ADC_IN1..4, I2C2,
   SPI_EXT + CS_EXT. The ADC inputs' 5 V → 3.3 V divider and clamp belong to
   the board, so a sensor model gives the voltage the sensor itself puts out
   (0–5 V).
@@ -133,8 +134,9 @@ Each milestone ends in something you can run and a PR into `dev`.
    peripheral guard lists nothing unexplained.
    *Done when:* the firmware reaches its main loop and toggles the heartbeat
    (PB13) at its real period.
-2. **M2: on the CAN bus.** *(bxCAN on the arbitrated bus done at platform
-   level; needs the board and system entries.)* bxCAN implementing
+2. **M2: on the CAN bus.** *(Done with a test image: bxCAN on the
+   arbitrated bus, the board and system entries; the firmware's own frames
+   wait for the firmware.)* bxCAN implementing
    `IVhilCanController`.
    *Done when:* a test sees the board's frames at 1 Mbit/s bit time, ACKed by
    another node.
@@ -159,5 +161,10 @@ Owners: Inés with Raúl.
   the same way the car does.
 - **Buses:** which car bus does CAN1 go to, and which does CAN2? Which IDs
   does it send, and is there a DBC?
+- **Schematic, ADC nets:** the dividers' nets are labelled `ADC1_IN` /
+  `ADC1_MCU` (… `ADC4`), while J1's are `ADC_IN1` and the MCU's
+  `ADC_IN1_MCU`. As drawn, R15/R16 (and the other three) join neither, so
+  J1's inputs reach no pin. The vHIL models the intent (connector → divider →
+  PC0..PC3); fix the labels before layout.
 - **External sensors:** what hangs off I2C, SPI and ADC_IN1..4 in each
   mounting position? Those become devices in the system.

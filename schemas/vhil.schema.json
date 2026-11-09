@@ -192,6 +192,13 @@
               },
               "description": "Monitor commands run on each machine after the platform loads."
             },
+            "power_cut": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Monitor commands a power-on runs first on a board without VBAT (board vbat: false), with the machine selected: what the platform's backup domain loses with its power that the platform's own models keep across a machine reset. Cite the reference manual."
+            },
             "reset": {
               "type": "array",
               "items": {
@@ -401,6 +408,12 @@
               "channel": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "front_end_ratio": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1,
+                "description": "Pin volts per volt at the connector: the board's own input divider, for a board without roles (a role's adc_single_ended front_end_ratio wins). Applied only to a sensor-side source (System.sensor_to_pin). Cite the schematic."
               }
             }
           }

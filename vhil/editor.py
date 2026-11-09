@@ -303,6 +303,9 @@ def _role_description(board: dict, firmware: dict) -> str:
         f"analog) is removed, with a notice."])
 
 
+NO_FIRMWARE = "(none)"
+
+
 def specification(catalog: Path = CATALOG) -> dict:
     """Pipeline Manager node types for everything in the catalogue."""
     firmware_docs = _catalog("firmware", catalog)
@@ -334,8 +337,13 @@ def specification(catalog: Path = CATALOG) -> dict:
                 "description": board.get("description", ""),
                 "interfaces": _rows([_iface(name, kind)
                                      for _, name, kind in _readings(board, None)]),
-                "properties": [{"name": "firmware", "type": "select", "values": firmware,
-                                "default": firmware[0]}, ref, *tail],
+                # NO_FIRMWARE: none from the catalogue (the system names
+                # none; its image is given at render), the default.
+                "properties": [{"name": "firmware", "type": "select",
+                                "values": [NO_FIRMWARE, *firmware], "default": NO_FIRMWARE,
+                                "description": "Catalogue firmware to build, or "
+                                               f"'{NO_FIRMWARE}': an image given at render."},
+                               ref, *tail],
                 "additionalData": {"vhil": {"kind": "board", "board": board_id}},
             })
             continue
@@ -571,7 +579,7 @@ def from_dataflow(dataflow: dict, spec: dict | None = None) -> dict:
             if where.get("roles"):
                 choice = props.get("role")
                 boards[name]["role"] = where["roles"].get(choice) or role_of(choice)
-            else:
+            elif props.get("firmware") not in (None, "", NO_FIRMWARE):
                 boards[name]["firmware"] = props["firmware"]
             if str(props.get("firmware_ref") or "").strip():
                 boards[name]["firmware_ref"] = str(props["firmware_ref"]).strip()

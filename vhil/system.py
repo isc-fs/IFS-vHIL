@@ -292,6 +292,9 @@ class Board:
     def ref(self, image: str = "firmware") -> str:
         """The branch or tag to build: the system's, else the catalogue's."""
         fw = self.firmware if image == "firmware" else self.bootloader
+        if fw is None:
+            raise SystemError(f"board '{self.name}': no {image} in the catalogue to build; "
+                              f"give its image at render (--firmware {self.name}=<elf>)")
         return (self.firmware_ref if image == "firmware" else self.bootloader_ref) or fw["ref"]
 
     def endpoint(self, connector: str) -> tuple[str, object]:
@@ -551,10 +554,10 @@ class System:
         dev["params"] = {**dev.get("params", {}), **values}
 
     @staticmethod
-    def _firmware(b: Board, spec: dict, catalog: Path) -> dict:
+    def _firmware(b: Board, spec: dict, catalog: Path) -> dict | None:
         """The catalogue firmware a board runs: its role's, for a board with
         roles (a system names none: an ECU runs the ECU firmware), else the
-        one the system names."""
+        one the system names, else None (an image given at render)."""
         if b.role_spec is not None:
             ident = b.role_spec.get("firmware")
             if "firmware" in spec:
@@ -565,8 +568,10 @@ class System:
                                   f"catalogue yet (catalog/firmware/{ident}.yaml)")
             return _entry("firmware", ident, catalog)
         if "firmware" not in spec:
-            raise SystemError(f"board '{b.name}': {b.board['id']} has no roles, so it needs "
-                              f"a firmware")
+            # A board whose firmware is not in the catalogue yet (the
+            # SensorHub's): its image is given at render (`--firmware`) and
+            # there is nothing to build.
+            return None
         return _entry("firmware", spec["firmware"], catalog)
 
     @staticmethod
@@ -701,7 +706,9 @@ class System:
             if b.write_protect and "write_protect" not in b.platform.get("renode", {}):
                 raise SystemError(f"board '{b.name}': platform {b.platform['id']} has no "
                                   f"option bytes to write-protect sectors in")
-            for connector in b.firmware.get("can", {}).get("contract", []):
+            if b.firmware is None and b.firmware_ref is not None:
+                raise SystemError(f"board '{b.name}': a firmware_ref needs a firmware")
+            for connector in (b.firmware or {}).get("can", {}).get("contract", []):
                 if connector not in b.board.get("can", {}):
                     raise SystemError(f"board '{b.name}': firmware {b.firmware['id']}'s CAN "
                                       f"contract rides {connector}, which {b.board['id']} lacks")
@@ -963,7 +970,7 @@ class System:
         """The buses a board's firmware CAN contract rides: the buses of the
         connectors its catalogue firmware names (`can.contract`), or every
         bus the board is on if it names none."""
-        wanted = self.boards[board].firmware.get("can", {}).get("contract")
+        wanted = (self.boards[board].firmware or {}).get("can", {}).get("contract")
         out = []
         for bus, spec in self.buses.items():
             if spec["kind"] != "can":
@@ -1025,17 +1032,19 @@ class System:
     def sensor_to_pin(self, endpoint: str, volts: float) -> float:
         """The pin voltage a sensor-side source of `volts` gives on a board's
         analog input (`ecu.PF7`): its backplane front end's DC ratio
-        (`adc_single_ended` `front_end_ratio` in the role, cited there; 1
-        without one). Every stimulus written at the pin (plants, scenario
-        `volts:` rows, the bench DAC routes) is already pin volts and never
-        goes through it; a model that gives volts at the sensor must (#326)."""
+        (`adc_single_ended` `front_end_ratio` in the role, cited there), else
+        the board's own (`analog_in` `front_end_ratio`), else 1. Every
+        stimulus written at the pin (plants, scenario `volts:` rows, the bench
+        DAC routes) is already pin volts and never goes through it; a model
+        that gives volts at the sensor must (#326)."""
         board, _, pin = endpoint.partition(".")
         b = self.boards.get(board)
         if (b is None or pin not in (b.board.get("analog_in") or {})
                 or pin in ((b.role_spec or {}).get("gpio") or {})):
             raise SystemError(f"{endpoint!r} is not an analog input of this system")
         t = ((b.role_spec or {}).get("adc_single_ended") or {}).get(pin) or {}
-        return volts * float(t.get("front_end_ratio", 1))
+        ratio = t.get("front_end_ratio", b.board["analog_in"][pin].get("front_end_ratio", 1))
+        return volts * float(ratio)
 
     def _renode_device(self, name: str, dev: dict) -> str:
         """Platform-description text attaching one device (or a counted chain).
@@ -1172,8 +1181,9 @@ class System:
             platform = b.platform["renode"]
             cpu = rn.ident(platform.get("cpu", "cpu"))
             var = f"elf_{rn.ident(b.name)}"
-            out.append(rn.comment(f"# --- {b.name}: {b.board['id']} running {b.firmware['id']} "
-                                  f"({b.firmware['repo']})"))
+            out.append(rn.comment(f"# --- {b.name}: {b.board['id']} running "
+                                  + (f"{b.firmware['id']} ({b.firmware['repo']})"
+                                     if b.firmware is not None else "the image given at render")))
             if own_time:
                 out += [f"emulation CreateVhilMachine {rn.quote(b.name)}", f"mach set {rn.quote(b.name)}"]
             else:
@@ -1212,7 +1222,7 @@ class System:
                                f"{rn.number(float(t.get('noise_codes_rms', 0)))} "
                                f"{rn.number(float(t.get('start_noise_codes_rms', 0)))} "
                                f"{self.noise_seed(b.name)}")
-            if "cpu" in b.firmware:
+            if "cpu" in (b.firmware or {}):
                 # The rate the chip runs this firmware's code at, which its
                 # caches and memory placement set (docs/cpu-timing.md); the
                 # platform's otherwise.
@@ -1264,7 +1274,7 @@ class System:
                 # A board that carries no bootloader boots its image from where
                 # the image's vector table is linked.
                 out += ["macro reset", '"""', f"    sysbus LoadELF ${var}"]
-                vtor = b.firmware.get("load", {}).get("vector_table")
+                vtor = (b.firmware or {}).get("load", {}).get("vector_table")
             if vtor is not None:
                 out.append(f"    {cpu} VectorTableOffset 0x{vtor:08X}")
             # Renode runs the macro on every reset, the CPU's own (watchdog,
@@ -1305,12 +1315,19 @@ class System:
         path.write_bytes(data)
         return path
 
+    def power_cut(self, board: str) -> list[str]:
+        """What a power-on runs first on a board without VBAT (`vbat: false`):
+        its platform's commands that wipe the backup domain (`renode.power_cut`);
+        nothing for a board whose VBAT keeps it."""
+        b = self.boards[board]
+        return [] if b.board.get("vbat", True) else list(b.platform["renode"].get("power_cut", []))
+
     def bench_config(self) -> dict:
         """The virtual broker's wiring (see vhil/broker.py)."""
         power = [{"machine": c["board"], "slot": c.get("slot"), "relay": c["relay"],
                      "ina_addr": c["ina_addr"], "current_A": c["current_A"],
                      "can": self.can_of(c["board"]),
-                     "vbat": self.boards[c["board"]].board.get("vbat", True)}
+                     "power_cut": self.power_cut(c["board"])}
                     for c in self.bench.get("power", [])]
         routes = []
         for r in self.bench.get("dac_routes", []):
@@ -1358,7 +1375,10 @@ class System:
         refs, commits, built, workdir = refs or {}, commits or {}, {}, Path(workdir)
         only = None if only is None else set(only)
         by_source: dict[tuple, Path] = {}
-        sources = [(b.name, b.firmware, b.ref("firmware")) for b in self.boards.values()]
+        # A board with no catalogue firmware has nothing to build: asked for
+        # (or with `only` unset) its ref says so.
+        sources = [(b.name, b.firmware, b.ref("firmware")) for b in self.boards.values()
+                   if b.firmware is not None or only is None or b.name in only]
         sources += [(f"{b.name}.bootloader", b.bootloader, b.ref("bootloader"))
                     for b in self.boards.values() if b.bootloader is not None]
         for name, fw, default_ref in sources:

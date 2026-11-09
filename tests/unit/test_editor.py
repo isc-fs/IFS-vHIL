@@ -438,8 +438,9 @@ def test_firmware_refs_survive_the_round_trip(spec, path):
     """The picker's per-board refs (#116) are board properties in the graph."""
     doc = yaml.safe_load(path.read_text())
     for b in doc["boards"].values():
-        b["firmware_ref"] = "feat/x"
-        b["bootloader_ref"] = "v1.6.2"     # every MainLite carries the bootloader
+        if "role" in b:                     # a board with no firmware has no ref
+            b["firmware_ref"] = "feat/x"
+            b["bootloader_ref"] = "v1.6.2"     # every MainLite carries the bootloader
     assert from_dataflow(to_dataflow(doc, spec), spec) == doc
     assert validate(doc) == []
 

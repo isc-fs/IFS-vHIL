@@ -84,7 +84,7 @@ def resolve(system, board: str) -> tuple[list[Item], list[str]]:
     b = system.boards[board]
     conns = _connectors(system, board)
     items, errors = [], []
-    for i, raw in enumerate(catalogue_items(b.firmware)):
+    for i, raw in enumerate(catalogue_items(b.firmware) if b.firmware is not None else []):
         where = f"{b.firmware['id']} state_view[{i}] ({raw.get('label', '?')})"
         m = SOURCE.match(raw.get("source") or "")
         if not m:
@@ -229,7 +229,8 @@ def view(system, elfs: dict[str, Path], contract: Optional[dict]) -> dict:
             if lab.note:
                 row["note"] = lab.note
             rows.append(row)
-        out[board] = {"firmware": b.firmware["id"], "items": rows, "errors": errors}
+        out[board] = {"firmware": b.firmware["id"] if b.firmware is not None else None,
+                      "items": rows, "errors": errors}
     return out
 
 
