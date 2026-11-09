@@ -1,4 +1,4 @@
-# vHIL desktop app
+# ISC vHIL desktop app
 
 A window and a set-up wizard around [`bin/vhil`](../bin/vhil) (#373), so a
 teammate runs the vHIL without a terminal. It sits next to the hosted web app
@@ -26,14 +26,20 @@ The menu's **Set-up and Status** (⌘,) returns to the wizard. **Install the
 
 ## Install (teammates)
 
-Download yours from the release. None is signed with a certificate (that
-needs paid developer accounts, #373's "later" list), so each OS warns once.
+Download yours from the team's app store,
+[isc-fs/iskapps](https://github.com/isc-fs/iskapps/releases) (the newest
+`vhil-v…` release; the installers are also on this repo's release). After
+that the app updates itself: a newer release shows **Install and restart**,
+the download is checked against the signing key built into the app, and the
+app's own copy of the repository moves to the new release on the next start.
+None is signed with a certificate (that needs paid developer accounts,
+#373's "later" list), so each OS warns once.
 
 | OS | File | Needs first | First launch |
 |---|---|---|---|
-| macOS | `vHIL_<v>_universal.dmg`: drag vHIL to Applications | Homebrew (the app installs Colima and Docker with it) | open it once, then **System Settings → Privacy & Security → Open Anyway** |
-| Linux | `vHIL_<v>_amd64.deb` (`sudo apt install ./vHIL_*.deb`) or `vHIL_<v>_amd64.AppImage` (`chmod +x`) | Git and Docker Engine, with you in the `docker` group | none |
-| Windows | `vHIL_<v>_x64-setup.exe` (installs for your user, no admin) | WSL2 with Ubuntu (`wsl --install -d Ubuntu`), Docker Desktop with **WSL integration** on for it, Git in WSL | SmartScreen: **More info → Run anyway** |
+| macOS | `ISC.vHIL_<v>_universal.dmg`: drag ISC vHIL to Applications | Homebrew (the app installs Colima and Docker with it) | open it once, then **System Settings → Privacy & Security → Open Anyway** |
+| Linux | `ISC.vHIL_<v>_amd64.deb` (`sudo apt install ./ISC.vHIL_*.deb`) or `ISC.vHIL_<v>_amd64.AppImage` (`chmod +x`) | Git and Docker Engine, with you in the `docker` group | none |
+| Windows | `ISC.vHIL_<v>_x64-setup.exe` (installs for your user, no admin) | WSL2 with Ubuntu (`wsl --install -d Ubuntu`), Docker Desktop with **WSL integration** on for it, Git in WSL | SmartScreen: **More info → Run anyway** |
 
 On Windows the app runs `bin/vhil` inside WSL (it is bash): its own copy of
 the repository lives in WSL at `~/IFS-vHIL`, and a clone of your own must be
@@ -54,7 +60,11 @@ npx tauri build --target universal-apple-darwin --bundles app,dmg   # what CI sh
 ```
 
 [`app.yml`](../.github/workflows/app.yml) builds it on every PR that changes
-`app/` and attaches the `.dmg` to a release tag's release. The page in
+`app/`. A release tag signs the update bundles (`TAURI_SIGNING_PRIVATE_KEY`
+and its password, repo secrets; the key's owner keeps a copy), attaches the
+installers to the release and publishes them to iskapps (`vhil-v<x.y.z>`
+plus `vhil/latest.json`, the updater's endpoint) with the `ISKAPPS_TOKEN`
+org secret. The page in
 `ui/` is plain HTML and JS (no build step); `src-tauri/src/main.rs` is the
 backend. The icon's sources are `src-tauri/icons/source/`: `vhil-macos.png` (Apple's
 template, 824 px body with its shadow) makes `icon.icns`, and `vhil.png`
