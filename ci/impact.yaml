@@ -107,6 +107,9 @@ rules:
             vhil/coverage.py, vhil/fwprune.py, vhil/trace.py,
             models/renode/VhilTrace.cs, tests/sim/durations.json]
     select: {importers: true}
+  - name: desktop app (app/README.md; app.yml builds it)
+    paths: [app/**]
+    select: {}
   - name: developer scripts
     paths: [bin/vhil, scripts/explore.sh, scripts/probe.sh, scripts/vhil-docker.sh, scripts/image-key.sh, scripts/wsl-vcan.sh,
             scripts/update-pin-model.sh, scripts/shims/**,

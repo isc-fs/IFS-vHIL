@@ -13,6 +13,7 @@ invariants in [`CLAUDE.md`](../CLAUDE.md#hard-invariants).
 | [ci.md](ci.md) | CI policy, labels (`full-ci`), impact selection, fingerprints |
 | [test-coverage.md](test-coverage.md) | What the vHIL's own test suite covers |
 | [debugger.md](debugger.md) | GDB on an emulated board |
+| [app/README.md](../app/README.md) | The desktop app: set-up wizard and window around `bin/vhil` |
 | [development/web-app.md](development/web-app.md) | Web app login and GitHub App credentials |
 | [deploy.md](deploy.md) | Deploying the web app on a host |
 
