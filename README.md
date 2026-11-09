@@ -11,6 +11,30 @@ parallel, with no hardware attached, on a `full-ci` label, every night and on
 release ([`docs/ci.md`](docs/ci.md)). Work that needs real physics stays on the physical bench: analog
 accuracy, real power, flash wear and bus electrics.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/vhil-overview-dark.svg">
+  <img src="docs/img/vhil-overview-light.svg" alt="One firmware image in a programmer on a bench. On the left it goes into the car's real boards, three MainLite modules on their backplanes wired to the car's harness. On the right the same image goes into their emulated twins inside an open container, on a virtual CAN bus bar with device models beside them.">
+</picture>
+
+*One image, two targets.* The same firmware image (the lit chip) goes into the
+car's boards on the left and into their emulated twins on the right, which
+sit on a virtual CAN bus with models of the chips around them (LTC6811 chain,
+BMI088).
+
+**Where it fits.** Each layer catches what the one before can't:
+
+```mermaid
+flowchart TB
+    FW["Firmware repo: ECU, AMS, uDV"] -->|production build| ELF(["Same .elf image"])
+    ELF --> V["<b>vHIL</b><br/>emulated boards, virtual time<br/>every PR, minutes"]
+    ELF --> H["<b>HIL bench</b><br/>real boards and electronics<br/>before a release"]
+    ELF --> C["<b>Car</b><br/>ground truth"]
+    V -->|logic, timing, fault paths| DEV{{"Merge to dev"}}
+    H -->|silicon, analog, flashing| MAIN{{"Release to main"}}
+    C -->|logs, datasheets| FIX["Model fixes"]
+    FIX -.-> V
+```
+
 **What it does today**
 
 - **Systems as data.** A system file places boards, gives each its role and
@@ -27,8 +51,10 @@ modelled, not by a PCB. See [`docs/vision.md`](docs/vision.md) for the roadmap.
 
 **Contributing:** `dev` is the trunk and `main` is release-only. Branch
 `feat/` `fix/` `docs/` `chore/` `test/` off `dev` and open a PR back into it.
-See [`docs/development/setup.md`](docs/development/setup.md), and
-[`CLAUDE.md`](CLAUDE.md) for the operating model.
+New contributors start at [`CONTRIBUTING.md`](CONTRIBUTING.md); every doc is
+indexed in [`docs/README.md`](docs/README.md). Adding a board:
+[`docs/development/adding-a-board.md`](docs/development/adding-a-board.md).
+[`CLAUDE.md`](CLAUDE.md) is the operating model.
 
 ## Try it
 
