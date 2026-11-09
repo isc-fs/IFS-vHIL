@@ -30,7 +30,7 @@ from vhil.system import REPO
 
 # Impact selection (ci/impact.yaml, docs/ci.md): the platform alone, no system.
 pytestmark = [pytest.mark.platform_stm32l496, pytest.mark.reset, pytest.mark.flash, pytest.mark.dma,
-              pytest.mark.adc, pytest.mark.timers]
+              pytest.mark.adc, pytest.mark.timers, pytest.mark.can]
 
 RCC, PWR, FLASH = 0x40021000, 0x40007000, 0x40022000
 CR, CFGR, PLLCFGR, CIER, CIFR, CICR, BDCR, CSR = (RCC + o for o in (0x00, 0x08, 0x0C, 0x18, 0x1C, 0x20,
@@ -715,3 +715,149 @@ def test_the_opamp_pga_and_vrefbuf(l4):
     l4.wr(0x40010030, 1 | (1 << 2))                     # ENVR, VRS 2.5 V
     assert l4.rd(0x40010030) & (1 << 3), "VRR"
     assert float(l4.value("sysbus.vrefbuf Voltage")) == pytest.approx(2.5)
+
+
+# --- bxCAN on the arbitrated bus --------------------------------------------------
+
+CAN1 = 0x40006400
+MCR, MSR, TSR, RF0R, IER, ESR, BTR = (CAN1 + o for o in (0x00, 0x04, 0x08, 0x0C, 0x14, 0x18, 0x1C))
+INRQ, TXFP, NART = 1 << 0, 1 << 2, 1 << 4
+RQCP0, TXOK0, TERR0, ABRQ0, TME0 = 1 << 0, 1 << 1, 1 << 3, 1 << 7, 1 << 26
+BTR_1M = 1 << 16                                        # BRP 0, TS1 2 tq, TS2 1 tq: 4 tq at 4 MHz
+
+
+def _on_bus(l4):
+    """CAN1 on an arbitrated bus with a probe, filter 0 taking every frame
+    into FIFO0, in initialisation mode at 1 Mbit/s."""
+    for command in ('emulation CreateVhilCanBus "can"', "connector Connect sysbus.can1 can",
+                    'emulation CreateVhilCanProbe "probe"', "connector Connect probe can"):
+        l4.mon.execute(command)
+    l4.wr(MCR, INRQ)
+    assert l4.rd(MSR) & 1, "INAK"
+    l4.wr(BTR, BTR_1M)
+    l4.wr(CAN1 + 0x200, 1 | 14 << 8)                    # FMR.FINIT, CAN2SB 14 (banks 0-13: CAN1)
+    l4.wr(CAN1 + 0x20C, 1)                              # FS1R: bank 0 32-bit, mask mode, FIFO0
+    l4.wr(CAN1 + 0x240, 0)
+    l4.wr(CAN1 + 0x244, 0)                              # mask 0: everything
+    l4.wr(CAN1 + 0x21C, 1)                              # FA1R
+    l4.wr(CAN1 + 0x200, 14 << 8)
+
+
+def _mailbox(l4, n, std_id, data: bytes, request=True):
+    base = CAN1 + 0x180 + 0x10 * n
+    l4.wr(base + 4, len(data))
+    l4.wr(base + 8, int.from_bytes(data[:4].ljust(4, b"\0"), "little"))
+    l4.wr(base + 12, int.from_bytes(data[4:8].ljust(4, b"\0"), "little"))
+    l4.wr(base, (std_id << 21) | (1 if request else 0))
+
+
+def _frames(l4):
+    return [line.split()[1:] for line in l4.value("probe Frames").splitlines()]
+
+
+def test_bxcan_bit_rate_follows_btr_and_pclk1(l4):
+    l4.wr(MCR, INRQ)
+    l4.wr(BTR, BTR_1M)
+    assert l4.get("can1", "BitRate") == 1_000_000
+    _pll_from_hse(l4)
+    l4.wr(CFGR, 3 | (4 << 8))                           # PCLK1 40 MHz
+    assert l4.get("can1", "BitRate") == 10_000_000
+    assert l4.get("can2", "BitRate") == 40_000_000 // 8, "CAN2's BTR at reset: 8 tq per bit"
+    l4.wr(MCR, 0)
+    assert l4.rd(BTR) == BTR_1M, "readable outside initialisation mode"
+
+
+def test_bxcan_sends_a_mailbox_in_bus_time(l4):
+    _on_bus(l4)
+    l4.wr(MCR, 0)                                       # normal mode
+    _mailbox(l4, 0, 0x123, b"\x11\x22")
+    assert not l4.rd(TSR) & TME0, "pending until the frame is over"
+    l4.run_program([])
+    assert _frames(l4) == [["0x123", "0", "1122"]]
+    assert l4.rd(TSR) & (RQCP0 | TXOK0 | TME0) == RQCP0 | TXOK0 | TME0
+    start, end = (int(v) for v in l4.value("can Timeline").split()[:2])
+    assert 60_000 <= end - start <= 75_000, "a 2-byte standard frame (60 bits + stuffing) at 1 Mbit/s"
+
+
+def test_bxcan_priority_by_identifier_or_request_order(l4):
+    _on_bus(l4)
+    _mailbox(l4, 0, 0x200, b"\x01")
+    _mailbox(l4, 1, 0x100, b"\x02")                    # both requested in INIT
+    l4.wr(MCR, 0)
+    l4.run_program([])
+    assert [f[0] for f in _frames(l4)] == ["0x100", "0x200"], "TXFP 0: lowest ID first"
+
+
+def test_bxcan_txfp_sends_in_request_order(l4):
+    _on_bus(l4)
+    l4.wr(MCR, INRQ | TXFP)
+    _mailbox(l4, 0, 0x200, b"\x01")
+    _mailbox(l4, 1, 0x100, b"\x02")
+    l4.wr(MCR, TXFP)
+    l4.run_program([])
+    assert [f[0] for f in _frames(l4)] == ["0x200", "0x100"]
+
+
+def test_bxcan_without_ack_and_nart_reports_a_transmit_error(l4):
+    _on_bus(l4)
+    l4.mon.execute('can SetAck "probe" false')
+    l4.wr(MCR, NART)
+    _mailbox(l4, 0, 0x123, b"\x01")
+    l4.run_program([])
+    assert l4.rd(TSR) & (RQCP0 | TXOK0 | TERR0 | TME0) == RQCP0 | TERR0 | TME0
+    esr = l4.rd(ESR)
+    assert (esr >> 4) & 7 == 3, "LEC: ACK error"
+    assert (esr >> 16) & 0xFF == 8, "TEC +8"
+
+
+def test_bxcan_alone_on_the_bus_becomes_error_passive(l4):
+    _on_bus(l4)
+    l4.mon.execute('can SetAck "probe" false')
+    l4.wr(MCR, 0)                                       # retries
+    _mailbox(l4, 0, 0x123, b"\x01")
+    l4.run_program([], seconds="0.01")
+    esr = l4.rd(ESR)
+    assert (esr >> 16) & 0xFF == 128 and esr & 3 == 3, "TEC 128: EWGF and EPVF"
+    assert not l4.rd(TSR) & TME0, "still retrying"
+
+
+def test_bxcan_receives_through_its_filters(l4):
+    _on_bus(l4)
+    l4.wr(MCR, 0)
+    l4.mon.execute('probe Send 0x321 "a1b2c3"')
+    l4.run_program([])
+    assert l4.rd(RF0R) & 3 == 1, "FMP0"
+    assert l4.rd(CAN1 + 0x1B0) >> 21 == 0x321
+    assert l4.rd(CAN1 + 0x1B4) & 0xF == 3
+    assert l4.rd(CAN1 + 0x1B8) & 0xFFFFFF == 0xC3B2A1
+
+
+def test_bxcan_in_init_neither_sends_nor_receives(l4):
+    _on_bus(l4)
+    _mailbox(l4, 0, 0x123, b"\x01")
+    l4.mon.execute('probe Send 0x321 "a1"')
+    l4.run_program([])
+    assert _frames(l4) == []
+    assert l4.rd(RF0R) & 3 == 0
+
+
+def test_bxcan_abort_empties_an_undecided_mailbox(l4):
+    _on_bus(l4)
+    _mailbox(l4, 0, 0x123, b"\x01")                    # held by INIT
+    l4.wr(TSR, ABRQ0)
+    assert l4.rd(TSR) & (RQCP0 | TXOK0 | TME0) == RQCP0 | TME0
+    l4.wr(MCR, 0)
+    l4.run_program([])
+    assert _frames(l4) == []
+
+
+def test_bxcan_transmit_interrupt_until_rqcp_is_cleared(l4):
+    _on_bus(l4)
+    l4.wr(IER, 1)                                       # TMEIE
+    l4.wr(MCR, 0)
+    _mailbox(l4, 0, 0x123, b"\x01")
+    l4.run_program([])
+    assert l4.rd(ISPR0) & (1 << 19), "CAN1_TX_IRQn"
+    l4.wr(TSR, RQCP0)
+    l4.wr(0xE000E280, 1 << 19)                          # ICPR0
+    assert not l4.rd(ISPR0) & (1 << 19)

@@ -4,9 +4,9 @@ description: >-
   STM32L496RG (Cortex-M4F, 1 MB flash, 320 KB SRAM), the SensorHub's MCU.
   Renode ships no STM32L4, so this is a new platform: Renode's models of the
   IP the L4 shares with other parts (GPIO, L5 SPI and ADC, F7 USART, L0/L1
-  DMA, timers, bxCAN CAN1/CAN2, IWDG, CRC, RNG), the vHIL's I2C master, and
-  new models of the L4's RCC (ready flags, clock switch, clock tree that
-  retimes the SysTick, timers, UARTs and LPTIMs, peripheral resets, reset
+  DMA, timers, IWDG, CRC, RNG), the vHIL's I2C master, bxCAN CAN1/CAN2 on
+  the vHIL's arbitrated CAN bus, and new models of the L4's RCC (ready
+  flags, clock switch, clock tree that retimes the SysTick, timers, UARTs and LPTIMs, peripheral resets, reset
   causes, ADC/RTC/WWDG kernel clocks), PWR, FLASH (erase, programming and
   fast programming, error interrupts, write protection, PCROP, option
   bytes), SYSCFG (SRAM2 erase and write protection), DMA request routing
@@ -24,6 +24,8 @@ renode:
     - models/renode/Stm32H7I2c.cs
     # PWR before the RCC, which reads PWR_CR1.DBP for the backup domain.
     - models/renode/Stm32L4Pwr.cs
+    # bxCAN (CAN1/CAN2) on the arbitrated bus; the RCC sets its PCLK1.
+    - models/renode/Stm32BxCan.cs
     # The one owner of the CPU's memory-access hook (flash store checks,
     # SRAM2 write protection), before the models that use it.
     - models/renode/VhilMemoryHooks.cs

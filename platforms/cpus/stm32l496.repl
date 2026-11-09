@@ -191,15 +191,19 @@ dmaRequests: DMA.STM32L4_DmaRequests @ none
     dma2: dma2
     dma2Cselr: dma2Cselr
 
-// --- CAN (CAN1_BASE, CAN2_BASE): bxCAN. CAN2 shares CAN1's filter banks
-// (CAN2SB in CAN1's FMR). Outputs 0-3 are TX, RX0, RX1, SCE:
+// --- CAN (CAN1_BASE, CAN2_BASE): bxCAN (Stm32BxCan.cs: Renode's STMCAN,
+// joining the vHIL's arbitrated bus; bit rate from PCLK1, set by the RCC).
+// CAN2 shares CAN1's filter banks (CAN2SB in CAN1's FMR). Outputs 0-3 are TX,
+// RX0, RX1, SCE:
 // CAN1_TX/RX0/RX1/SCE_IRQn 19-22, CAN2_TX/RX0/RX1/SCE_IRQn 86-89.
 
-can1: CAN.STMCAN @ sysbus <0x40006400, +0x400>
+can1: CAN.STM32_bxCAN @ sysbus <0x40006400, +0x400>
+    pclkHz: 4000000
     [0-3] -> nvic@[19-22]
 
-can2: CAN.STMCAN @ sysbus <0x40006800, +0x400>
+can2: CAN.STM32_bxCAN @ sysbus <0x40006800, +0x400>
     master: can1
+    pclkHz: 4000000
     [0-3] -> nvic@[86-89]
 
 // --- SPI (SPIx_BASE): the L4's SPI has the L5's data FIFO and DS field.

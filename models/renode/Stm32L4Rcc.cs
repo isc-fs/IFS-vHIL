@@ -453,6 +453,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     sel == 0 ? Pclk(8) : sel == 1 ? LsiHz : sel == 2 ? HsiHz : lseFrequency);
             }
             SetRate("wwdg", Pclk(8));
+            SetRate("can1", Pclk(8));   // bxCAN bit timing on PCLK1
+            SetRate("can2", Pclk(8));
             if(machine.TryGetByName<STM32L4_ADC_Common>("sysbus.adcCommon", out var adcCommon))
             {
                 var key = (AdcKernel(), hclk);
@@ -519,6 +521,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                         t.Frequency = (ulong)hz;
                     }
                 }
+                break;
+            case Antmicro.Renode.Peripherals.CAN.STM32_bxCAN can:
+                can.PclkHz = hz;
                 break;
             case STM32F7_USART usart:
                 // Its kernel clock only scales BaudRate (the receiver

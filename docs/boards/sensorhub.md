@@ -36,7 +36,7 @@ is no firmware yet**. Open hardware questions are in the repo's
 |---|---|---|
 | Firmware | **Missing.** Prerequisite. | The vHIL runs the car's image (invariant 1). Bring-up can start once the firmware repo has CubeMX init + a heartbeat on CAN. |
 | Platform `stm32l496` | **Started** ([below](#platform-stm32l496)) | Renode 1.17 ships no STM32L4 platform. The closest is `stm32l552.repl` (same peripheral generation): GPIO `STM32_GPIOPort`, USART `STM32F7_USART`, SPI `STM32SPI`, timers `STM32_Timer`, IWDG, ADC `STM32L5_ADC`. Every address and IRQ from ST's `stm32l496xx.h` and RM0351 (invariant 10). The L4's I2C is the same IP as the F7's (check Renode's `STM32F7_I2C`), its DMA has CSELR and no DMAMUX, and its RCC is different. |
-| bxCAN on the bus model | To build | Renode has a bxCAN model (`STMCAN`), but the vHIL's bus model takes controllers that implement `IVhilCanController`. Today only the H7 FDCAN does (`models/renode/Stm32H7Fdcan.cs`). Until then, `arbitration: false` (Renode's hub) gets frames moving. |
+| bxCAN on the bus model | **Done** at platform level | `models/renode/Stm32BxCan.cs`: Renode's `STMCAN` (filters, RX FIFOs) with the transmit side on the vHIL's arbitrated bus (`IVhilCanController`, as the H7 FDCAN). Next: the board's system entry puts CAN1/CAN2 on a bus. |
 | BMI088 | Reuse + extend | `models/renode/Bmi088.cs` is I2C-only (the MainLite's). The SensorHub wires it on SPI: add the SPI interface (one CS per die, the accelerometer's dummy byte on reads, datasheet ch. 6). |
 | ADC inputs | To check | Analog sources (`catalog/models/*` with backend `analog`) drive pins already; the L4 ADC model must deliver them. |
 | Pin model | Later | Optional at first. `vhil/pin_model.py` reads only the MainLite schema. |
@@ -82,7 +82,7 @@ Every address and IRQ comes from ST's `stm32l496xx.h`
 | DMA1/2 | Renode `STM32LDMA` + `Stm32L4DmaCselr.cs` (new): every request (ADC1–3, DAC, SPI1–3, I2C1–4 RX, U(S)ART1–5 RX, SDMMC1) reaches the DMA1 or DMA2 channel whose CSELR selects it, or is dropped | Tested |
 | DBGMCU | `Stm32L4Dbgmcu.cs` (new): DEV_ID 0x461 | Tested |
 | GPIO A–I, EXTI 0–22 | Renode; ports reach EXTI through SYSCFG; lines 18/20 RTC alarm/wake-up, 21/22 COMP1/2 | Tested |
-| CAN1/CAN2 | Renode `STMCAN` (bxCAN, shared filters) | Placed; not on the vHIL bus model yet (M2) |
+| CAN1/CAN2 | `Stm32BxCan.cs` (new, on Renode's `STMCAN`: filters shared with CAN2, RX FIFOs): on the arbitrated bus, mailboxes offered by ID or request order (TXFP), bus-timed completion (TSR), NART, ABRQ, TX interrupt, ESR TEC/LEC/EWGF/EPVF from the bus; bit rate from BTR on PCLK1; BTR readable in any mode | Tested |
 | SPI1–3, I2C1–4, USART1–3, UART4/5, LPUART1 | Renode L5 SPI, the vHIL's I2C master, F7 USART; DMA requests wired | Placed |
 | TIM1–8, 15–17, LPTIM1/2, IWDG, WWDG | Renode; IWDG on the 32 kHz LSI, WWDG on PCLK1. TRGO (update event, CR2.MMS kept by `VhilTimerTrgo`) triggers the ADC and DAC | Tested |
 | ADC1/2/3 + common | `Stm32L4Adc.cs` (new, on Renode's L5 ADC): DEEPPWD, ADCAL completes at once, CALFACT; clock from CCR.CKMODE/PRESC; conversion time from SMPx and RES; timer TRGO triggers (EXTSEL); dual mode (ADC1 starts ADC2, CDR) | Tested |
@@ -95,6 +95,8 @@ loads the platform with no firmware (marker `platform_stm32l496`, see
 [`docs/ci.md`](../ci.md)) and checks a CubeMX start-up's registers: the HSE →
 PLL → 80 MHz sequence and the rates it sets, wait-state read-back, peripheral
 resets, every reset cause (the watchdogs by running out), the backup domain,
+bxCAN on an arbitrated bus with a probe (send, priority, NART, error
+counting, receive through filters, abort, Tx interrupt),
 EXTI port selection, DMA request routing, SYSCFG, the ADC (calibration,
 clock, timing, triggers, dual mode), the analog blocks, QUADSPI
 memory-mapped mode, and the flash (keys, erase, programming errors, fast
@@ -131,8 +133,9 @@ Each milestone ends in something you can run and a PR into `dev`.
    peripheral guard lists nothing unexplained.
    *Done when:* the firmware reaches its main loop and toggles the heartbeat
    (PB13) at its real period.
-2. **M2: on the CAN bus.** First on the hub (`arbitration: false`), then
-   bxCAN implementing `IVhilCanController`.
+2. **M2: on the CAN bus.** *(bxCAN on the arbitrated bus done at platform
+   level; needs the board and system entries.)* bxCAN implementing
+   `IVhilCanController`.
    *Done when:* a test sees the board's frames at 1 Mbit/s bit time, ACKed by
    another node.
 3. **M3: sensors.** BMI088 over SPI, ADC_IN1..4 from analog sources.
