@@ -165,6 +165,8 @@ def router(settings, workspace, fw_dir: Optional[Path] = None) -> APIRouter:
         run = store.get(run_id)
         if run is None:
             raise HTTPException(404, f"no run {run_id}")
-        return run_contract(run, workspace.root, fw)
+        # An imported run's is its bundle's (vhil/server/bundle.py).
+        from vhil.server.bundle import contract_of
+        return contract_of(run, settings.results, workspace.root, fw)
 
     return r

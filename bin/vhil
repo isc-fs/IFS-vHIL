@@ -12,6 +12,8 @@
 #   vhil scenario [pytest args] every committed scenario (tests/scenarios)
 #   vhil ui [--no-browser]      the app and the system editor, opened in the browser
 #   vhil stop                   stop the app's containers (the VM keeps running)
+#   vhil export <id> [-o file]  a finished run of the app as a .vhilrun file, to share
+#   vhil import <file>          a teammate's .vhilrun as a run of your app
 #   vhil version                this checkout's commit and image keys
 #   vhil <other> [args]         anything scripts/vhil-docker.sh runs (shell, fw, pull, ...)
 #
@@ -153,6 +155,8 @@ scenario|scenarios) exec "$wrapper" scenarios "$@" ;;
 ui)
     [ "${1:-}" = --no-browser ] || open_when_up &
     exec "$wrapper" editor ;;
+export) exec "$wrapper" export-run "$@" ;;
+import) exec "$wrapper" import-run "$@" ;;
 stop) "${docker[@]}" compose -f "$repo/docker/compose.yaml" down ;;
 version)
     echo "vhil $(git -C "$repo" describe --tags --always --dirty 2>/dev/null || echo unknown)"
