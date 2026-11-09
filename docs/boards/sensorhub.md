@@ -74,42 +74,52 @@ Every address and IRQ comes from ST's `stm32l496xx.h`
 |---|---|---|
 | Core | Cortex-M4F, 4 priority bits, 80 MIPS | Placed |
 | Memory | 1 MB flash (also at 0, starts erased), SRAM1 256 KB, SRAM2 64 KB at 0x10000000 and 0x20040000, engineering data (flash size 0x400) | Placed |
-| RCC | `Stm32L4Rcc.cs` (new): ready flags, clock switch, in-use clock protected, clock IRQ, backup domain behind DBP. Clock tree (MSI/HSI16/HSE/PLL, AHB/APB prescalers) retimes the SysTick, timers (x2 when APB prescaler > 1), U(S)ARTs and LPTIMs by CCIPR. xxxRSTR bits reset their peripherals (GPIO keeps outside levels). Crystals from the board: HSE 16 MHz, no LSE | Tested |
-| Reset causes | `Stm32L4ResetFlags.cs` (new, `vhil_reset_<board>`): power-on, pin, software (AIRCR), IWDG, WWDG, OBL_LAUNCH into RCC_CSR | Tested |
+| RCC | `Stm32L4Rcc.cs` (new): ready flags, clock switch, in-use clock protected, clock IRQ, backup domain behind DBP. Clock tree (MSI/HSI16/HSE/PLL/PLLSAI1/2, AHB/APB prescalers) retimes the SysTick, timers (x2 when APB prescaler > 1), U(S)ARTs and LPTIMs by CCIPR, the ADC kernel clock (CCIPR.ADCSEL), the WWDG (PCLK1) and the RTC (BDCR.RTCSEL). xxxRSTR bits reset their peripherals (GPIO keeps outside levels). Crystals from the board: HSE 16 MHz, no LSE | Tested |
+| Reset causes | `Stm32L4ResetFlags.cs` (new, `vhil_reset_<board>`): power-on, pin, software (AIRCR), IWDG (run out, or refreshed above its window), WWDG (run out, refreshed outside its window or with T6 clear), OBL_LAUNCH into RCC_CSR; each told apart by the event that resets | Tested |
 | PWR | `Stm32L4Pwr.cs` (new): DBP, VOS (VOSF 0), LPR/REGLPF | Tested |
-| FLASH | `Stm32L4Flash.cs` (new): ACR read-back, keys, page and bank erase on two 512 KB banks, option bytes that survive reset. With PG: PROGERR, PGAERR, SIZERR, WRPERR, PGSERR, each undoing the store; WRP refuses erase too | Tested |
-| DMA1/2 | Renode `STM32LDMA` + `Stm32L4DmaCselr.cs` (new): a request reaches its channel only when CSELR selects it | Tested |
+| FLASH | `Stm32L4Flash.cs` (new): ACR read-back, keys, page and bank erase on two 512 KB banks, option bytes that survive reset. While unlocked every CPU store is checked: PROGERR, PGAERR, SIZERR, WRPERR, PGSERR (a store with neither PG nor FSTPG), each undoing the store. Fast programming (FSTPG, 256-byte rows, FASTERR). EOP/OPERR/RDERR interrupts (EOPIE, ERRIE, RDERRIE). WRP and PCROP refuse program and erase; a data read in a PCROP area sets RDERR | Tested |
+| SYSCFG | `Stm32L4Syscfg.cs` (new): EXTICR routing, CFGR1 (FWDIS clear-only), SRAM2 erase behind the SKR key, SRAM2 page write protection (stores undone), CFGR2, MEMRMP stored | Tested |
+| DMA1/2 | Renode `STM32LDMA` + `Stm32L4DmaCselr.cs` (new): every request (ADC1–3, DAC, SPI1–3, I2C1–4 RX, U(S)ART1–5 RX, SDMMC1) reaches the DMA1 or DMA2 channel whose CSELR selects it, or is dropped | Tested |
 | DBGMCU | `Stm32L4Dbgmcu.cs` (new): DEV_ID 0x461 | Tested |
-| GPIO A–I, SYSCFG, EXTI 0–15 | Renode; ports reach EXTI through SYSCFG's EXTICR | Tested |
+| GPIO A–I, EXTI 0–22 | Renode; ports reach EXTI through SYSCFG; lines 18/20 RTC alarm/wake-up, 21/22 COMP1/2 | Tested |
 | CAN1/CAN2 | Renode `STMCAN` (bxCAN, shared filters) | Placed; not on the vHIL bus model yet (M2) |
-| SPI1–3, I2C1–4, USART1–3, UART4/5, LPUART1 | Renode L5 SPI, the vHIL's I2C master, F7 USART | Placed |
-| TIM1–8, 15–17, LPTIM1/2, IWDG, WWDG | Renode; IWDG on the 32 kHz LSI, WWDG on PCLK1 at the reset clock | Placed; rates tested |
-| ADC1/2/3 + common | `Stm32L4Adc.cs` (new, on Renode's L5 ADC): DEEPPWD, ADCAL completes at once, CALFACT, CCR; DMA through DMA1 CSELR ch1–3 | Tested |
-| RTC, SDMMC1, QUADSPI | Renode F4 RTC, F4/F7 SDMMC, H7 QUADSPI (indirect mode) | Placed |
+| SPI1–3, I2C1–4, USART1–3, UART4/5, LPUART1 | Renode L5 SPI, the vHIL's I2C master, F7 USART; DMA requests wired | Placed |
+| TIM1–8, 15–17, LPTIM1/2, IWDG, WWDG | Renode; IWDG on the 32 kHz LSI, WWDG on PCLK1. TRGO (update event, CR2.MMS kept by `VhilTimerTrgo`) triggers the ADC and DAC | Tested |
+| ADC1/2/3 + common | `Stm32L4Adc.cs` (new, on Renode's L5 ADC): DEEPPWD, ADCAL completes at once, CALFACT; clock from CCR.CKMODE/PRESC; conversion time from SMPx and RES; timer TRGO triggers (EXTSEL); dual mode (ADC1 starts ADC2, CDR) | Tested |
+| DAC1, OPAMP1/2, COMP1/2, VREFBUF | `Stm32L4Analog.cs` (new): DAC holding/output registers, software and timer triggers, noise/triangle waves, DMA; OPAMP PGA and follower; COMP against VREFINT fractions or the DAC, output on EXTI; VREFBUF 2.048/2.5 V | Tested |
+| RTC, SDMMC1, QUADSPI | Renode F4 RTC (at RTCCLK), F4/F7 SDMMC, H7 QUADSPI; memory-mapped mode maps the attached flash at 0x90000000 (`Stm32L4QuadSpiMap.cs`) | Tested |
 | CRC, RNG | Renode | Placed |
 
 Tests: [`tests/sim/test_stm32l496_platform.py`](../../tests/sim/test_stm32l496_platform.py)
 loads the platform with no firmware (marker `platform_stm32l496`, see
 [`docs/ci.md`](../ci.md)) and checks a CubeMX start-up's registers: the HSE →
 PLL → 80 MHz sequence and the rates it sets, wait-state read-back, peripheral
-resets, every reset cause, the backup domain, EXTI port selection, CSELR, ADC
-calibration, flash keys, erase, programming errors (CPU stores from a small
-program in SRAM) and option bytes.
+resets, every reset cause (the watchdogs by running out), the backup domain,
+EXTI port selection, DMA request routing, SYSCFG, the ADC (calibration,
+clock, timing, triggers, dual mode), the analog blocks, QUADSPI
+memory-mapped mode, and the flash (keys, erase, programming errors, fast
+programming, interrupts, PCROP, option bytes; CPU stores from a small
+program in SRAM).
 
 Known gaps, none needed by the SensorHub so far:
 
-- **Not placed:** DAC, OPAMP, COMP, SAI, USB OTG, DFSDM, LCD, TSC, SWPMI,
-  DCMI, DMA2D, FMC. Renode has no model of them; a firmware that touches one
-  is stopped by the peripheral guard.
-- **Rates not from the clock tree:** I2C, ADC and SAI kernel clocks, WWDG
-  (fixed at the reset clock), RTC (its own fixed rate). The core's
-  instruction rate is `cpu.mips`, as on every platform.
-- **Not modelled:** ADC dual mode and conversion timing from CKMODE/PRESC;
-  QUADSPI memory-mapped mode; the alternative DMA channel of a request (each
-  requester is wired to one); Renode's SPI/USART/I2C never ask for DMA; a
-  flash store with PG clear lands unchecked; flash error interrupts, PCROP,
-  fast programming; both watchdogs started and one fires reads as IWDG;
-  SYSCFG registers other than EXTICR.
+- **Not placed:** SAI1/2, USB OTG FS, DFSDM1, LCD, TSC, SWPMI1, DCMI, DMA2D,
+  FMC. Renode has no model of them and the SensorHub doesn't use them; a
+  firmware that touches one is stopped by the peripheral guard.
+- **Timing:** I2C transfers take no bus time (so no I2C kernel clock). The
+  core's instruction rate is `cpu.mips`, as on every platform.
+- **Partly modelled:**
+  - SYSCFG MEMRMP: stored, but flash stays at 0.
+  - DAC trigger EXTI9; ADC triggers from timer compare events and EXTI11;
+    TRGO sources other than the update event.
+  - ADC interleaved and alternate-trigger dual modes run as simultaneous.
+  - The DAC output does not loop back to the ADC pins.
+  - U(S)ART TX DMA (Renode's USART asks only for RX); LPUART1 and QUADSPI
+    DMA requests are not wired.
+  - A PCROP data read sets RDERR but returns the data.
+  - A store to flash while FLASH_CR is locked lands; `checkAllStores: true`
+    on `flashController` checks it, at a speed cost.
+  - FWRSTF and LPWRRSTF (no firewall or low-power modes).
 
 ## Plan
 

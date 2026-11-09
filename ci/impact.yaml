@@ -175,8 +175,8 @@ rules:
   - name: I2C and the BMI088 (Stm32H7I2c.cs is the STM32L496's I2C too)
     paths: [models/renode/Stm32H7I2c.cs, models/renode/Bmi088.cs, catalog/models/bmi088.yaml]
     select: {markers: [i2c, platform_stm32l496], devices: [bmi088]}
-  - name: the STM32L496's own models (RCC, PWR, FLASH, DMA_CSELR, DBGMCU; the SensorHub's MCU)
-    paths: ['models/renode/Stm32L4*.cs']
+  - name: the STM32L496's own models (RCC, PWR, FLASH, SYSCFG, DMA routing, ADC, analog, QUADSPI map; the SensorHub's MCU)
+    paths: ['models/renode/Stm32L4*.cs', models/renode/VhilMemoryHooks.cs]
     select: {markers: [platform_stm32l496]}
   - name: the nRF24 radio
     paths: [models/renode/Nrf24l01p.cs, catalog/models/nrf24l01p.yaml]

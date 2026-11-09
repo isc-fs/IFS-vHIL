@@ -7,9 +7,12 @@ description: >-
   DMA, timers, bxCAN CAN1/CAN2, IWDG, CRC, RNG), the vHIL's I2C master, and
   new models of the L4's RCC (ready flags, clock switch, clock tree that
   retimes the SysTick, timers, UARTs and LPTIMs, peripheral resets, reset
-  causes), PWR, FLASH (erase, programming checks, write protection, option
-  bytes), DMA_CSELR request routing, DBGMCU and the ADC's calibration and
-  common registers; RTC, WWDG, LPTIM1/2, SDMMC1 and QUADSPI from Renode.
+  causes, ADC/RTC/WWDG kernel clocks), PWR, FLASH (erase, programming and
+  fast programming, error interrupts, write protection, PCROP, option
+  bytes), SYSCFG (SRAM2 erase and write protection), DMA request routing
+  through CSELR, DBGMCU, the ADC (calibration, conversion timing, timer
+  triggers, dual mode), DAC, OPAMP, COMP and VREFBUF; RTC, WWDG, LPTIM1/2,
+  SDMMC1 and QUADSPI (with memory-mapped mode) from Renode.
   Addresses and IRQs from ST's stm32l496xx.h.
 backend: renode
 renode:
@@ -21,16 +24,23 @@ renode:
     - models/renode/Stm32H7I2c.cs
     # PWR before the RCC, which reads PWR_CR1.DBP for the backup domain.
     - models/renode/Stm32L4Pwr.cs
+    # The one owner of the CPU's memory-access hook (flash store checks,
+    # SRAM2 write protection), before the models that use it.
+    - models/renode/VhilMemoryHooks.cs
+    - models/renode/Stm32L4Syscfg.cs
+    # The DMA request router before the ADCs and DAC, which ask it for DMA;
+    # the analog block (DAC, timer TRGO) before the ADC, which uses its TRGO.
+    - models/renode/Stm32L4DmaCselr.cs
+    - models/renode/Stm32L4Analog.cs
+    - models/renode/Stm32L4Adc.cs
     - models/renode/Stm32L4Rcc.cs
     - models/renode/Stm32L4Flash.cs
-    # CSELR before the ADCs, which ask it for DMA.
-    - models/renode/Stm32L4DmaCselr.cs
-    - models/renode/Stm32L4Adc.cs
     - models/renode/Stm32L4Dbgmcu.cs
     # One owner for the bus hooks (NVIC AIRCR, FLASH_CR, IWDG/WWDG), then the
     # reset causes it feeds to the RCC's CSR.
     - models/renode/VhilBusHooks.cs
     - models/renode/Stm32L4ResetFlags.cs
+    - models/renode/Stm32L4QuadSpiMap.cs
   # After each board's platform loads; {board} is its machine name. The
   # reset causes (vhil_reset_<board>, the broker's PowerOn), then the
   # engineering data the HAL reads.
@@ -39,6 +49,8 @@ renode:
   # 0x1FFF7500 PKG [4:0] 0 is LQFP64 (RM0351 "Package data register").
   setup:
     - emulation CreateVhilL4ResetFlags "vhil_reset_{board}" "{board}"
+    - emulation CreateVhilL4QuadSpiMap "{board}"
+    - emulation CreateVhilL4TimerTrgo "{board}"
     - sysbus WriteWord 0x1FFF75E0 0x0400
     - sysbus WriteWord 0x1FFF7500 0x0000
   # Every reset clears BASEPRI's masking, which Renode 1.17's CPU reset does

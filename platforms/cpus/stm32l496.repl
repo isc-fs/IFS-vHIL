@@ -78,16 +78,26 @@ iwdg: Timers.STM32_IndependentWatchdog @ sysbus 0x40003000
     frequency: 32000
 
 // --- EXTI (EXTI_BASE). Its first bank (IMR1 0x00 .. PR1 0x14) has the F4's
-// layout. GPIO lines 0-15: EXTI0..4_IRQn 6-10, EXTI9_5_IRQn 23,
-// EXTI15_10_IRQn 40. Each port reaches EXTI through SYSCFG, which passes on
+// layout; lines 0-22 are placed. GPIO lines 0-15: EXTI0..4_IRQn 6-10,
+// EXTI9_5_IRQn 23, EXTI15_10_IRQn 40. Line 18 RTC alarm (RTC_Alarm_IRQn 41),
+// 20 RTC wake-up (RTC_WKUP_IRQn 3), 21/22 COMP1/COMP2 (COMP_IRQn 64), as
+// RM0351's "EXTI lines connections" table. Lines 16 (PVD), 17 (OTG FS
+// wake-up) and 19 (tamper) have no source in the emulation. Each port reaches EXTI through SYSCFG, which passes on
 // line n of the port SYSCFG_EXTICR selects for it (port A 0 .. port I 8,
 // reset port A), as on silicon.
 
 exti: IRQControllers.STM32F4_EXTI @ sysbus 0x40010400
-    numberOfOutputLines: 16
+    numberOfOutputLines: 23
     [0-4] -> nvic@[6-10]
     [5-9] -> nvicInput23@[0-4]
     [10-15] -> nvicInput40@[0-5]
+    18 -> nvic@41
+    20 -> nvic@3
+    [21-22] -> nvicInput64@[0-1]
+
+nvicInput64: Miscellaneous.CombinedInput @ none
+    numberOfInputs: 2
+    -> nvic@64
 
 nvicInput23: Miscellaneous.CombinedInput @ none
     numberOfInputs: 5
@@ -97,9 +107,10 @@ nvicInput40: Miscellaneous.CombinedInput @ none
     numberOfInputs: 6
     -> nvic@40
 
-// SYSCFG_BASE: EXTICR1-4 route the ports to EXTI. Its other registers
-// (MEMRMP, CFGR1/2, SCSR, SWPR, SKR) are not modelled.
-syscfg: Miscellaneous.STM32_SYSCFG @ sysbus 0x40010000
+// SYSCFG_BASE (Stm32L4Syscfg.cs): EXTICR1-4 route the ports to EXTI; SRAM2
+// erase and write protection; MEMRMP, CFGR1/2 stored.
+syscfg: Miscellaneous.STM32L4_SYSCFG @ sysbus <0x40010000, +0x30>
+    sram2: sram2
     [0-15] -> exti@[0-15]
 
 // --- GPIO (GPIOx_BASE, AHB2). Reset values from RM0351 "GPIO registers":
@@ -164,21 +175,21 @@ gpioPortI: GPIOPort.STM32_GPIOPort @ sysbus <0x48002000, +0x400>
 dma1: DMA.STM32LDMA @ sysbus <0x40020000, +0xA8>
     [0-6] -> nvic@[11-17]
 
-// The ADCs ask for DMA through DMA1's CSELR (Stm32L4DmaCselr.cs): ADC1, 2, 3
-// are request 0 on channels 1, 2, 3 (RM0351 "DMA1 requests for each
-// channel").
 dma1Cselr: DMA.STM32L4_DMA_CSELR @ sysbus 0x400200A8
-    dma: dma1
-    request1: 0
-    request2: 0
-    request3: 0
 
 dma2: DMA.STM32LDMA @ sysbus <0x40020400, +0xA8>
     [0-4] -> nvic@[56-60]
     [5-6] -> nvic@[68-69]
 
 dma2Cselr: DMA.STM32L4_DMA_CSELR @ sysbus 0x400204A8
-    dma: dma2
+
+// Every peripheral's DMA request goes through here to the channel whose
+// CSELR selects it (Stm32L4DmaCselr.cs lists the request lines).
+dmaRequests: DMA.STM32L4_DmaRequests @ none
+    dma1: dma1
+    dma1Cselr: dma1Cselr
+    dma2: dma2
+    dma2Cselr: dma2Cselr
 
 // --- CAN (CAN1_BASE, CAN2_BASE): bxCAN. CAN2 shares CAN1's filter banks
 // (CAN2SB in CAN1's FMR). Outputs 0-3 are TX, RX0, RX1, SCE:
@@ -192,19 +203,26 @@ can2: CAN.STMCAN @ sysbus <0x40006800, +0x400>
     [0-3] -> nvic@[86-89]
 
 // --- SPI (SPIx_BASE): the L4's SPI has the L5's data FIFO and DS field.
+// DMA requests (RX, TX) to dmaRequests; so for every peripheral below.
 // SPI1_IRQn 35, SPI2_IRQn 36, SPI3_IRQn 51.
 
 spi1: SPI.STM32SPI @ sysbus 0x40013000
     series: STM32Series.L5
     IRQ -> nvic@35
+    DMAReceive -> dmaRequests@15
+    DMASend -> dmaRequests@16
 
 spi2: SPI.STM32SPI @ sysbus 0x40003800
     series: STM32Series.L5
     IRQ -> nvic@36
+    DMAReceive -> dmaRequests@17
+    DMASend -> dmaRequests@18
 
 spi3: SPI.STM32SPI @ sysbus 0x40003C00
     series: STM32Series.L5
     IRQ -> nvic@51
+    DMAReceive -> dmaRequests@19
+    DMASend -> dmaRequests@20
 
 // --- I2C (I2Cx_BASE): the I2C v2 IP of the F7/H7. I2Cn_EV_IRQn / _ER_IRQn:
 // I2C1 31/32, I2C2 33/34, I2C3 72/73, I2C4 83/84.
@@ -212,18 +230,22 @@ spi3: SPI.STM32SPI @ sysbus 0x40003C00
 i2c1: I2C.STM32H7_I2C @ sysbus 0x40005400
     EventInterrupt -> nvic@31
     ErrorInterrupt -> nvic@32
+    DmaReceive -> dmaRequests@6
 
 i2c2: I2C.STM32H7_I2C @ sysbus 0x40005800
     EventInterrupt -> nvic@33
     ErrorInterrupt -> nvic@34
+    DmaReceive -> dmaRequests@8
 
 i2c3: I2C.STM32H7_I2C @ sysbus 0x40005C00
     EventInterrupt -> nvic@72
     ErrorInterrupt -> nvic@73
+    DmaReceive -> dmaRequests@10
 
 i2c4: I2C.STM32H7_I2C @ sysbus 0x40008400
     EventInterrupt -> nvic@83
     ErrorInterrupt -> nvic@84
+    DmaReceive -> dmaRequests@12
 
 // --- USART/UART/LPUART (the F7's USART IP), at the reset clock 4 MHz until
 // the RCC retimes them.
@@ -233,22 +255,27 @@ i2c4: I2C.STM32H7_I2C @ sysbus 0x40008400
 usart1: UART.STM32F7_USART @ sysbus 0x40013800
     frequency: 4000000
     IRQ -> nvic@37
+    ReceiveDmaRequest -> dmaRequests@21
 
 usart2: UART.STM32F7_USART @ sysbus 0x40004400
     frequency: 4000000
     IRQ -> nvic@38
+    ReceiveDmaRequest -> dmaRequests@23
 
 usart3: UART.STM32F7_USART @ sysbus 0x40004800
     frequency: 4000000
     IRQ -> nvic@39
+    ReceiveDmaRequest -> dmaRequests@25
 
 uart4: UART.STM32F7_USART @ sysbus 0x40004C00
     frequency: 4000000
     IRQ -> nvic@52
+    ReceiveDmaRequest -> dmaRequests@27
 
 uart5: UART.STM32F7_USART @ sysbus 0x40005000
     frequency: 4000000
     IRQ -> nvic@53
+    ReceiveDmaRequest -> dmaRequests@29
 
 lpuart1: UART.STM32F7_USART @ sysbus 0x40008000
     frequency: 4000000
@@ -335,29 +362,29 @@ timer8: Timers.STM32_Timer @ sysbus 0x40013400
     initialLimit: 0xFFFF
 
 // --- ADC (ADC1/2/3_BASE, ADC123_COMMON_BASE; ADC1_2_IRQn 18, ADC3_IRQn 47):
-// the L5's ADC IP with the L4's calibration (Stm32L4Adc.cs). Each asks for
-// DMA through DMA1's CSELR on its channel (1, 2, 3; the model counts
-// channels from 1). Dual mode is not modelled.
+// the L5's ADC IP with the L4's calibration, conversion timing, timer
+// triggers and dual mode (Stm32L4Adc.cs). Each asks for DMA on its request
+// line (dmaChannel 1, 2, 3 of dmaRequests).
 
 adc1: Analog.STM32L4_ADC @ sysbus <0x50040000, +0x100>
     referenceVoltage: 3.3
     externalEventFrequency: 1000
     dmaChannel: 1
-    dmaPeripheral: dma1Cselr
+    dmaPeripheral: dmaRequests
     IRQ -> nvicInput18@0
 
 adc2: Analog.STM32L4_ADC @ sysbus <0x50040100, +0x100>
     referenceVoltage: 3.3
     externalEventFrequency: 1000
     dmaChannel: 2
-    dmaPeripheral: dma1Cselr
+    dmaPeripheral: dmaRequests
     IRQ -> nvicInput18@1
 
 adc3: Analog.STM32L4_ADC @ sysbus <0x50040200, +0x100>
     referenceVoltage: 3.3
     externalEventFrequency: 1000
     dmaChannel: 3
-    dmaPeripheral: dma1Cselr
+    dmaPeripheral: dmaRequests
     IRQ -> nvic@47
 
 nvicInput18: Miscellaneous.CombinedInput @ none
@@ -367,6 +394,7 @@ nvicInput18: Miscellaneous.CombinedInput @ none
 adcCommon: Analog.STM32L4_ADC_Common @ sysbus <0x50040300, +0x100>
     adc1: adc1
     adc2: adc2
+    adc3: adc3
 
 // --- CRC (CRC_BASE), RNG (RNG_BASE; RNG_IRQn 80). The L4's CRC is the
 // F0/F7 one with a programmable polynomial and size (Renode's F7 platform
@@ -381,17 +409,16 @@ rng: Miscellaneous.STM32_RNG @ sysbus 0x50060800
     -> nvic@80
 
 // --- RTC (RTC_BASE; RTC_WKUP_IRQn 3, RTC_Alarm_IRQn 41): the F4's RTC IP
-// (calendar, alarms A/B, wake-up timer, backup registers). On silicon the
-// wake-up and alarm events reach the NVIC through EXTI lines 20 and 18; here
-// they go straight to it.
+// (calendar, alarms A/B, wake-up timer, backup registers), clocked at RTCCLK
+// by the RCC. The alarm and wake-up events reach the NVIC through EXTI lines
+// 18 and 20, as on silicon.
 
 rtc: Timers.STM32F4_RTC @ sysbus 0x40002800
-    AlarmIRQ -> nvic@41
-    WakeupIRQ -> nvic@3
+    AlarmIRQ -> exti@18
+    WakeupIRQ -> exti@20
 
 // --- WWDG (WWDG_BASE; WWDG_IRQn 0): the H7's window watchdog (the same IP:
-// CR, CFR, SR), counted on PCLK1 at the reset clock. Its rate is not retimed
-// by the RCC.
+// CR, CFR, SR), counted on PCLK1 (retimed by the RCC).
 
 wwdg: Timers.STM32H7_SystemWindowWatchdog @ sysbus <0x40002C00, +0x400>
     apbFrequency: 4000000
@@ -413,15 +440,40 @@ lptim2: Timers.STM32L0_LpTimer @ sysbus 0x40009400
 
 sdmmc1: SD.STM32FSDMMC @ sysbus 0x40012800
     IRQ -> nvic@49
+    DMAReceive -> dmaRequests@14
 
-// --- QUADSPI (QSPI_R_BASE; QUADSPI_IRQn 71): the H7's QUADSPI IP, indirect
-// mode. Memory-mapped mode (QSPI_BASE 0x90000000) is not modelled; a flash
-// is attached by the board, not here.
+// --- QUADSPI (QSPI_R_BASE; QUADSPI_IRQn 71): the H7's QUADSPI IP. In
+// memory-mapped mode the attached flash answers at QSPI_BASE 0x90000000
+// (Stm32L4QuadSpiMap.cs). A flash is attached by the board, not here.
 
 quadspi: SPI.STM32H7_QuadSPI @ sysbus 0xA0001000
     IRQ -> nvic@71
 
-// Not placed: DAC1, OPAMP1/2, COMP, SAI1/2, USB OTG FS, DFSDM, LCD, TSC,
-// SWPMI, DCMI, DMA2D, FMC. Renode has no model of them and the SensorHub does
-// not use them; a firmware that touches one stops on the vHIL's peripheral
-// guard (docs/boards/sensorhub.md).
+// --- Analog (Stm32L4Analog.cs): DAC1 (DAC_BASE; its underrun interrupt
+// shares TIM6_DAC_IRQn 54 and never fires), OPAMP1/2, COMP1/2 (outputs on
+// EXTI lines 21/22), VREFBUF.
+
+dac1: Analog.STM32L4_DAC @ sysbus 0x40007400
+    referenceVoltage: 3.3
+    dmaRequests: dmaRequests
+
+opamp1: Analog.STM32L4_OPAMP @ sysbus <0x40007800, +0x10>
+    first: true
+
+opamp2: Analog.STM32L4_OPAMP @ sysbus <0x40007810, +0x10>
+    first: false
+
+comp1: Analog.STM32L4_COMP @ sysbus <0x40010200, +0x4>
+    dac: dac1
+    Output -> exti@21
+
+comp2: Analog.STM32L4_COMP @ sysbus <0x40010204, +0x4>
+    dac: dac1
+    Output -> exti@22
+
+vrefbuf: Analog.STM32L4_VREFBUF @ sysbus <0x40010030, +0x8>
+
+// Not placed: SAI1/2, USB OTG FS, DFSDM1, LCD, TSC, SWPMI1, DCMI, DMA2D, FMC.
+// Renode has no model of them and the SensorHub does not use them; a
+// firmware that touches one stops on the vHIL's peripheral guard
+// (docs/boards/sensorhub.md).

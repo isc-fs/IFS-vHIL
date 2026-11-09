@@ -34,7 +34,12 @@
 //   - the U(S)ARTs, at the kernel clock CCIPR selects (0 PCLK, 1 SYSCLK,
 //     2 HSI16, 3 LSE); USART1 is on APB2, the rest on APB1;
 //   - LPTIM1/2, at the kernel clock CCIPR selects (0 PCLK1, 1 LSI, 2 HSI16,
-//     3 LSE).
+//     3 LSE);
+//   - the WWDG, at PCLK1;
+//   - the RTC, at RTCCLK (BDCR.RTCSEL: LSE, LSI 32 kHz or HSE / 32). With
+//     RTCSEL 0 (no clock) or a missing LSE it keeps its last rate;
+//   - the ADCs' conversions, through the ADC common block (Stm32L4Adc.cs):
+//     CCIPR.ADCSEL 3 is SYSCLK, 1 and 2 the PLLSAI1/PLLSAI2 R outputs.
 // The MSI's rate is CR.MSIRANGE when CR.MSIRGSEL is set, CSR.MSISRANGE (1, 2,
 // 4 or 8 MHz) otherwise; MSIRANGE 0-11 is 100 kHz .. 48 MHz (RM0351 MSIRANGE
 // table). PLL R output = source / (PLLM + 1) * PLLN / (2 * (PLLR + 1)).
@@ -66,15 +71,16 @@
 //
 // Not modelled: MSI hardware auto-calibration from LSE (MSIPLLEN, stored),
 // the HSI48 recovery system (CRRCR.HSI48RDY follows HSI48ON), and the kernel
-// clocks of I2C, SAI, ADC and the 48 MHz domain (CCIPR is stored; their
-// models are not timed by it). The RTC and the IWDG run on their own rates
-// (LSE or LSI, fixed in the repl).
+// clocks of I2C (the I2C model's transfers take no time, so none applies)
+// and the 48 MHz domain (CCIPR is stored). The IWDG runs on the LSI (32 kHz,
+// fixed in the repl, as on silicon).
 //
 using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
+using Antmicro.Renode.Peripherals.Analog;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.GPIOPort;
 using Antmicro.Renode.Peripherals.IRQControllers;
@@ -360,6 +366,32 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
         }
 
+        // CCIPR.ADCSEL [29:28]: 1 PLLSAI1 R, 2 PLLSAI2 R, 3 SYSCLK, 0 none.
+        // PLLSAIx R = PLL input / (PLLM + 1) * PLLSAIxN / (2 * (PLLSAIxR + 1)),
+        // when the PLL is on and its R output enabled (PLLSAIxREN, bit 24).
+        private long AdcKernel()
+        {
+            switch((regs[CCIPR] >> 28) & 3)
+            {
+            case 1: return SaiR(PLLSAI1ON, regs[0x10]);
+            case 2: return SaiR(PLLSAI2ON, regs[0x14]);
+            case 3: return Sysclk();
+            default: return 0;
+            }
+        }
+
+        private long SaiR(uint enable, uint cfgr)
+        {
+            if(!PllReady(enable) || (cfgr & (1u << 24)) == 0)
+            {
+                return 0;
+            }
+            var m = ((regs[PLLCFGR] >> 4) & 7) + 1;
+            var n = (cfgr >> 8) & 0x7F;
+            var r = 2 * (((cfgr >> 25) & 3) + 1);
+            return PllInput() / m * n / r;
+        }
+
         private long Hclk()
         {
             var hpre = (int)((regs[CFGR] >> 4) & 0xF);
@@ -420,6 +452,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 SetRate(i == 0 ? "lptim1" : "lptim2",
                     sel == 0 ? Pclk(8) : sel == 1 ? LsiHz : sel == 2 ? HsiHz : lseFrequency);
             }
+            SetRate("wwdg", Pclk(8));
+            if(machine.TryGetByName<STM32L4_ADC_Common>("sysbus.adcCommon", out var adcCommon))
+            {
+                var key = (AdcKernel(), hclk);
+                if(key != adcClocks)
+                {
+                    adcClocks = key;
+                    adcCommon.SetClocks(key.Item1, key.Item2);
+                }
+            }
+            // RTCSEL [9:8]: 1 LSE, 2 LSI, 3 HSE / 32; 0 no clock.
+            var rtcsel = (bdcr >> 8) & 3;
+            SetRate("rtc", rtcsel == 1 ? lseFrequency : rtcsel == 2 ? LsiHz : rtcsel == 3 ? hseFrequency / 32 : 0);
         }
 
         private void SetRate(string name, long hz)
@@ -458,6 +503,21 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 if(LpTimerCompare?.GetValue(lptim) is LimitTimer compare)
                 {
                     compare.Frequency = (ulong)hz;
+                }
+                break;
+            case STM32H7_SystemWindowWatchdog wwdg:
+                if(WwdgTimer?.GetValue(wwdg) is LimitTimer counter)
+                {
+                    counter.Frequency = (ulong)hz;
+                }
+                break;
+            case STM32F4_RTC rtc:
+                foreach(var field in RtcTimers)
+                {
+                    if(field?.GetValue(rtc) is LimitTimer t)
+                    {
+                        t.Frequency = (ulong)hz;
+                    }
                 }
                 break;
             case STM32F7_USART usart:
@@ -569,6 +629,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private static readonly string[] Uarts = { "usart1", "usart2", "usart3", "uart4", "uart5", "lpuart1" };
         private static readonly FieldInfo TimerChannels =
             typeof(STM32_Timer).GetField("channels", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo WwdgTimer =
+            typeof(STM32H7_SystemWindowWatchdog).GetField("watchdogTimer", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo[] RtcTimers =
+        {
+            typeof(STM32F4_RTC).GetField("ticker", BindingFlags.NonPublic | BindingFlags.Instance),
+            typeof(STM32F4_RTC).GetField("fastTicker", BindingFlags.NonPublic | BindingFlags.Instance),
+            typeof(STM32F4_RTC).GetField("wakeupTimer", BindingFlags.NonPublic | BindingFlags.Instance),
+        };
         private static readonly FieldInfo LpTimerCompare =
             typeof(STM32L0_LpTimer).GetField("compareTimer", BindingFlags.NonPublic | BindingFlags.Instance);
         private static readonly FieldInfo UsartFrequency =
@@ -600,7 +668,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 [4] = new[] { "timer6" }, [5] = new[] { "timer7" }, [14] = new[] { "spi2" }, [15] = new[] { "spi3" },
                 [17] = new[] { "usart2" }, [18] = new[] { "usart3" }, [19] = new[] { "uart4" }, [20] = new[] { "uart5" },
                 [21] = new[] { "i2c1" }, [22] = new[] { "i2c2" }, [23] = new[] { "i2c3" }, [25] = new[] { "can1" },
-                [26] = new[] { "can2" }, [28] = new[] { "pwr" }, [31] = new[] { "lptim1" },
+                [26] = new[] { "can2" }, [28] = new[] { "pwr" }, [29] = new[] { "dac1" },
+                [30] = new[] { "opamp1", "opamp2" }, [31] = new[] { "lptim1" },
             },
             [0x3C] = new Dictionary<int, string[]>   // APB1RSTR2: LPUART1 0, I2C4 1, LPTIM2 5
             {
@@ -608,7 +677,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             },
             [0x40] = new Dictionary<int, string[]>   // APB2RSTR
             {
-                [0] = new[] { "syscfg" }, [10] = new[] { "sdmmc1" }, [11] = new[] { "timer1" }, [12] = new[] { "spi1" },
+                // SYSCFGRST resets SYSCFG, COMP and VREFBUF (RM0351 APB2RSTR).
+                [0] = new[] { "syscfg", "comp1", "comp2", "vrefbuf" }, [10] = new[] { "sdmmc1" }, [11] = new[] { "timer1" }, [12] = new[] { "spi1" },
                 [13] = new[] { "timer8" }, [14] = new[] { "usart1" }, [16] = new[] { "timer15" },
                 [17] = new[] { "timer16" }, [18] = new[] { "timer17" },
             },
@@ -659,6 +729,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly STM32L4_PWR pwr;
         private readonly long hseFrequency;
         private readonly long lseFrequency;
+        private (long, long) adcClocks;
         private uint sws;
         private uint cifr;
         private uint bdcr;

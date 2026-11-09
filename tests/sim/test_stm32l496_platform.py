@@ -37,6 +37,7 @@ CR, CFGR, PLLCFGR, CIER, CIFR, CICR, BDCR, CSR = (RCC + o for o in (0x00, 0x08, 
                                                                      0x90, 0x94))
 MSION, MSIRDY, HSION, HSIRDY = 1 << 0, 1 << 1, 1 << 8, 1 << 10
 HSEON, HSERDY, PLLON, PLLRDY = 1 << 16, 1 << 17, 1 << 24, 1 << 25
+CCIPR = RCC + 0x88
 PINRSTF, BORRSTF, RMVF = 1 << 26, 1 << 27, 1 << 23
 PWR_CR1, PWR_SR2 = PWR + 0x00, PWR + 0x14
 DBP, LPR, REGLPF, VOSF = 1 << 8, 1 << 14, 1 << 9, 1 << 10
@@ -73,7 +74,10 @@ class Platform:
     def get(self, peripheral: str, prop: str) -> int:
         return int(self.mon.execute(f"sysbus.{peripheral} {prop}").strip(), 16)
 
-    def run_program(self, stores, once: bool = False) -> None:
+    def value(self, command: str) -> str:
+        return self.mon.execute(command).strip()
+
+    def run_program(self, stores, once: bool = False, seconds: str = "0.001") -> None:
         """Run `stores` [(address, value, bytes)] as CPU stores (so they pass
         the CPU's memory hooks, which the monitor's bus writes do not), from
         the reset vector, then idle. `once`: skip them after a reset (a
@@ -111,7 +115,7 @@ class Platform:
             self.mon.execute(f"sysbus WriteDoubleWord {PROGRAM + pool_at + 4 * n:#x} {w:#x}")
         self.mon.execute("sysbus WriteDoubleWord 0x08000000 0x20010000")
         self.mon.execute(f"sysbus WriteDoubleWord 0x08000004 {PROGRAM | 1:#x}")
-        self.mon.execute('emulation RunFor "0.001"')
+        self.mon.execute(f'emulation RunFor "{seconds}"')
 
     def reset(self) -> None:
         self.mon.execute("machine Reset")
@@ -344,15 +348,33 @@ def test_a_software_reset_sets_sftrstf(l4):
     l4.run_program([(0xE000ED0C, 0x05FA0004, 4)], once=True)   # AIRCR.SYSRESETREQ
     assert l4.rd(CSR) & 0xFF000000 == SFTRSTF | PINRSTF
 
-def test_a_watchdog_reset_sets_its_flag(l4):
+def test_an_iwdg_that_runs_out_sets_iwdgrstf(l4):
     l4.wr(CSR, RMVF)
-    l4.wr(0x40003000, 0xCCCC)                           # IWDG_KR: start
-    l4.reset()
+    # HAL_IWDG_Init: start, unlock, PR /4, RLR 1, refresh: out after ~2 LSI
+    # ticks (250 us).
+    l4.run_program([(0x40003000, 0xCCCC, 4), (0x40003000, 0x5555, 4), (0x40003004, 0, 4),
+                    (0x40003008, 1, 4), (0x40003000, 0xAAAA, 4)], once=True, seconds="0.01")
     assert l4.rd(CSR) & 0xFF000000 == IWDGRSTF | PINRSTF
+
+
+def test_a_wwdg_that_runs_out_sets_wwdgrstf(l4):
     l4.wr(CSR, RMVF)
-    l4.wr(0x40002C00, 0xFF)                             # WWDG_CR.WDGA
-    l4.reset()
+    l4.run_program([(0x40002C00, 0xC1, 4)], once=True, seconds="0.01")   # WDGA, T 0x41
     assert l4.rd(CSR) & 0xFF000000 == WWDGRSTF | PINRSTF
+
+
+def test_a_wwdg_refresh_outside_the_window_sets_wwdgrstf(l4):
+    l4.wr(CSR, RMVF)
+    l4.run_program([(0x40002C04, 0x50, 4), (0x40002C00, 0xFF, 4), (0x40002C00, 0xFF, 4)],
+                   once=True, seconds="0.002")                         # W 0x50; refresh at T 0x7F
+    assert l4.rd(CSR) & 0xFF000000 == WWDGRSTF | PINRSTF
+
+
+def test_a_reset_with_no_cause_sets_pinrstf_only(l4):
+    l4.wr(CSR, RMVF)
+    l4.wr(0x40003000, 0xCCCC)                           # an IWDG running is not a cause
+    l4.reset()
+    assert l4.rd(CSR) & 0xFF000000 == PINRSTF
 
 
 def test_a_power_on_clears_the_flags_and_the_backup_domain(l4):
@@ -392,12 +414,26 @@ def test_exticr_selects_which_port_drives_a_line(l4):
 
 # --- DMA request selection ----------------------------------------------------------
 
-def test_cselr_passes_only_the_selected_request(l4):
-    l4.mon.execute("sysbus.dma1Cselr RequestTransfer 1")          # C1S 0: the ADC
-    assert l4.get("dma1Cselr", "Dropped") == 0
-    l4.wr(0x400200A8, 5)                                          # C1S 5: another request
-    l4.mon.execute("sysbus.dma1Cselr RequestTransfer 1")
-    assert l4.get("dma1Cselr", "Dropped") == 1
+def test_a_request_reaches_only_the_channel_whose_cselr_selects_it(l4):
+    # The router has no address; its test API is on the CSELRs.
+    def served(line):
+        return l4.get("dma1Cselr", f"RequestsServed {line}")
+    l4.mon.execute("sysbus.dma1Cselr RequestOnce 1")             # ADC1: DMA1 C1S 0 at reset
+    assert served(1) == 1 and l4.get("dma1Cselr", "RequestsDropped") == 0
+    l4.wr(0x400200A8, 5)                                         # C1S 5: something else
+    l4.wr(0x400204A8, 1 << 8)                                    # and DMA2 C3S 1
+    l4.mon.execute("sysbus.dma1Cselr RequestOnce 1")
+    assert l4.get("dma1Cselr", "RequestsDropped") == 1
+    l4.mon.execute("sysbus.dma1Cselr RaiseRequest 15 true")      # SPI1_RX: DMA1 ch2 needs C2S 1
+    assert served(15) == 0
+    l4.wr(0x400200A8, 1 << 4)
+    l4.mon.execute("sysbus.dma1Cselr RaiseRequest 15 true")       # counted on the rising level
+    assert served(15) == 1
+    l4.wr(0x400204A8, 4 << 8)                                    # or DMA2 ch3 with C3S 4
+    l4.wr(0x400200A8, 0)
+    l4.mon.execute("sysbus.dma1Cselr RaiseRequest 15 true")
+    assert served(15) == 2
+    assert l4.get("dma2Cselr", "RequestLines") == 30
 
 
 # --- ADC ---------------------------------------------------------------------------
@@ -464,3 +500,218 @@ def test_rtc_wwdg_lptim_sdmmc_and_quadspi_are_placed(l4):
                            ("STM32L0_LpTimer", 0x40009400), ("STM32FSDMMC", 0x40012800),
                            ("STM32H7_QuadSPI", 0xA0001000)):
         assert model in l4.mon.execute(f"sysbus WhatPeripheralIsAt {address:#x}"), hex(address)
+
+
+# --- SYSCFG ------------------------------------------------------------------------
+
+SYSCFG = 0x40010000
+
+
+def test_syscfg_cfgr1_resets_with_fwdis_and_fwdis_only_clears(l4):
+    assert l4.rd(SYSCFG + 0x04) == 0x7C000001
+    l4.wr(SYSCFG + 0x04, 0x7C000100)                    # BOOSTEN, FWDIS cleared
+    assert l4.rd(SYSCFG + 0x04) == 0x7C000100
+    l4.wr(SYSCFG + 0x04, 0x7C000101)
+    assert l4.rd(SYSCFG + 0x04) == 0x7C000100, "FWDIS cannot be set again"
+
+
+def test_sram2_erases_only_after_the_key(l4):
+    l4.wr(0x10000100, 0x1234)
+    l4.wr(SYSCFG + 0x18, 1)                             # SRAM2ER without the key
+    assert l4.rd(0x10000100) == 0x1234
+    l4.wr(SYSCFG + 0x24, 0xCA)
+    l4.wr(SYSCFG + 0x24, 0x53)
+    l4.wr(SYSCFG + 0x18, 1)
+    assert l4.rd(0x20040100) == 0
+    assert l4.rd(SYSCFG + 0x18) == 0, "SRAM2BSY clear"
+
+
+def test_a_write_protected_sram2_page_keeps_its_contents(l4):
+    l4.wr(0x10000400, 0xAAAA5555)                       # page 1
+    l4.run_program([(SYSCFG + 0x20, 1 << 1, 4),         # SWPR: page 1
+                    (0x10000400, 0, 4), (0x20040404, 0x77, 1), (0x10000000, 0x99, 4)])
+    assert l4.rd(0x10000400) == 0xAAAA5555
+    assert l4.rd(0x10000404) == 0
+    assert l4.rd(0x10000000) == 0x99, "page 0 is not protected"
+    assert l4.get("syscfg", "ProtectedWrites") == 2
+    l4.wr(SYSCFG + 0x20, 0)
+    assert l4.rd(SYSCFG + 0x20) == 1 << 1, "set-only until reset"
+
+
+# --- flash: errors, interrupts, PCROP, fast programming -----------------------------
+
+OPERR, FASTERR, RDERR = 1 << 1, 1 << 9, 1 << 14
+FSTPG, ERRIE, RDERRIE = 1 << 18, 1 << 25, 1 << 26
+FLASH_IRQ = 1 << 4                                      # FLASH_IRQn 4: ISPR0 bit 4
+
+
+def test_a_store_without_pg_is_a_sequence_error_and_undone(l4):
+    l4.run_program(UNLOCK + [(0x08010000, 0x1234, 4)])
+    assert l4.rd(FSR) & PGSERR
+    assert l4.rd(0x08010000) == 0xFFFFFFFF
+
+
+def test_an_error_with_errie_raises_operr_and_the_interrupt(l4):
+    l4.run_program(UNLOCK + [(FCR, PG | ERRIE, 4), (0x08010004, 0, 4)])   # PGAERR
+    assert l4.rd(FSR) & (PGAERR | OPERR) == PGAERR | OPERR
+    assert l4.rd(ISPR0) & FLASH_IRQ
+
+
+def test_fast_programming_writes_a_row_of_64_double_words(l4):
+    row = [(0x08020000 + 4 * i, i, 4) for i in range(64)]
+    l4.run_program(UNLOCK + [(FCR, MER1, 4), (FCR, MER1 | STRT, 4), (FCR, FSTPG, 4)] + row)
+    assert l4.rd(FSR) & 0xC3FA == 0
+    assert [l4.rd(0x08020000 + 4 * i) for i in (0, 1, 63)] == [0, 1, 63]
+
+
+def test_a_broken_fast_programming_row_is_fasterr_and_undone(l4):
+    l4.run_program(UNLOCK + [(FCR, FSTPG, 4), (0x08020000, 1, 4), (0x08020004, 2, 4),
+                             (0x08020010, 3, 4)])        # skips a word
+    assert l4.rd(FSR) & FASTERR
+    assert l4.rd(0x08020000) == 0xFFFFFFFF
+
+
+def test_pcrop_refuses_data_reads_programming_and_erase(l4):
+    for key in (0x45670123, 0xCDEF89AB):
+        l4.wr(KEYR, key)
+    for key in (0x08192A3B, 0x4C5D6E7F):
+        l4.wr(OPTKEYR, key)
+    # PCROP1SR/ER 0x24/0x28 in double words: 0x08010000-0x080107FF (page 32).
+    l4.wr(FLASH + 0x24, 0x10000 // 8)
+    l4.wr(FLASH + 0x28, 0x107F8 // 8)
+    l4.wr(FCR, OPTSTRT)
+    l4.reset()
+    l4.run_program(UNLOCK + [(FCR, PG | (1 << 26), 4), (0x08010000, 0, 4), (0x08010004, 0, 4)])
+    assert l4.rd(FSR) & WRPERR
+    assert l4.rd(0x08010000) == 0xFFFFFFFF
+    l4.wr(FSR, 0xFFFF)
+    l4.wr(FCR, PER | (32 << 3))
+    l4.wr(FCR, PER | (32 << 3) | STRT)
+    assert l4.rd(FSR) & WRPERR
+
+
+# --- ADC: clock, timing, triggers, dual mode -----------------------------------------
+
+ADC1, ADC2, ADC_COMMON = 0x50040000, 0x50040100, 0x50040300
+ADEN, ADSTART, ADVREGEN, EOC = 1 << 0, 1 << 2, 1 << 28, 1 << 2
+
+
+def _adc_on(l4, base):
+    l4.wr(base + 0x08, ADVREGEN)
+    l4.wr(base + 0x08, ADVREGEN | ADEN)
+    l4.wr(base + 0x30, 1 << 6)                          # SQR1: L 0, SQ1 channel 1
+
+
+def test_the_adc_clock_follows_ccipr_and_ccr(l4):
+    assert l4.get("adcCommon", "AdcClockHz") == 0, "ADCSEL 0: no clock"
+    l4.wr(CCIPR, 3 << 28)                               # ADCSEL SYSCLK (4 MHz)
+    assert l4.get("adcCommon", "AdcClockHz") == 4_000_000
+    l4.wr(ADC_COMMON + 0x08, 2 << 18)                   # PRESC /4
+    assert l4.get("adcCommon", "AdcClockHz") == 1_000_000
+    l4.wr(ADC_COMMON + 0x08, 3 << 16)                   # CKMODE 3: HCLK / 4
+    assert l4.get("adcCommon", "AdcClockHz") == 1_000_000
+    assert l4.get("adc1", "ClockHz") == 1_000_000
+
+
+def test_a_single_conversion_takes_its_sampling_and_conversion_time(l4):
+    l4.wr(CCIPR, 3 << 28)                               # 4 MHz
+    _adc_on(l4, ADC1)
+    l4.wr(ADC1 + 0x14, 7 << 3)                          # SMP1 640.5 cycles
+    l4.wr(ADC1 + 0x08, ADVREGEN | ADEN | ADSTART)
+    assert float(l4.value("sysbus.adc1 LastSequenceSeconds")) == pytest.approx(653 / 4e6)
+    assert l4.rd(ADC1 + 0x08) & ADSTART, "converting"
+    assert not l4.rd(ADC1) & EOC
+    l4.run_program([])
+    assert l4.rd(ADC1) & EOC
+
+
+def test_dual_mode_starts_the_slave_and_cdr_holds_both(l4):
+    l4.wr(CCIPR, 3 << 28)
+    _adc_on(l4, ADC1)
+    _adc_on(l4, ADC2)
+    l4.wr(ADC_COMMON + 0x08, 6)                         # DUAL: regular simultaneous
+    l4.wr(ADC1 + 0x08, ADVREGEN | ADEN | ADSTART)
+    l4.run_program([])
+    assert l4.rd(ADC1) & EOC and l4.rd(ADC2) & EOC
+    cdr = l4.rd(ADC_COMMON + 0x0C)
+    assert cdr == (l4.rd(ADC2 + 0x40) << 16) | l4.rd(ADC1 + 0x40)
+
+
+def test_a_timer_trgo_starts_the_adc(l4):
+    l4.wr(CCIPR, 3 << 28)
+    _adc_on(l4, ADC1)
+    l4.wr(ADC1 + 0x0C, (1 << 10) | (13 << 6))           # EXTEN rising, EXTSEL 13: TIM6 TRGO
+    l4.wr(ADC1 + 0x08, ADVREGEN | ADEN | ADSTART)
+    assert l4.rd(ADC1 + 0x08) & ADSTART, "armed"
+    tim6 = 0x40001000
+    l4.run_program([(tim6 + 0x04, 2 << 4, 4), (tim6 + 0x2C, 399, 4), (tim6, 1, 4)])   # MMS update, 10 kHz
+    assert l4.get("adc1", "ExternalStarts") >= 5
+
+
+# --- QUADSPI memory-mapped mode ---------------------------------------------------------
+
+def test_memory_mapped_mode_maps_the_flash_at_0x90000000(l4):
+    l4.mon.execute('machine LoadPlatformDescriptionFromString "qflash: SPI.GenericSpiFlash @ quadspi '
+                   '{ underlyingMemory: qmem; manufacturerId: 0xEF; memoryType: 0x40 }; '
+                   'qmem: Memory.MappedMemory @ none { size: 0x100000 }"')
+    ccr = 0xA0001000 + 0x14
+    assert l4.value("vhil_qspi_hub Mapped") == "False"
+    l4.wr(ccr, 3 << 26)                                 # CCR.FMODE memory-mapped
+    assert l4.value("vhil_qspi_hub Mapped") == "True"
+    l4.wr(0x90000010, 0xC0FFEE)                         # (the flash's memory)
+    l4.wr(ccr, 0)                                       # indirect: unmapped
+    assert l4.value("vhil_qspi_hub Mapped") == "False"
+    assert l4.rd(0x90000010) == 0
+    l4.wr(ccr, 3 << 26)
+    assert l4.rd(0x90000010) == 0xC0FFEE, "the same flash contents"
+    l4.wr(RCC + 0x30, 1 << 8)                           # AHB3RSTR.QSPIRST
+    assert l4.value("vhil_qspi_hub Mapped") == "False"
+
+
+# --- DAC, OPAMP, COMP, VREFBUF -----------------------------------------------------------
+
+DAC = 0x40007400
+
+
+def test_the_dac_outputs_its_holding_register(l4):
+    l4.wr(DAC, 1)                                       # EN1, no trigger
+    l4.wr(DAC + 0x08, 2048)                             # DHR12R1: DOR follows at once
+    assert l4.rd(DAC + 0x2C) == 2048
+    assert float(l4.value("sysbus.dac1 Output1")) == pytest.approx(2048 / 4095 * 3.3)
+    l4.wr(DAC + 0x20, 0x100 << 16 | 0x200)              # DHR12RD
+    assert (l4.rd(DAC + 0x2C), l4.rd(DAC + 0x30)) == (0x200, 0x100)
+
+
+def test_the_dac_software_trigger_loads_dor(l4):
+    l4.wr(DAC, (7 << 3) | (1 << 2) | 1)                 # TSEL1 SW, TEN1, EN1
+    l4.wr(DAC + 0x08, 1000)
+    assert l4.rd(DAC + 0x2C) == 0
+    l4.wr(DAC + 0x04, 1)                                # SWTRIG1
+    assert l4.rd(DAC + 0x2C) == 1000
+
+
+def test_a_comparator_against_the_dac_sets_value_and_its_exti_line(l4):
+    exti = 0x40010400
+    l4.wr(exti, 1 << 21)                                # IMR1 line 21
+    l4.wr(exti + 0x08, 1 << 21)                         # RTSR1
+    l4.wr(DAC + 0x08, 2048)
+    l4.wr(DAC, 1)                                       # 1.65 V on DAC1_OUT1
+    l4.mon.execute("sysbus.comp1 SetPlus 1.0")
+    l4.wr(0x40010200, (4 << 4) | 1)                     # INMSEL DAC1_CH1, EN
+    assert not l4.rd(0x40010200) & (1 << 30)
+    l4.mon.execute("sysbus.comp1 SetPlus 2.0")
+    assert l4.rd(0x40010200) & (1 << 30), "VALUE"
+    assert l4.rd(exti + 0x14) & (1 << 21), "COMP1 on EXTI line 21"
+    l4.wr(0x40010200, (1 << 31) | (4 << 4) | 1)         # LOCK
+    l4.wr(0x40010200, 0)
+    assert l4.rd(0x40010200) & 1, "locked until reset"
+
+
+def test_the_opamp_pga_and_vrefbuf(l4):
+    l4.wr(0x40007800, (2 << 2) | (1 << 4) | 1)          # OPAMODE PGA, PGA_GAIN x4, EN
+    l4.mon.execute("sysbus.opamp1 SetInput 0.5")
+    assert float(l4.value("sysbus.opamp1 Output")) == pytest.approx(2.0)
+    assert l4.rd(0x40010030) == 2, "VREFBUF HIZ at reset"
+    l4.wr(0x40010030, 1 | (1 << 2))                     # ENVR, VRS 2.5 V
+    assert l4.rd(0x40010030) & (1 << 3), "VRR"
+    assert float(l4.value("sysbus.vrefbuf Voltage")) == pytest.approx(2.5)
