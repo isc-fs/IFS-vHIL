@@ -32,7 +32,7 @@ needs paid developer accounts, #373's "later" list), so each OS warns once.
 | OS | File | Needs first | First launch |
 |---|---|---|---|
 | macOS | `vHIL_<v>_universal.dmg`: drag vHIL to Applications | Homebrew (the app installs Colima and Docker with it) | open it once, then **System Settings → Privacy & Security → Open Anyway** |
-| Linux | `vhil_<v>_amd64.deb` (`sudo apt install ./vhil_*.deb`) or `vHIL_<v>_amd64.AppImage` (`chmod +x`) | Git and Docker Engine, with you in the `docker` group | none |
+| Linux | `vHIL_<v>_amd64.deb` (`sudo apt install ./vHIL_*.deb`) or `vHIL_<v>_amd64.AppImage` (`chmod +x`) | Git and Docker Engine, with you in the `docker` group | none |
 | Windows | `vHIL_<v>_x64-setup.exe` (installs for your user, no admin) | WSL2 with Ubuntu (`wsl --install -d Ubuntu`), Docker Desktop with **WSL integration** on for it, Git in WSL | SmartScreen: **More info → Run anyway** |
 
 On Windows the app runs `bin/vhil` inside WSL (it is bash): its own copy of
