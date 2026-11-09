@@ -10,7 +10,9 @@ name: Image
 # scripts/vhil-docker.sh finds the image of any clean checkout by its key.
 # Each image is built once per key, natively on an amd64 and an arm64 runner
 # (Colima on Apple silicon is arm64), and joined into one multi-arch tag.
-# Moving tags: `dev` follows the dev branch, `vX.Y.Z` a release tag.
+# Moving tags, the same on both images (deploy/compose.prod.yaml's VHIL_TAG):
+# `dev` follows the dev branch; a release tag `vX.Y.Z` gets `vX.Y.Z` and
+# `latest`.
 
 on:
   push:
@@ -140,9 +142,9 @@ jobs:
       - name: Multi-arch tags
         run: |
           set -euo pipefail
-          # The moving tag this ref gets: dev, a release tag, or none.
+          # The moving tags this ref gets: dev, a release tag and latest, or none.
           moving=
-          if [ "$REF_TYPE" = tag ]; then moving=$REF_NAME
+          if [ "$REF_TYPE" = tag ]; then moving="$REF_NAME latest"
           elif [ "$REF_NAME" = dev ]; then moving=dev
           fi
           for pair in "ifs-vhil:$BASE" "ifs-vhil-editor:$EDITOR"; do
@@ -150,8 +152,8 @@ jobs:
               if ! docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
                   docker buildx imagetools create -t "$ref" "$ref-amd64" "$ref-arm64"
               fi
-              if [ -n "$moving" ]; then
-                  docker buildx imagetools create -t "$REGISTRY/${pair%%:*}:$moving" "$ref"
-              fi
+              for m in $moving; do
+                  docker buildx imagetools create -t "$REGISTRY/${pair%%:*}:$m" "$ref"
+              done
               echo "\`$ref\`${moving:+ (also \`$moving\`)}" >> "$GITHUB_STEP_SUMMARY"
           done
