@@ -46,6 +46,7 @@ npx tauri build --target universal-apple-darwin --bundles app,dmg   # what CI sh
 [`app.yml`](../.github/workflows/app.yml) builds it on every PR that changes
 `app/` and attaches the `.dmg` to a release tag's release. The page in
 `ui/` is plain HTML and JS (no build step); `src-tauri/src/main.rs` is the
-backend. The icon's source is `src-tauri/icons/icon.svg`: regenerate the set
-with `npx tauri icon <1024px png> -o src-tauri/icons` (then delete the
-mobile ones it adds).
+backend. The icon's sources are `src-tauri/icons/source/`: `vhil-macos.png` (Apple's
+template, 824 px body with its shadow) makes `icon.icns`, and `vhil.png`
+(full-bleed) makes `icon.ico` and the PNGs Linux uses. Regenerate with
+`npx tauri icon <source> -o <tmp>` for each, and copy those files over.
