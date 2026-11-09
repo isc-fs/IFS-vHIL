@@ -568,7 +568,8 @@ CREATE TABLE IF NOT EXISTS runs (
     ref_name   TEXT NOT NULL DEFAULT '',
     owner      TEXT NOT NULL DEFAULT '',
     token      TEXT NOT NULL DEFAULT '',
-    firmware_commits TEXT NOT NULL DEFAULT '{}'
+    firmware_commits TEXT NOT NULL DEFAULT '{}',
+    imported   TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS runs_state ON runs (state, id);
 """
@@ -576,7 +577,8 @@ CREATE INDEX IF NOT EXISTS runs_state ON runs (state, id);
 # gets them on open.
 _ADDED = {"heartbeat": "REAL", "attempts": "INTEGER NOT NULL DEFAULT 0",
           "ref_name": "TEXT NOT NULL DEFAULT ''", "owner": "TEXT NOT NULL DEFAULT ''",
-          "token": "TEXT NOT NULL DEFAULT ''", "firmware_commits": "TEXT NOT NULL DEFAULT '{}'"}
+          "token": "TEXT NOT NULL DEFAULT ''", "firmware_commits": "TEXT NOT NULL DEFAULT '{}'",
+          "imported": "TEXT NOT NULL DEFAULT '{}'"}
 
 
 class RunStore:
@@ -668,6 +670,26 @@ class RunStore:
             db.close()
         return row["id"]
 
+    def add_imported(self, run: dict, imported: dict) -> dict:
+        """A finished run from a bundle (vhil/server/bundle.py), with a new id
+        and token: `run` is the exported record (checked by the bundle's
+        reader), `imported` where it came from. It never enters the queue."""
+        if run["state"] not in TERMINAL:
+            raise ValueError(f"an imported run is finished, not {run['state']}")
+        return self._write(
+            "INSERT INTO runs (state, system, ref, firmware, scenario, created, started, finished, "
+            "virtual_us, summary, attempts, ref_name, owner, token, firmware_commits, imported) "
+            "VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?) RETURNING *",
+            (run["state"], run["system"], json.dumps(run.get("firmware") or {}),
+             json.dumps(run.get("scenario") or {}), run.get("created") or now_iso(),
+             run.get("started"), run.get("finished"), int(run.get("virtual_us") or 0),
+             json.dumps(run.get("summary") or {}), int(run.get("attempts") or 0),
+             imported.get("by", ""), uuid.uuid4().hex,
+             json.dumps(run.get("firmware_commits") or {}), json.dumps(imported)))
+
+    def delete(self, run_id: int) -> None:
+        self._write("DELETE FROM runs WHERE id = ?", (run_id,))
+
     def get(self, run_id: int) -> Optional[dict]:
         return self._one("SELECT * FROM runs WHERE id = ?", (run_id,))
 
@@ -685,12 +707,13 @@ class RunStore:
 
     def last_by_scenario(self, system: str) -> dict[str, dict]:
         """{scenario name: its latest run} of `system`'s runs that ran a
-        scenario file (RunScenario.name): the Tests view's last results."""
+        scenario file (RunScenario.name): the Tests view's last results.
+        Imported runs (vhil/server/bundle.py) ran elsewhere: not counted."""
         db = self._connect()
         try:
             rows = db.execute(
                 "SELECT * FROM runs WHERE id IN (SELECT max(id) FROM runs WHERE system = ? AND "
-                "json_extract(scenario, '$.name') IS NOT NULL "
+                "json_extract(scenario, '$.name') IS NOT NULL AND imported = '{}' "
                 "GROUP BY json_extract(scenario, '$.name'))", (system,)).fetchall()
         finally:
             db.close()
@@ -801,7 +824,7 @@ def _now(now: Optional[float]) -> float:
 
 def _row(row: sqlite3.Row) -> dict:
     d = dict(row)
-    for key in ("firmware", "scenario", "summary", "firmware_commits"):
+    for key in ("firmware", "scenario", "summary", "firmware_commits", "imported"):
         if key in d:
             d[key] = json.loads(d[key]) if d[key] else {}
     return d

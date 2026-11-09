@@ -111,6 +111,9 @@ def router(settings, workspace, fw_dir: Optional[Path] = None) -> APIRouter:
         run = store.get(run_id)
         if run is None:
             raise HTTPException(404, f"no run {run_id}")
+        if run.get("imported"):
+            # Its images were built on another machine (vhil/server/bundle.py).
+            raise HTTPException(404, f"run {run_id} is imported: its firmware sources are not here")
         try:
             system = System(Path(workspace.root) / "systems" / f"{run['system']}.yaml")
         except (OSError, SystemError) as e:

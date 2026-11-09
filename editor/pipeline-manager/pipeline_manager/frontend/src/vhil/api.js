@@ -32,11 +32,16 @@ export class ApiError extends Error {
 }
 
 async function send(method, path, body) {
-    const headers = body ? { 'Content-Type': 'application/json' } : {};
+    // A File or Blob goes as it is (a run's bundle: vhil/server/bundle.py).
+    const raw = body instanceof Blob;
+    const headers = body ? { 'Content-Type': raw ? 'application/octet-stream' : 'application/json' } : {};
     const csrf = cookie('vhil_csrf');
     if (method !== 'GET' && csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
     const r = await fetch(path, {
-        method, headers, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin',
+        method,
+        headers,
+        body: body && !raw ? JSON.stringify(body) : body,
+        credentials: 'same-origin',
     });
     if (r.status === 401) {
         const here = window.location.pathname + window.location.search;
@@ -77,6 +82,9 @@ export async function text(path) {
     if (!r.ok) throw new ApiError([`${r.status} ${r.statusText}`], r.status);
     return r.text();
 }
+
+/** A finished run as a .vhilrun file, to share (vhil/server/bundle.py). */
+export const bundleUrl = (id) => `/api/runs/${id}/bundle`;
 
 /** A run's link: its REPLAY in the workspace (the shell's run page is gone;
  *  its old links redirect here: vhil/server/static/app.js). */
