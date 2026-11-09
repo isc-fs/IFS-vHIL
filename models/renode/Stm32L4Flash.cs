@@ -10,7 +10,8 @@
 // "FLASH registers", writable bits the header's FLASH_<reg>_*_Msk fields.
 // The 1 MB part is two 512 KB banks of 2 KB pages (DUALBANK = 1, its factory
 // value): bank 1 at 0x08000000, bank 2 at 0x08080000 (FLASH_BANK_SIZE, the
-// HAL's FLASH_SIZE / 2 with DUALBANK set).
+// HAL's FLASH_SIZE / 2 with DUALBANK set). The flash starts erased (0xFF),
+// as a new part's does; the firmware image is loaded over it.
 //
 //   ACR        LATENCY, PRFTEN, ICEN, DCEN, RUN_PD, SLEEP_PD: read back as
 //              written, no effect (the emulated flash has no wait states).
@@ -37,17 +38,40 @@
 //              level 0, DUALBANK), no PCROP (start 0xFFFF > end 0) and no
 //              write protection (start 0xFF > end 0).
 //
-// Not modelled: programming checks. The CPU stores into the flash memory
-// directly, PG set or not, so the program errors (PROGERR, SIZERR, PGAERR,
-// PGSERR, MISERR, FASTERR) and WRPERR are never raised, and a write-protected
-// or PCROP area is still written and erased. Option byte effects other than
-// DUALBANK on the bank layout (RDP, BFB2 boot, nBOOT0/1, SRAM2 parity) do
-// nothing. ECC never reports an error (ECCR reads 0). PDKEYR (flash power-down
-// in Run mode) is accepted and ignored.
+//   program    With CR.PG set, the CPU's stores into the flash are checked as
+//              they land (RM0351 "Flash memory programming sequence", "Flash
+//              program and erase errors"): a double word is two 32-bit
+//              stores, the first 8-byte aligned, the second right after it.
+//              A store that breaks a rule is undone and raises its flag:
+//                SIZERR   a store that is not 32 bits wide
+//                PGAERR   a first word not 8-byte aligned, or a second word
+//                         that is not at the first + 4 (the first is undone too)
+//                WRPERR   a page in an active WRPxA/WRPxB area
+//                PROGERR  a double word that is not erased (all 0xFF)
+//                PGSERR   PG set together with PER, MER1 or MER2
+//              The second word of a good double word ends the operation
+//              (EOP, as for an erase). An erase (PER, MER1, MER2) that
+//              touches a write-protected page raises WRPERR and erases
+//              nothing. Write protection is the option bytes loaded at the
+//              last reset; a change takes effect after OBL_LAUNCH.
+//              The checks compare with a copy of the flash taken when PG first
+//              rises after a reset and kept in step by every checked program
+//              and erase: a store with PG clear (on silicon a PGSERR) lands
+//              unchecked and unseen by that copy, as does a debugger's write.
 //
+// Not modelled: the errors' interrupt (ERRIE, OPERR); PCROP areas; fast
+// programming (FSTPG, MISERR, FASTERR). Option byte effects other than
+// DUALBANK on the bank layout and WRP (RDP, BFB2 boot, nBOOT0/1, SRAM2
+// parity) do nothing. ECC never reports an error (ECCR reads 0). PDKEYR
+// (flash power-down in Run mode) is accepted and ignored.
+//
+using System;
+using System.Linq;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
+using Antmicro.Renode.Logging.Profiling;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.CPU;
 using Antmicro.Renode.Peripherals.Memory;
 
 namespace Antmicro.Renode.Peripherals.MTD
@@ -60,6 +84,9 @@ namespace Antmicro.Renode.Peripherals.MTD
             this.flash = flash;
             IRQ = new GPIO();
             optionBytes = (uint[])FactoryOptionBytes.Clone();
+            // A new part's flash is erased (all 0xFF); Renode's memory starts
+            // at 0. The firmware image is loaded over this after the platform.
+            Erase(0, FlashSize);
             Reset();
         }
 
@@ -75,8 +102,14 @@ namespace Antmicro.Renode.Peripherals.MTD
             optKeyStep = 0;
             keyFailed = false;
             options = (uint[])optionBytes.Clone();
+            active = (uint[])optionBytes.Clone();
+            StopChecking();
+            shadow = null;      // the flash may be reloaded before the next run
             IRQ.Unset();
         }
+
+        // Program errors raised so far (test API): SR flags ever set.
+        public uint ErrorsSeen => errorsSeen;
 
         public uint ReadDoubleWord(long offset)
         {
@@ -184,9 +217,22 @@ namespace Antmicro.Renode.Peripherals.MTD
                 cr |= value & (LOCK | OPTLOCK);
                 return;
             }
+            var before = cr;
             // LOCK and OPTLOCK are set-only; STRT, OPTSTRT and OBL_LAUNCH act
             // and read back 0.
             cr = (value & CrMask & ~(STRT | OPTSTRT | OBL_LAUNCH)) | (cr & (LOCK | OPTLOCK)) | (value & (LOCK | OPTLOCK));
+            if((cr & PG) != 0 && (cr & (PER | MER1 | MER2)) != 0)
+            {
+                Error(PGSERR, "PG set with PER/MER");
+            }
+            if((cr & PG) != 0 && (before & PG) == 0)
+            {
+                StartChecking();
+            }
+            else if((cr & PG) == 0 && (before & PG) != 0)
+            {
+                StopChecking();
+            }
             if((value & STRT) != 0)
             {
                 Start(value);
@@ -213,10 +259,22 @@ namespace Antmicro.Renode.Peripherals.MTD
             {
                 var bank = dualBank && (value & BKER) != 0 ? 1 : 0;
                 var page = (value >> 3) & 0xFF;
-                Erase(bank * bankSize + page * PageSize, PageSize);
+                var start = bank * bankSize + page * PageSize;
+                if(AnyProtected(start, PageSize))
+                {
+                    Error(WRPERR, $"erase of write-protected page {page} of bank {bank + 1}");
+                    return;
+                }
+                Erase(start, PageSize);
             }
             else if((value & (MER1 | MER2)) != 0)
             {
+                if(((value & MER1) != 0 && AnyProtected(0, bankSize))
+                   || (dualBank && (value & MER2) != 0 && AnyProtected(bankSize, bankSize)))
+                {
+                    Error(WRPERR, "mass erase of a bank with write-protected pages");
+                    return;
+                }
                 if((value & MER1) != 0)
                 {
                     Erase(0, bankSize);
@@ -241,6 +299,155 @@ namespace Antmicro.Renode.Peripherals.MTD
                 ones[i] = 0xFF;
             }
             flash.WriteBytes(start, ones, 0, ones.Length);
+            if(shadow != null)
+            {
+                Array.Copy(ones, 0, shadow, start, ones.Length);
+            }
+        }
+
+        // --- programming checks
+
+        private void StartChecking()
+        {
+            if(shadow == null)
+            {
+                shadow = flash.ReadBytes(0, (int)FlashSize);
+            }
+            firstWord = -1;
+            foreach(var cpu in machine.SystemBus.GetCPUs().OfType<ICPUWithMemoryAccessHooks>())
+            {
+                cpu.SetHookAtMemoryAccess(OnProgramWrite);
+            }
+            checking = true;
+        }
+
+        private void StopChecking()
+        {
+            if(!checking)
+            {
+                return;
+            }
+            checking = false;
+            if(firstWord >= 0)
+            {
+                Undo(firstWord, 4);   // a lone first word is never programmed
+                firstWord = -1;
+            }
+            foreach(var cpu in machine.SystemBus.GetCPUs().OfType<ICPUWithMemoryAccessHooks>())
+            {
+                cpu.SetHookAtMemoryAccess(null);
+            }
+        }
+
+        // Called after the store has landed (Renode's memory access hook).
+        private void OnProgramWrite(ulong pc, MemoryOperation operation, ulong virtualAddress,
+                                    ulong physicalAddress, uint width, ulong value)
+        {
+            if(operation != MemoryOperation.MemoryWrite)
+            {
+                return;
+            }
+            long offset;
+            if(physicalAddress >= FlashBase && physicalAddress < FlashBase + (ulong)FlashSize)
+            {
+                offset = (long)(physicalAddress - FlashBase);
+            }
+            else if(physicalAddress < (ulong)FlashSize)
+            {
+                offset = (long)physicalAddress;   // the boot alias at 0
+            }
+            else
+            {
+                return;
+            }
+            var count = (int)Math.Min(width, (uint)(FlashSize - offset));
+            uint error = 0;
+            string why = null;
+            if(width != 4)
+            {
+                error = SIZERR;
+                why = $"{width}-byte store at 0x{offset:X}";
+            }
+            else if(firstWord >= 0 ? offset != firstWord + 4 : offset % 8 != 0)
+            {
+                error = PGAERR;
+                why = $"word at 0x{offset:X} breaks the double word";
+            }
+            else if(AnyProtected(offset, 4))
+            {
+                error = WRPERR;
+                why = $"program at 0x{offset:X} in a write-protected page";
+            }
+            else if(firstWord < 0 && !Erased(offset))
+            {
+                error = PROGERR;
+                why = $"double word at 0x{offset:X} is not erased";
+            }
+            if(error != 0)
+            {
+                Undo(offset, count);
+                if(firstWord >= 0)
+                {
+                    Undo(firstWord, 4);
+                    firstWord = -1;
+                }
+                Error(error, why);
+                return;
+            }
+            if(firstWord < 0)
+            {
+                firstWord = offset;
+                return;
+            }
+            // The double word is programmed: keep the copy in step.
+            Array.Copy(flash.ReadBytes(firstWord, 8), 0, shadow, firstWord, 8);
+            firstWord = -1;
+            Done();
+            UpdateIrq();
+        }
+
+        private void Undo(long offset, int count)
+        {
+            flash.WriteBytes(offset, shadow, (int)offset, count);
+        }
+
+        private bool Erased(long offset)
+        {
+            for(var i = 0; i < 8; i++)
+            {
+                if(shadow[offset + i] != 0xFF)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // WRP1A/B cover bank 1's pages, WRP2A/B bank 2's: STRT [7:0] to END
+        // [23:16], inclusive; STRT > END is no area.
+        private bool AnyProtected(long start, long length)
+        {
+            var bankPages = ((active[0] & DUALBANK) != 0 ? FlashSize / 2 : FlashSize) / PageSize;
+            for(var page = start / PageSize; page <= (start + length - 1) / PageSize; page++)
+            {
+                var bank = page >= bankPages ? 1 : 0;
+                var local = page - bank * bankPages;
+                foreach(var area in bank == 0 ? new[] { active[3], active[4] } : new[] { active[7], active[8] })
+                {
+                    if(local >= (area & 0xFF) && local <= ((area >> 16) & 0xFF))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private void Error(uint flag, string why)
+        {
+            sr |= flag;
+            errorsSeen |= flag;
+            this.Log(LogLevel.Warning, "Flash error 0x{0:X}: {1}.", flag, why);
         }
 
         private void Done()
@@ -264,10 +471,12 @@ namespace Antmicro.Renode.Peripherals.MTD
         private const long ACR = 0x00, PDKEYR = 0x04, KEYR = 0x08, OPTKEYR = 0x0C, SR = 0x10, CR = 0x14, ECCR = 0x18;
         private const uint AcrReset = 0x00000600, AcrMask = 0x00007F07;
         private const uint CrReset = 0xC0000000, CrMask = 0xCF078FFF;
-        private const uint PER = 1u << 1, MER1 = 1u << 2, BKER = 1u << 11, MER2 = 1u << 15,
+        private const uint PG = 1u << 0, PER = 1u << 1, MER1 = 1u << 2, BKER = 1u << 11, MER2 = 1u << 15,
             STRT = 1u << 16, OPTSTRT = 1u << 17, EOPIE = 1u << 24, OBL_LAUNCH = 1u << 27,
             OPTLOCK = 1u << 30, LOCK = 1u << 31;
-        private const uint EOP = 1u << 0;
+        private const uint EOP = 1u << 0, PROGERR = 1u << 3, WRPERR = 1u << 4, PGAERR = 1u << 5,
+            SIZERR = 1u << 6, PGSERR = 1u << 7;
+        private const ulong FlashBase = 0x08000000;
         // EOP, OPERR, PROGERR, WRPERR, PGAERR, SIZERR, PGSERR, MISERR, FASTERR,
         // RDERR, OPTVERR (FLASH_SR_*_Msk; BSY and PEMPTY are not write-1-clear).
         private const uint SrClearable = 0x0000C3FB;
@@ -289,6 +498,11 @@ namespace Antmicro.Renode.Peripherals.MTD
         private readonly MappedMemory flash;
         private uint[] optionBytes;
         private uint[] options;
+        private uint[] active;      // the option bytes loaded at the last reset
+        private byte[] shadow;      // the flash as the checks last saw it
+        private long firstWord = -1;
+        private bool checking;
+        private uint errorsSeen;
         private uint acr;
         private uint sr;
         private uint cr;

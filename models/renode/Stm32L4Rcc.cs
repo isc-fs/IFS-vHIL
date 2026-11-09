@@ -15,10 +15,8 @@
 // time: the HAL only waits for the flag). HSE and LSE are crystals of the
 // board (`hseFrequency`, `lseFrequency` in the repl, 0 when not fitted): a
 // missing crystal never becomes ready and the HAL's start-up timeout runs
-// out, as on a board without one. HSEBYP makes HSE ready without a crystal
-// only if the board feeds an external clock, which hseFrequency also says.
-// A PLL is ready when it is on and its source (PLLCFGR.PLLSRC: 1 MSI, 2 HSI16,
-// 3 HSE; PLLSAI1/2 share it) is ready.
+// out, as on a board without one. A PLL is ready when it is on and its source
+// (PLLCFGR.PLLSRC: 1 MSI, 2 HSI16, 3 HSE; PLLSAI1/2 share it) is ready.
 //
 // System clock: CFGR.SWS follows CFGR.SW once the selected source (0 MSI,
 // 1 HSI16, 2 HSE, 3 PLL) is ready, and keeps the old source otherwise (RM0351
@@ -26,32 +24,63 @@
 // cannot be turned off: clearing its enable bit is ignored (RM0351, the
 // MSION/HSION/HSEON/PLLON bit descriptions).
 //
+// Clock tree: after every write to the RCC (and at reset) the model works out
+// SYSCLK, HCLK, PCLK1 and PCLK2 (RM0351 "Clock tree") and sets the rates of
+// what Renode clocks at a fixed rate:
+//   - the SysTick (`nvic`), at HCLK: Renode's SysTick runs on the processor
+//     clock (CLKSOURCE reads 1, docs/cpu-timing.md);
+//   - the timers, at their APB clock, doubled when the APB prescaler is not 1
+//     (RM0351 "Timer clock"): TIM2-7 on APB1, TIM1/8/15/16/17 on APB2;
+//   - the U(S)ARTs, at the kernel clock CCIPR selects (0 PCLK, 1 SYSCLK,
+//     2 HSI16, 3 LSE); USART1 is on APB2, the rest on APB1;
+//   - LPTIM1/2, at the kernel clock CCIPR selects (0 PCLK1, 1 LSI, 2 HSI16,
+//     3 LSE).
+// The MSI's rate is CR.MSIRANGE when CR.MSIRGSEL is set, CSR.MSISRANGE (1, 2,
+// 4 or 8 MHz) otherwise; MSIRANGE 0-11 is 100 kHz .. 48 MHz (RM0351 MSIRANGE
+// table). PLL R output = source / (PLLM + 1) * PLLN / (2 * (PLLR + 1)).
+// The core's instruction rate is not changed: it is each firmware's cpu.mips
+// (docs/cpu-timing.md). The test API reads the result: SysclkHz, HclkHz,
+// Pclk1Hz, Pclk2Hz.
+//
 // Clock interrupts: a ready flag that rises with its CIER enable set raises
 // the matching CIFR flag; CICR clears it; RCC_IRQn (5, stm32l496xx.h:83) is
 // up while any enabled flag is set. CSS (clock security) never fires: no
 // clock fails in the emulation.
 //
+// Peripheral resets (AHBxRSTR, APBxRSTRx): writing 1 holds a peripheral in
+// reset, writing 0 releases it with its registers at their reset values
+// (RM0351 "1: Reset <X>"). Each edge of a bit resets the repl's peripherals
+// for it, so what was written while it was held is lost, as on silicon. A
+// GPIO port keeps the levels driven onto its input and analog pins from
+// outside (VhilRccResets.cs does the same on the H733). A bit with no model
+// placed (LCD, SAI, OTG, ...) only holds. ResetsOf(name) counts them.
+//
 // Backup domain (BDCR): writes are ignored unless PWR_CR1.DBP is set (RM0351
 // "Backup domain access"), and BDCR keeps its value across a system reset;
-// BDRST resets it. It is powered from VBAT, so only a power-on clears it,
-// which the emulation does by building the machine anew.
+// BDRST resets it. It is powered from VBAT: only a power-on clears it.
 //
-// Reset flags (CSR [31:24]): power-on sets PINRSTF and BORRSTF (CSR reset
-// value 0x0C000600). Every reset drives NRST low on this part, so a system
-// reset adds PINRSTF; RMVF clears them all. Which internal source caused a
-// reset (SFTRSTF, IWDGRSTF, ...) is not recorded yet: Renode's reset does
-// not carry its cause to the RCC (the H733 needs VhilResetFlags.cs for it).
+// Reset flags (CSR [31:24]): power-on gives 0x0C000600 (PINRSTF, BORRSTF).
+// Every reset drives NRST low on this part, so each one adds PINRSTF, plus
+// its cause from Stm32L4ResetFlags.cs (SFTRSTF, IWDGRSTF, WWDGRSTF, OBLRSTF)
+// through RecordReset; RMVF clears them.
 //
-// Not modelled: the xxxRSTR peripheral resets (stored, no effect), the clock
-// tree's frequencies (the repl clocks every timer and UART at the 80 MHz the
-// HAL's maximum configuration gives; see stm32l496.repl), MSI hardware
-// auto-calibration from LSE (MSIPLLEN, stored), and the HSI48 recovery
-// system (CRRCR.HSI48RDY follows HSI48ON).
+// Not modelled: MSI hardware auto-calibration from LSE (MSIPLLEN, stored),
+// the HSI48 recovery system (CRRCR.HSI48RDY follows HSI48ON), and the kernel
+// clocks of I2C, SAI, ADC and the 48 MHz domain (CCIPR is stored; their
+// models are not timed by it). The RTC and the IWDG run on their own rates
+// (LSE or LSI, fixed in the repl).
 //
+using System;
 using System.Collections.Generic;
+using System.Reflection;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.GPIOPort;
+using Antmicro.Renode.Peripherals.IRQControllers;
+using Antmicro.Renode.Peripherals.Timers;
+using Antmicro.Renode.Peripherals.UART;
+using Antmicro.Renode.Time;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
@@ -59,9 +88,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
     {
         public STM32L4_RCC(IMachine machine, STM32L4_PWR pwr = null, long hseFrequency = 0, long lseFrequency = 0)
         {
+            this.machine = machine;
             this.pwr = pwr;
-            hsePresent = hseFrequency > 0;
-            lsePresent = lseFrequency > 0;
+            this.hseFrequency = hseFrequency;
+            this.lseFrequency = lseFrequency;
             IRQ = new GPIO();
             regs = new Dictionary<long, uint>();
             bdcr = 0;
@@ -71,6 +101,32 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public long Size => 0x400;
         public GPIO IRQ { get; }
+
+        // -- test API (monitor) ------------------------------------------------
+
+        public long SysclkHz => Sysclk();
+        public long HclkHz => Hclk();
+        public long Pclk1Hz => Pclk(8);
+        public long Pclk2Hz => Pclk(11);
+
+        // Times a reset bit has reset this peripheral (each edge counts once).
+        public int ResetsOf(string name)
+        {
+            return resets.TryGetValue(name, out var n) ? n : 0;
+        }
+
+        // Called by Stm32L4ResetFlags.cs on each machine reset: the cause's
+        // flags, or a power-on (which also clears the backup domain).
+        public void RecordReset(uint flags, bool powerOn)
+        {
+            if(powerOn)
+            {
+                csr = CsrPowerOn;
+                bdcr = 0;
+                return;
+            }
+            csr |= (flags & ResetFlags) | PINRSTF;
+        }
 
         public void Reset()
         {
@@ -84,6 +140,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             cifr = 0;
             sws = 0;   // MSI after every reset
             IRQ.Unset();
+            ApplyClocks();
         }
 
         public uint ReadDoubleWord(long offset)
@@ -138,7 +195,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     this.Log(LogLevel.Warning, "Unhandled write to offset 0x{0:X}, value 0x{1:X}.", offset, value);
                     return;
                 }
+                var old = regs[offset];
                 regs[offset] = value & r.mask;
+                if(ResetTargets.ContainsKey(offset))
+                {
+                    ResetEdges(offset, old ^ regs[offset]);
+                }
                 break;
             }
             UpdateClockSwitch();
@@ -146,6 +208,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             var rose = ReadyFlags() & ~before;
             cifr |= rose & regs[CIER];
             IRQ.Set((cifr & regs[CIER]) != 0);
+            ApplyClocks();
         }
 
         // --- CR
@@ -190,7 +253,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
         }
 
-        private bool HseReady => (regs[CR] & HSEON) != 0 && hsePresent;
+        private bool HseReady => (regs[CR] & HSEON) != 0 && hseFrequency > 0;
 
         private uint PllSourceEnable()
         {
@@ -243,10 +306,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private uint ReadyFlags()
         {
             var cr = ReadCr();
-            var bdcr = ReadBdcr();
+            var bd = ReadBdcr();
             uint f = 0;
             if((csr & LSION) != 0) f |= 1u << 0;
-            if((bdcr & LSERDY) != 0) f |= 1u << 1;
+            if((bd & LSERDY) != 0) f |= 1u << 1;
             if((cr & MSIRDY) != 0) f |= 1u << 2;
             if((cr & HSIRDY) != 0) f |= 1u << 3;
             if((cr & HSERDY) != 0) f |= 1u << 4;
@@ -257,12 +320,202 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             return f;
         }
 
+        // --- clock tree
+
+        private long Msi()
+        {
+            if((regs[CR] & MSIRGSEL) != 0)
+            {
+                var range = (int)((regs[CR] >> 4) & 0xF);
+                return range < MsiRanges.Length ? MsiRanges[range] : 0;
+            }
+            var standby = (int)((csr >> 8) & 0xF);
+            return standby >= 4 && standby <= 7 ? MsiRanges[standby] : 0;
+        }
+
+        private long PllInput()
+        {
+            switch(regs[PLLCFGR] & 3)
+            {
+            case 1: return Msi();
+            case 2: return HsiHz;
+            case 3: return hseFrequency;
+            default: return 0;
+            }
+        }
+
+        private long Sysclk()
+        {
+            switch(sws)
+            {
+            case 0: return Msi();
+            case 1: return HsiHz;
+            case 2: return hseFrequency;
+            default:
+                var p = regs[PLLCFGR];
+                var m = ((p >> 4) & 7) + 1;
+                var n = (p >> 8) & 0x7F;
+                var r = 2 * (((p >> 25) & 3) + 1);
+                return PllInput() / m * n / r;
+            }
+        }
+
+        private long Hclk()
+        {
+            var hpre = (int)((regs[CFGR] >> 4) & 0xF);
+            return Sysclk() / (hpre < 8 ? 1 : AhbDividers[hpre - 8]);
+        }
+
+        // PPRE1 at bit 8, PPRE2 at bit 11.
+        private long Pclk(int at)
+        {
+            var ppre = (int)((regs[CFGR] >> at) & 7);
+            return Hclk() / (ppre < 4 ? 1 : 1 << (ppre - 3));
+        }
+
+        private long TimerClock(int at)
+        {
+            var ppre = (regs[CFGR] >> at) & 7;
+            return Pclk(at) * (ppre < 4 ? 1 : 2);
+        }
+
+        private void ApplyClocks()
+        {
+            if(machine == null)
+            {
+                return;
+            }
+            var hclk = Hclk();
+            if(hclk <= 0)
+            {
+                return;
+            }
+            SetRate("nvic", hclk);
+            foreach(var t in Apb1Timers)
+            {
+                SetRate(t, TimerClock(8));
+            }
+            foreach(var t in Apb2Timers)
+            {
+                SetRate(t, TimerClock(11));
+            }
+            for(var i = 0; i < Uarts.Length; i++)
+            {
+                var sel = (regs[CCIPR] >> (2 * i)) & 3;
+                long rate;
+                switch(sel)
+                {
+                case 0: rate = Pclk(i == 0 ? 11 : 8); break;
+                case 1: rate = Sysclk(); break;
+                case 2: rate = HsiHz; break;
+                default: rate = lseFrequency; break;
+                }
+                SetRate(Uarts[i], rate);
+            }
+            // LPTIM1SEL [19:18], LPTIM2SEL [21:20]: 0 PCLK1, 1 LSI, 2 HSI16,
+            // 3 LSE. Both are on APB1.
+            for(var i = 0; i < 2; i++)
+            {
+                var sel = (regs[CCIPR] >> (18 + 2 * i)) & 3;
+                SetRate(i == 0 ? "lptim1" : "lptim2",
+                    sel == 0 ? Pclk(8) : sel == 1 ? LsiHz : sel == 2 ? HsiHz : lseFrequency);
+            }
+        }
+
+        private void SetRate(string name, long hz)
+        {
+            if(hz <= 0 || !machine.TryGetByName<IPeripheral>("sysbus." + name, out var p))
+            {
+                return;
+            }
+            if(rates.TryGetValue(name, out var was) && was == hz)
+            {
+                return;
+            }
+            rates[name] = hz;
+            switch(p)
+            {
+            case NVIC nvic:
+                nvic.Frequency = (ulong)hz;
+                break;
+            case STM32_Timer timer:
+                timer.Frequency = (ulong)hz;
+                // The capture/compare channels count on timers of their own
+                // (STM32_Timer.channels[i].Timer), built at the repl's rate.
+                if(TimerChannels?.GetValue(timer) is Array channels)
+                {
+                    foreach(var channel in channels)
+                    {
+                        if(channel?.GetType().GetField("Timer")?.GetValue(channel) is LimitTimer cc)
+                        {
+                            cc.Frequency = (ulong)hz;
+                        }
+                    }
+                }
+                break;
+            case STM32L0_LpTimer lptim:
+                lptim.Frequency = (ulong)hz;
+                if(LpTimerCompare?.GetValue(lptim) is LimitTimer compare)
+                {
+                    compare.Frequency = (ulong)hz;
+                }
+                break;
+            case STM32F7_USART usart:
+                // Its kernel clock only scales BaudRate (the receiver
+                // timeout); the field is set at construction.
+                UsartFrequency?.SetValue(usart, (uint)hz);
+                break;
+            }
+        }
+
+        // --- peripheral resets
+
+        private void ResetEdges(long offset, uint changed)
+        {
+            foreach(var entry in ResetTargets[offset])
+            {
+                if((changed & (1u << entry.Key)) == 0)
+                {
+                    continue;
+                }
+                foreach(var name in entry.Value)
+                {
+                    if(machine.TryGetByName<IPeripheral>("sysbus." + name, out var p))
+                    {
+                        ResetPeripheral(name, p);
+                    }
+                }
+            }
+        }
+
+        private void ResetPeripheral(string name, IPeripheral peripheral)
+        {
+            resets[name] = ResetsOf(name) + 1;
+            this.Log(LogLevel.Debug, "{0} reset from its RSTR bit", name);
+            if(!(peripheral is STM32_GPIOPort gpio))
+            {
+                peripheral.Reset();
+                return;
+            }
+            var moder = gpio.ReadDoubleWord(0x00);
+            var idr = gpio.ReadDoubleWord(0x10);
+            gpio.Reset();
+            for(var pin = 0; pin < 16; pin++)
+            {
+                var mode = (moder >> (2 * pin)) & 3;
+                if((mode == 0 || mode == 3) && (idr & (1u << pin)) != 0)
+                {
+                    gpio.OnGPIO(pin, true);
+                }
+            }
+        }
+
         // --- BDCR
 
         private uint ReadBdcr()
         {
             var v = bdcr & ~LSERDY;
-            if((v & LSEON) != 0 && lsePresent)
+            if((v & LSEON) != 0 && lseFrequency > 0)
             {
                 v |= LSERDY;
             }
@@ -291,7 +544,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         }
 
         private const long CR = 0x00, CFGR = 0x08, PLLCFGR = 0x0C, CIER = 0x18, CIFR = 0x1C,
-            CICR = 0x20, BDCR = 0x90, CSR = 0x94, CRRCR = 0x98;
+            CICR = 0x20, CCIPR = 0x88, BDCR = 0x90, CSR = 0x94, CRRCR = 0x98;
 
         private const uint MSION = 1u << 0, MSIRDY = 1u << 1, MSIRGSEL = 1u << 3,
             HSION = 1u << 8, HSIRDY = 1u << 10, HSEON = 1u << 16, HSERDY = 1u << 17,
@@ -305,6 +558,61 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // LSION, MSISRANGE [11:8] (RCC_CSR_*_Msk, stm32l496xx.h).
         private const uint CsrWritable = 0x00000F01;
         private const uint CsrPowerOn = 0x0C000600;
+        private const long HsiHz = 16000000, LsiHz = 32000;
+
+        private static readonly long[] MsiRanges = { 100000, 200000, 400000, 800000, 1000000, 2000000,
+                                                     4000000, 8000000, 16000000, 24000000, 32000000, 48000000 };
+        private static readonly int[] AhbDividers = { 2, 4, 8, 16, 64, 128, 256, 512 };
+        private static readonly string[] Apb1Timers = { "timer2", "timer3", "timer4", "timer5", "timer6", "timer7" };
+        private static readonly string[] Apb2Timers = { "timer1", "timer8", "timer15", "timer16", "timer17" };
+        // CCIPR USART1SEL [1:0] .. LPUART1SEL [11:10], in that order.
+        private static readonly string[] Uarts = { "usart1", "usart2", "usart3", "uart4", "uart5", "lpuart1" };
+        private static readonly FieldInfo TimerChannels =
+            typeof(STM32_Timer).GetField("channels", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo LpTimerCompare =
+            typeof(STM32L0_LpTimer).GetField("compareTimer", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo UsartFrequency =
+            typeof(STM32F7_USART).GetField("frequency", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // RSTR offset -> bit -> the repl's peripherals it resets (RCC_<reg>_*RST_Pos,
+        // stm32l496xx.h). Bits not listed are held with nothing to reset.
+        private static readonly Dictionary<long, Dictionary<int, string[]>> ResetTargets =
+            new Dictionary<long, Dictionary<int, string[]>>
+        {
+            [0x28] = new Dictionary<int, string[]>   // AHB1RSTR: DMA1 0, DMA2 1, CRC 12
+            {
+                [0] = new[] { "dma1", "dma1Cselr" }, [1] = new[] { "dma2", "dma2Cselr" }, [12] = new[] { "crc" },
+            },
+            [0x2C] = new Dictionary<int, string[]>   // AHB2RSTR: GPIOA-I 0-8, ADC 13, RNG 18
+            {
+                [0] = new[] { "gpioPortA" }, [1] = new[] { "gpioPortB" }, [2] = new[] { "gpioPortC" },
+                [3] = new[] { "gpioPortD" }, [4] = new[] { "gpioPortE" }, [5] = new[] { "gpioPortF" },
+                [6] = new[] { "gpioPortG" }, [7] = new[] { "gpioPortH" }, [8] = new[] { "gpioPortI" },
+                [13] = new[] { "adc1", "adc2", "adc3", "adcCommon" }, [18] = new[] { "rng" },
+            },
+            [0x30] = new Dictionary<int, string[]>   // AHB3RSTR: QSPI 8
+            {
+                [8] = new[] { "quadspi" },
+            },
+            [0x38] = new Dictionary<int, string[]>   // APB1RSTR1
+            {
+                [0] = new[] { "timer2" }, [1] = new[] { "timer3" }, [2] = new[] { "timer4" }, [3] = new[] { "timer5" },
+                [4] = new[] { "timer6" }, [5] = new[] { "timer7" }, [14] = new[] { "spi2" }, [15] = new[] { "spi3" },
+                [17] = new[] { "usart2" }, [18] = new[] { "usart3" }, [19] = new[] { "uart4" }, [20] = new[] { "uart5" },
+                [21] = new[] { "i2c1" }, [22] = new[] { "i2c2" }, [23] = new[] { "i2c3" }, [25] = new[] { "can1" },
+                [26] = new[] { "can2" }, [28] = new[] { "pwr" }, [31] = new[] { "lptim1" },
+            },
+            [0x3C] = new Dictionary<int, string[]>   // APB1RSTR2: LPUART1 0, I2C4 1, LPTIM2 5
+            {
+                [0] = new[] { "lpuart1" }, [1] = new[] { "i2c4" }, [5] = new[] { "lptim2" },
+            },
+            [0x40] = new Dictionary<int, string[]>   // APB2RSTR
+            {
+                [0] = new[] { "syscfg" }, [10] = new[] { "sdmmc1" }, [11] = new[] { "timer1" }, [12] = new[] { "spi1" },
+                [13] = new[] { "timer8" }, [14] = new[] { "usart1" }, [16] = new[] { "timer15" },
+                [17] = new[] { "timer16" }, [18] = new[] { "timer17" },
+            },
+        };
 
         // offset -> (reset value, writable bits): RM0351 reset values, masks
         // from the header's RCC_<reg>_*_Msk fields.
@@ -344,10 +652,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             { 0x9C, (0x00000000, 0x00000003) },   // CCIPR2
         };
 
+        private readonly IMachine machine;
         private readonly Dictionary<long, uint> regs;
+        private readonly Dictionary<string, long> rates = new Dictionary<string, long>();
+        private readonly Dictionary<string, int> resets = new Dictionary<string, int>();
         private readonly STM32L4_PWR pwr;
-        private readonly bool hsePresent;
-        private readonly bool lsePresent;
+        private readonly long hseFrequency;
+        private readonly long lseFrequency;
         private uint sws;
         private uint cifr;
         private uint bdcr;
