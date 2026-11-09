@@ -50,9 +50,17 @@
 // The internal channels (VREFINT, the temperature sensor, VBAT/3) read as the
 // analog inputs the test feeds.
 //
+// Inputs are pin voltages, set per channel number, as on the H7's ADC3
+// (Stm32H7Adc3.cs), so a system's analog devices render the same line:
+//     sysbus.adc1 SetVoltage 1650000 1        (uV, channel)
+// The voltage is the channel's source (Renode's ADCChannelSource, the ADC's
+// child at that channel): it lives outside the MCU, so it survives Reset.
+//
 using System;
 using System.Reflection;
 using Antmicro.Renode.Core;
+using Antmicro.Renode.Exceptions;
+using Antmicro.Renode.Utilities.RESD;
 using Antmicro.Renode.Time;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
@@ -70,6 +78,22 @@ namespace Antmicro.Renode.Peripherals.Analog
             this.calibrationFactor = calibrationFactor & 0x7F;
             ResetL4();
         }
+
+        public void SetVoltage(ulong microvolts, int channel)
+        {
+            if(!ADCContainer.TryGetByAddress(channel, out var source) || !(source is ADCChannelSource pin))
+            {
+                throw new RecoverableException($"ADC has no channel {channel}");
+            }
+            var sample = new VoltageSample((uint)Math.Min(microvolts, uint.MaxValue));
+            pin.Sample = sample;
+            // ADCChannelSource.Reset restores the sample it was built with:
+            // a pin voltage is set from outside and survives the MCU's reset.
+            ResetSampleField.SetValue(pin, sample);
+        }
+
+        public double Voltage(int channel) =>
+            ADCContainer.TryGetByAddress(channel, out var source) ? (double)source.Sample.Voltage / 1e6 : 0;
 
         // Calibrations run (test API).
         public int Calibrations => calibrations;
@@ -293,6 +317,10 @@ namespace Antmicro.Renode.Peripherals.Analog
         private static readonly FieldInfo SamplingThread =
             typeof(STM32_ADC_Common).GetField("samplingThread", BindingFlags.NonPublic | BindingFlags.Instance);
         private readonly IMachine machine;
+
+        private static readonly FieldInfo ResetSampleField =
+            typeof(ADCChannelSource).GetField("resetSample", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("ADCChannelSource.resetSample not found (Renode changed)");
         private bool startPending;
         private const uint CalfactMask = 0x007F007F;
         private readonly uint calibrationFactor;

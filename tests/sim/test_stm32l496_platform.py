@@ -625,6 +625,21 @@ def test_a_single_conversion_takes_its_sampling_and_conversion_time(l4):
     assert l4.rd(ADC1) & EOC
 
 
+def test_a_pin_voltage_converts_and_survives_a_reset(l4):
+    """SetVoltage (what a system's analog devices render) sets the pin: 12-bit
+    code = V / VREF+ x 4095 (VREF+ 3.3 V, the repl), and the pin keeps it
+    through the MCU's reset."""
+    l4.mon.execute("sysbus.adc1 SetVoltage 1650000 1")
+    l4.wr(CCIPR, 3 << 28)
+    _adc_on(l4, ADC1)
+    l4.wr(ADC1 + 0x08, ADVREGEN | ADEN | ADSTART)
+    l4.run_program([])
+    assert l4.rd(ADC1) & EOC
+    assert l4.rd(ADC1 + 0x40) == round(1.65 / 3.3 * 4095)
+    l4.reset()
+    assert float(l4.value("sysbus.adc1 Voltage 1")) == pytest.approx(1.65)
+
+
 def test_dual_mode_starts_the_slave_and_cdr_holds_both(l4):
     l4.wr(CCIPR, 3 << 28)
     _adc_on(l4, ADC1)
