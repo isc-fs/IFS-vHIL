@@ -108,7 +108,7 @@ rules:
             models/renode/VhilTrace.cs, tests/sim/durations.json]
     select: {importers: true}
   - name: developer scripts
-    paths: [scripts/explore.sh, scripts/probe.sh, scripts/vhil-docker.sh, scripts/wsl-vcan.sh,
+    paths: [scripts/explore.sh, scripts/probe.sh, scripts/vhil-docker.sh, scripts/image-key.sh, scripts/wsl-vcan.sh,
             scripts/update-pin-model.sh, scripts/shims/**,
             scripts/fit_pack.py, scripts/plots/**]
     select: {}
