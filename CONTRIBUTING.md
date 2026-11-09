@@ -12,7 +12,7 @@ Your first day, end to end:
 
 ```mermaid
 flowchart LR
-    A["<b>Read</b><br/>~5 min"] --> B["<b>Set up</b><br/>vm, image, fw<br/>~30 min, once"]
+    A["<b>Read</b><br/>~5 min"] --> B["<b>Set up</b><br/>vm, pull, fw<br/>~15 min, once"]
     B --> C["<b>Run</b><br/>unit + one sim test"]
     C --> D["<b>Change</b><br/>branch off dev"]
     D --> E["<b>PR into dev</b><br/>full-ci if emulation"]
@@ -34,13 +34,13 @@ time, so tests can run on every PR without the physical bench. Read:
   - (9) the car is ground truth, not either bench;
   - (10) every address and IRQ is cited from the vendor's header.
 
-## 2. Set up (once, ~30 minutes)
+## 2. Set up (once, ~15 minutes)
 
 ```sh
 git clone https://github.com/isc-fs/IFS-vHIL && cd IFS-vHIL
 git switch dev
 scripts/vhil-docker.sh vm       # macOS only: a Colima VM (needs `brew install colima docker`)
-scripts/vhil-docker.sh image    # builds the Docker images, Renode included (the slow step)
+scripts/vhil-docker.sh pull     # pulls the Docker images, Renode included (a few GB)
 scripts/vhil-docker.sh fw       # builds the ECU and AMS firmware into the vhil-data volume
 ```
 

@@ -7,9 +7,19 @@ pinned versions, for amd64 and arm64. [`scripts/vhil-docker.sh`](../../scripts/v
 runs each CI job in it; firmware and the IFS_HIL checkout live in the
 `vhil-data` volume, results land in `results/`.
 
+The images are published per content key: [`scripts/image-key.sh`](../../scripts/image-key.sh)
+hashes the files each image's build reads, and
+[`image.yml`](../../.github/workflows/image.yml) pushes
+`ghcr.io/isc-fs/ifs-vhil:<key>` and `ifs-vhil-editor:<key>` (amd64 + arm64)
+on every `dev` push and release tag that changes them, plus the moving tags
+`dev` and `vX.Y.Z`. Every job uses the images of the checkout it runs from:
+local by key, else pulled, else built. It builds only when none is published
+(a `docker/` change not on `dev` yet) or `docker/` has uncommitted changes.
+
 ```sh
 scripts/vhil-docker.sh vm          # macOS: Colima VM `vhil` with vcan (once; needs colima)
-scripts/vhil-docker.sh image       # (re)build the images (once, and after docker/ changes)
+scripts/vhil-docker.sh pull        # the published images of this checkout (any job pulls them when missing)
+scripts/vhil-docker.sh image       # build the images locally instead (Renode from source, ~30 min)
 scripts/vhil-docker.sh fw          # build ECU + AMS from their systems (or: fw ecu ams udv)
 scripts/vhil-docker.sh unit
 scripts/vhil-docker.sh smoke ecu   # or ams

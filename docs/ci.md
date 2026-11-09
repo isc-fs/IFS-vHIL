@@ -170,6 +170,17 @@ Platform models (ADC3, DMA, SPI, ...) are loaded by every board, so "loaded"
 says little about what a test exercises; the map leaves them to the subsystem
 markers and the guard.
 
+## The Docker images
+
+[`image.yml`](../.github/workflows/image.yml) publishes the vHIL's images to
+`ghcr.io/isc-fs/` so teammates pull them instead of building Renode
+(#373). Each image is tagged by a content key of its build's inputs
+([`scripts/image-key.sh`](../scripts/image-key.sh)): a push to `dev` or a
+release tag builds a key only if it isn't published yet, natively on an
+amd64 and an arm64 runner, and joins the two into one tag. `dev` and `vX.Y.Z`
+are moving tags on top. CI's own jobs don't use these images: they install
+the toolchain on the runner and take Renode from the Actions cache.
+
 ## The firmware image cache
 
 Every heavy job builds the firmware it runs (`python -m vhil.system build`:
