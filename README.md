@@ -11,6 +11,30 @@ parallel, with no hardware attached, on a `full-ci` label, every night and on
 release ([`docs/ci.md`](docs/ci.md)). Work that needs real physics stays on the physical bench: analog
 accuracy, real power, flash wear and bus electrics.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/vhil-overview-dark.svg">
+  <img src="docs/img/vhil-overview-light.svg" alt="One firmware image in a programmer on a bench. On the left it goes into the car's real boards, three MainLite modules on their backplanes wired to the car's harness. On the right the same image goes into their emulated twins inside an open container, on a virtual CAN bus bar with device models beside them.">
+</picture>
+
+*One image, two targets.* The same firmware image (the lit chip) goes into the
+car's boards on the left and into their emulated twins on the right, which
+sit on a virtual CAN bus with models of the chips around them (LTC6811 chain,
+BMI088).
+
+**Where it fits.** Each layer catches what the one before can't:
+
+```mermaid
+flowchart LR
+    FW["Firmware repo<br/>(ECU, AMS, uDV)"] -->|production build| ELF(["Same .elf image"])
+    ELF --> V["vHIL<br/>emulated boards, virtual time<br/>every PR, in minutes"]
+    ELF --> H["HIL bench<br/>real boards, real electronics<br/>before a release"]
+    ELF --> C["Car<br/>ground truth"]
+    V -->|logic, timing, fault paths| DEV{{"Merge to dev"}}
+    H -->|silicon, analog, flashing| MAIN{{"Release to main"}}
+    C -->|logs and datasheets| FIX["Model fixes"]
+    FIX -.-> V
+```
+
 **What it does today**
 
 - **Systems as data.** A system file places boards, gives each its role and

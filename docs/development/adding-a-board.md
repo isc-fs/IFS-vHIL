@@ -17,17 +17,21 @@ There are two cases:
 
 ## How the pieces fit
 
-```
-catalog/platforms/<mcu>.yaml ──► platforms/cpus/<mcu>.repl + models/renode/*.cs
-        ▲                                (the chip: memory map, peripherals)
-catalog/boards/<board>.yaml   ──► which platform, pin model, bootloader, connectors
-catalog/firmware/<fw>.yaml    ──► repo, ref, build recipe, load address, state panel
-catalog/models/<device>.yaml  ──► chips on the board or the harness (BMI088, LTC6811…)
-        ▲
-systems/<system>.yaml         ──► places boards, builds firmware, wires buses + devices
-        │
-        ▼  vhil/system.py (validate, build, render)
-generated .resc + broker wiring  ──► Renode runs it; tests drive it (vhil/sim.py)
+```mermaid
+flowchart TB
+    subgraph CAT["catalog/: what things are"]
+        PL["platforms/#lt;mcu#gt;.yaml<br/>→ platforms/cpus/#lt;mcu#gt;.repl<br/>+ models/renode/*.cs<br/><i>the chip</i>"]
+        BO["boards/#lt;board#gt;.yaml<br/><i>platform, pin model,<br/>bootloader, connectors</i>"]
+        FW["firmware/#lt;fw#gt;.yaml<br/><i>repo, ref, build recipe,<br/>load address, state panel</i>"]
+        MO["models/#lt;device#gt;.yaml<br/><i>chips on the board or<br/>harness: BMI088, LTC6811</i>"]
+        PL --> BO
+    end
+    SYS["systems/#lt;system#gt;.yaml<br/><i>places boards, builds firmware,<br/>wires buses and devices</i>"]
+    BO --> SYS
+    FW --> SYS
+    MO --> SYS
+    SYS -->|"vhil/system.py<br/>validate, build, render"| GEN["generated .resc<br/>+ broker wiring"]
+    GEN --> RUN(["Renode runs it<br/>tests drive it: vhil/sim.py"])
 ```
 
 - The **catalogue** (`catalog/`) says what things *are*. A system says how

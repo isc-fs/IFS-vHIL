@@ -3,6 +3,22 @@
 New here? This page gets you from clone to your first PR. Everything runs in
 Docker: you don't install Renode or a toolchain on your machine.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/vhil-overview-dark.svg">
+  <img src="docs/img/vhil-overview-light.svg" alt="The same firmware image goes into the car's real boards and into their emulated twins in a container.">
+</picture>
+
+Your first day, end to end:
+
+```mermaid
+flowchart LR
+    A["Read<br/>README, docs index,<br/>invariants<br/><i>~5 min</i>"] --> B["Set up<br/>vm, image, fw<br/><i>~30 min, once</i>"]
+    B --> C["Run<br/>unit, then one<br/>sim test<br/><i>~5 min</i>"]
+    C --> D["Change<br/>branch off dev,<br/>small commits"]
+    D --> E["PR into dev<br/>full-ci label if it<br/>touches emulation"]
+    E --> F(["Green CI,<br/>merge commit"])
+```
+
 ## 1. What this repo is (5 minutes)
 
 The vHIL runs the car's real firmware images on emulated boards, in virtual
