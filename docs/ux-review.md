@@ -122,6 +122,7 @@ Effort: S ≤ 1 day, M ≤ 1 week, L > 1 week.
 ### Sprint 1 (about 2 weeks): stop the traps
 
 Goal: a new user can create a system, Check it, run it and trust the result.
+Issues: #388 (#1), #389 (#2), #390 (#3), #391 (#5), #392 (#10), #393 (#7).
 
 - **#1 Valid defaults.** `vhil/editor.py`: bus names from a counter
   (`can_1`…) instead of `BUS_NODE`; schema `minItems` stays, but the editor
