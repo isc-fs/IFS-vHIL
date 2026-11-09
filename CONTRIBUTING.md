@@ -5,7 +5,7 @@ Docker: you don't install Renode or a toolchain on your machine.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/vhil-overview-dark.svg">
-  <img src="docs/img/vhil-overview-light.svg" alt="The same firmware image goes into the car's real boards and into their emulated twins in a container.">
+  <img src="docs/img/vhil-overview-light.svg" alt="The firmware repos build one .elf per board. The same image runs on emulated boards in the vHIL (Docker, every PR), on real boards on the HIL bench (before a release) and on the car (ground truth).">
 </picture>
 
 Your first day, end to end:
