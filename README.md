@@ -13,11 +13,11 @@ accuracy, real power, flash wear and bus electrics.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/vhil-overview-dark.svg">
-  <img src="docs/img/vhil-overview-light.svg" alt="One firmware image in a programmer on a bench. On the left it goes into the car's real boards, three MainLite modules on their backplanes wired to the car's harness. On the right the same image goes into their emulated twins inside an open container, on a virtual CAN bus bar with device models beside them.">
+  <img src="docs/img/vhil-overview-light.svg" alt="The firmware repos build one .elf per board. The same image runs on emulated boards in the vHIL (Docker, every PR), on real boards on the HIL bench (before a release) and on the car (ground truth).">
 </picture>
 
-*One image, two targets.* The same firmware image (the lit chip) goes into the
-car's boards on the left and into their emulated twins on the right, which
+*One image, three targets.* The same firmware image runs on emulated boards in
+the vHIL, on real boards on the HIL bench and on the car. In the vHIL the boards
 sit on a virtual CAN bus with models of the chips around them (LTC6811 chain,
 BMI088).
 
