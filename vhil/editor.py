@@ -135,9 +135,10 @@ _BOARD_PORTS = (("can", "can"), ("spi", "spi"), ("uart", "uart"), ("sdmmc", "sdm
                 ("i2c", "i2c"), ("gpio", "gpio"), ("analog_in", "analog"))
 _RIGHT = ("can", "gpio")
 # Model host-side ports: system device field -> interface type.
-_MODEL_HOST_PORTS = (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"), ("i2c", "i2c"))
+_MODEL_HOST_PORTS = (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"), ("i2c", "i2c"),
+                     ("uart", "uart"))
 # Field order in a written system file.
-_DEVICE_FIELDS = ("model", "spi", "cs", "sdmmc", "i2c", "pins", "outputs", "attach", "count",
+_DEVICE_FIELDS = ("model", "spi", "cs", "sdmmc", "i2c", "uart", "pins", "outputs", "attach", "count",
                   "params")
 _SYSTEM_FIELDS = ("kind", "id", "description", "time", "boards", "buses", "devices", "plants",
                   "port", "bench")

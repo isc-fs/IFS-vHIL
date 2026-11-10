@@ -420,6 +420,9 @@ def _ams(tmp_path, devices):
      r"wires pins \[\], got"),
     ("  imu: {model: bmi088, i2c: ams.SDMMC1}\n", "is sdmmc, not i2c"),
     ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, i2c: ams.I2C2}\n", "takes no 'i2c'"),
+    ("  gnss: {model: zed-f9p, uart: ams.I2C2}\n", "is i2c, not uart"),
+    ("  gnss: {model: zed-f9p, uart: ams.USART10, i2c: ams.I2C2}\n", "got i2c, uart"),
+    ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, uart: ams.USART10}\n", "takes no 'uart'"),
 ])
 def test_bad_devices_are_rejected_with_a_reason(tmp_path, devices, message):
     with pytest.raises(SystemError, match=message):
@@ -758,6 +761,21 @@ def test_the_bus_a_bmi088_wires_picks_its_protocol():
     hub = System(REPO / "systems" / "sensorhub.yaml").render_renode()
     assert "imu: Sensors.Bmi088Spi @ spi3" in hub and "Bmi088Accelerometer" not in hub
     assert "gpioPortC:\n    4 -> imu@0\n    5 -> imu@1" in hub
+
+
+def test_the_bus_a_zed_f9p_wires_picks_its_port(tmp_path):
+    """I2C (systems/sensorhub.yaml), SPI with its chip select, or UART: the
+    UART's far end sits on sysbus at no address and holds the MCU's UART."""
+    hub = System(REPO / "systems" / "sensorhub.yaml").render_renode()
+    assert "gnss_rx: Sensors.ZedF9pI2c @ i2c2 0x42" in hub
+    for wiring, want in (("spi: sensorhub.SPI1, cs: sensorhub.PA4",
+                          "gnss: Sensors.ZedF9pSpi @ spi1\n\ngpioPortA:\n    4 -> gnss@0"),
+                         ("uart: sensorhub.USART2", "gnss: Sensors.ZedF9pUart @ sysbus\n    uart: usart2")):
+        p = tmp_path / "s.yaml"
+        p.write_text("kind: system\nid: t\nboards:\n  sensorhub: {board: sensorhub}\n"
+                     f"devices:\n  gnss: {{model: zed-f9p, {wiring}}}\n")
+        script = System(p).render_renode()
+        assert want in script and "ZedF9pI2c" not in script
 
 
 def test_a_board_without_roles_takes_its_own_front_end():

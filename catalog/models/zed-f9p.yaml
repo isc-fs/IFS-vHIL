@@ -5,7 +5,9 @@ description: >-
   after the ZED-F9P Integration Manual and the F9 HPG Interface Description).
   The bus a device wires picks the port, as the chip's D_SEL pin does:
   `i2c:` puts it at 0x42 (bytes waiting at 0xFD/0xFE, the stream at 0xFF);
-  `spi:` makes it a full-duplex SPI slave with its chip select as `cs`.
+  `uart:` makes it the far end of a board UART (its UART1, 38400 8N1 by
+  default, bytes paced at the baud rate); `spi:` makes it a full-duplex SPI
+  slave with its chip select as `cs`.
   Every epoch (CFG-RATE-MEAS, 1 s by default) it sends NMEA GGA, GLL, GSA,
   GSV, RMC and VTG, and UBX NAV-PVT once enabled or polled; it takes
   CFG-VALSET/VALGET on the RAM layer and RTCM3 corrections (CRC-24Q
@@ -16,11 +18,12 @@ description: >-
   (monitor, integers in NAV-PVT's units: 1e-7 deg, mm, mm/s): SetPosition,
   ClearPosition, SetVelocity, Satellites, GeoidSeparationMm, Hdop/Vdop/Pdop,
   FixTimeS, UtcStart, Solution, CorrectionsAge, StationId, RtcmCount, RtcmCrcErrors, UbxChecksumErrors,
-  NmeaInput, Pending, Dropped, Config; on I2C also Respond and NackCount.
-  On I2C it is <device>_rx.
+  NmeaInput, Pending, Dropped, Config; on I2C also Respond and NackCount,
+  on UART BaudRate. On I2C it is <device>_rx, on UART sysbus.<device>.
 interface:
   protocols:
     i2c: {}
+    uart: {}
     # The SPI chip select, active low; the MCU drives it.
     spi: {cs: true}
 backend: renode
@@ -29,5 +32,7 @@ renode:
   # I2C: the default address (CFG-I2C-ADDRESS 0x84, 8-bit).
   targets:
     rx: {type: Sensors.ZedF9pI2c, address: 0x42}
+  # UART: on sysbus at no address, the MCU's UART its constructor argument.
+  uart: {type: Sensors.ZedF9pUart, argument: uart}
   # SPI: one slave; GPIO input 0 is CS.
   type: Sensors.ZedF9pSpi

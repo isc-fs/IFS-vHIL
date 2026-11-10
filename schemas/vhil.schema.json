@@ -948,6 +948,10 @@
                 "$ref": "#/$defs/endpoint",
                 "description": "The board's I2C connector the device's targets sit on."
               },
+              "uart": {
+                "$ref": "#/$defs/endpoint",
+                "description": "The board's UART connector the device is the far end of."
+              },
               "attach": {
                 "$ref": "#/$defs/name",
                 "description": "Device whose port this one attaches to."
@@ -1130,6 +1134,10 @@
               "type": "boolean",
               "description": "An I2C target (or several, renode.targets) on an I2C connector."
             },
+            "uart": {
+              "type": "boolean",
+              "description": "The far end of a board's UART (renode.uart): the MCU's TX is its input, its output the MCU's RX."
+            },
             "attach": {
               "type": "string",
               "description": "Kind of port on another device this model attaches to, e.g. isospi."
@@ -1162,7 +1170,7 @@
             "protocols": {
               "type": "object",
               "minProperties": 2,
-              "propertyNames": {"enum": ["spi", "i2c"]},
+              "propertyNames": {"enum": ["spi", "i2c", "uart"]},
               "description": "A part that speaks more than one bus (a BMI088: I2C or SPI, picked by its PS pin): the bus a device wires picks one, as the chip's pin does. Each protocol's value adds to the interface for that choice, e.g. spi: {gpio: [csb1, csb2]}. Leave the protocols themselves out of the plain keys.",
               "additionalProperties": {
                 "type": "object",
@@ -1249,6 +1257,16 @@
                 }
               }
             },
+            "uart": {
+              "type": "object",
+              "required": ["type", "argument"],
+              "additionalProperties": false,
+              "description": "For a uart model (or its uart protocol): one peripheral on the system bus at no address (sysbus.<device>) whose constructor takes the MCU's UART.",
+              "properties": {
+                "type": {"type": "string", "description": "Type as used in a platform description."},
+                "argument": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "description": "The constructor argument the MCU's UART is passed as."}
+              }
+            },
             "params": {
               "type": "object",
               "description": "Model parameter -> constructor argument name.",
@@ -1303,6 +1321,11 @@
             {
               "required": [
                 "targets"
+              ]
+            },
+            {
+              "required": [
+                "uart"
               ]
             }
           ]

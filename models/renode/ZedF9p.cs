@@ -1,9 +1,13 @@
 //
 // u-blox ZED-F9P multi-band GNSS receiver with RTK, compiled by Renode at
-// load time. One receiver, the port its D_SEL pin picks: I2C (D_SEL high or
-// open, ZedF9pI2c) or SPI (D_SEL low, ZedF9pSpi). In a platform description:
+// load time. One receiver, the port its D_SEL pin picks: I2C or UART1 (D_SEL
+// high or open, ZedF9pI2c / ZedF9pUart; the chip has both at once, the model
+// the one wired) or SPI (D_SEL low, ZedF9pSpi). In a platform description:
 //
 //     gnss_i2c: Sensors.ZedF9pI2c @ i2c2 0x42
+//
+//     gnss: Sensors.ZedF9pUart @ sysbus      // no address: sysbus.gnss
+//         uart: usart2
 //
 //     gnss: Sensors.ZedF9pSpi @ spi1
 //     gpioPortA:
@@ -25,6 +29,10 @@
 //   next one waiting, 0xFF when none; the bytes clocked in are the input,
 //   where 0xFF outside a message is filler and dropped. With CS high MISO is
 //   undriven: reads 0x00 (the vHIL's convention, as in Bmi088.cs).
+//   UART1: 8N1 at CFG-UART1-BAUDRATE (default 38400). The MCU's TX is the
+//   input; the output goes into the MCU's RX one character time (10 bits)
+//   apart. Bytes are not checked against the host UART's rate, which is
+//   logged once if it is more than 3 % off.
 //
 //   Output, every navigation epoch (CFG-RATE-MEAS, default 1000 ms; first
 //   epoch one period after power-on), the messages CFG-MSGOUT enables for
@@ -59,7 +67,7 @@
 //   0.01 m / 0.01 m (datasheet CEP figures); RTK float 0.2 m / 0.3 m is the
 //   model's. No noise: the position reported is the one the test set.
 //
-// Not modelled: UART and USB ports (logged and refused if configured), the
+// Not modelled: UART2 and USB (their keys are refused by CFG-VALSET), the
 // TX-ready pin, timepulse, CFG-RST and save/load of configuration layers
 // (BBR/flash), high-precision NMEA, the other UBX messages, RTCM output
 // (base mode), satellite geometry (GSV lists PRNs 1..n with empty elevation,
@@ -78,7 +86,7 @@
 // ("none", "3d", "float", "fixed"), CorrectionsAge (s, -1 for none),
 // StationId, RtcmCount(type), RtcmCrcErrors, UbxChecksumErrors, NmeaInput,
 // Pending, Dropped, Config(key). On I2C also Respond (false: the address is
-// NACKed, as an unpowered receiver does) and NackCount.
+// NACKed, as an unpowered receiver does) and NackCount; on UART BaudRate.
 //
 using System;
 using System.Collections.Generic;
@@ -90,6 +98,7 @@ using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.I2C;
 using Antmicro.Renode.Peripherals.SPI;
 using Antmicro.Renode.Peripherals.Timers;
+using Antmicro.Renode.Peripherals.UART;
 using Antmicro.Renode.Time;
 
 namespace Antmicro.Renode.Peripherals.Sensors
@@ -98,10 +107,10 @@ namespace Antmicro.Renode.Peripherals.Sensors
     // parser. The port classes below only move bytes.
     public abstract class ZedF9p : IPeripheral
     {
-        protected ZedF9p(IMachine machine, bool spi)
+        protected ZedF9p(IMachine machine, PortKind port)
         {
             this.machine = machine;
-            this.spi = spi;
+            this.port = port;
             Satellites = 12;
             Hdop = 0.8;
             Vdop = 1.1;
@@ -336,7 +345,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
                     if(b == (byte)'\n' || frame.Count > 82)
                     {
                         parser = Parse.Idle;
-                        if(Enabled(spi ? SpiInNmea : I2cInNmea))
+                        if(Enabled(PortKey(I2cInNmea, Uart1InNmea, SpiInNmea)))
                         {
                             NmeaInput++;
                         }
@@ -354,7 +363,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
             {
                 var t = Utc();
                 var sol = CurrentSolution();
-                if(Enabled(spi ? SpiOutNmea : I2cOutNmea))
+                if(Enabled(PortKey(I2cOutNmea, Uart1OutNmea, SpiOutNmea)))
                 {
                     // Order as the receiver sends them: RMC, VTG, GGA, GSA, GSV, GLL.
                     if(Enabled(MsgOut("RMC"))) Queue(Nmea(Rmc(t, sol)));
@@ -370,7 +379,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
                     }
                     if(Enabled(MsgOut("GLL"))) Queue(Nmea(Gll(t, sol)));
                 }
-                if(Enabled(spi ? SpiOutUbx : I2cOutUbx) && Enabled(spi ? NavPvtSpi : NavPvtI2c))
+                if(Enabled(PortKey(I2cOutUbx, Uart1OutUbx, SpiOutUbx)) && Enabled(MsgOut(NavPvtI2c)))
                 {
                     Queue(Ubx(0x01, 0x07, NavPvt(t, sol)));
                 }
@@ -580,7 +589,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
                 this.Log(LogLevel.Warning, "UBX message with a bad checksum dropped");
                 return;
             }
-            if(!Enabled(spi ? SpiInUbx : I2cInUbx))
+            if(!Enabled(PortKey(I2cInUbx, Uart1InUbx, SpiInUbx)))
             {
                 return;
             }
@@ -647,6 +656,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
                 config[kv.Key] = kv.Value;
             }
             epochTimer.Limit = Math.Max(25UL, config[RateMeas]);
+            ConfigChanged();
             return true;
         }
 
@@ -728,7 +738,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
                 this.Log(LogLevel.Warning, "RTCM3 frame with a bad CRC dropped");
                 return;
             }
-            if(!Enabled(spi ? SpiInRtcm : I2cInRtcm) || n < 5)
+            if(!Enabled(PortKey(I2cInRtcm, Uart1InRtcm, SpiInRtcm)) || n < 5)
             {
                 return;
             }
@@ -786,17 +796,40 @@ namespace Antmicro.Renode.Peripherals.Sensors
             {
                 output.Enqueue(b);
             }
+            OutputQueued();
+        }
+
+        // Called with bytes newly waiting (the lock held): a port that sends
+        // by itself (UART) starts sending.
+        protected virtual void OutputQueued()
+        {
+        }
+
+        // A configuration change applied (the lock held).
+        protected virtual void ConfigChanged()
+        {
+        }
+
+        protected ulong ConfigValue(uint key)
+        {
+            return config[key];
         }
 
         private bool Enabled(uint key) => config.TryGetValue(key, out var v) && v != 0;
 
-        private uint MsgOut(string nmea)
+        // A message's CFG-MSGOUT keys run I2C, UART1, UART2, USB, SPI: the
+        // I2C key plus the port's offset.
+        private uint MsgOut(uint i2cKey) => i2cKey + (port == PortKind.Spi ? 4u : port == PortKind.Uart1 ? 1u : 0u);
+
+        private uint MsgOut(string nmea) => MsgOut(NmeaI2c[nmea]);
+
+        private uint PortKey(uint i2c, uint uart1, uint spiKey) => port == PortKind.Spi ? spiKey : port == PortKind.Uart1 ? uart1 : i2c;
+
+        private static readonly Dictionary<string, uint> NmeaI2c = new Dictionary<string, uint>
         {
-            var i2c = new Dictionary<string, uint> { { "GGA", 0x209100BA }, { "RMC", 0x209100AB }, { "GLL", 0x209100C9 },
-                                                     { "GSA", 0x209100BF }, { "GSV", 0x209100C4 }, { "VTG", 0x209100B0 } };
-            // Each message's keys run I2C, UART1, UART2, USB, SPI.
-            return i2c[nmea] + (spi ? 4u : 0u);
-        }
+            { "GGA", 0x209100BA }, { "RMC", 0x209100AB }, { "GLL", 0x209100C9 },
+            { "GSA", 0x209100BF }, { "GSV", 0x209100C4 }, { "VTG", 0x209100B0 },
+        };
 
         private double NowS() => machine.ElapsedVirtualTime.TimeElapsed.TotalMicroseconds / 1e6;
 
@@ -826,13 +859,18 @@ namespace Antmicro.Renode.Peripherals.Sensors
             {
                 { RateMeas, DefaultMeasMs }, { RateNav, 1 }, { DgnssMode, 3 }, { DgnssTimeout, 60 },
                 { I2cInUbx, 1 }, { I2cInNmea, 1 }, { I2cInRtcm, 1 }, { I2cOutUbx, 1 }, { I2cOutNmea, 1 },
+                { Uart1InUbx, 1 }, { Uart1InNmea, 1 }, { Uart1InRtcm, 1 }, { Uart1OutUbx, 1 }, { Uart1OutNmea, 1 },
                 { SpiInUbx, 1 }, { SpiInNmea, 1 }, { SpiInRtcm, 1 }, { SpiOutUbx, 1 }, { SpiOutNmea, 1 },
-                { NavPvtI2c, 0 }, { NavPvtSpi, 0 }, { I2cAddress, 0x84 },
+                { I2cAddress, 0x84 }, { Uart1Baud, DefaultBaud },
             };
-            foreach(var k in new uint[] { 0x209100BA, 0x209100AB, 0x209100C9, 0x209100BF, 0x209100C4, 0x209100B0 })
+            // NAV-PVT off and the six NMEA messages on, on every modelled port.
+            foreach(var offset in new uint[] { 0, 1, 4 })
             {
-                d[k] = 1;
-                d[k + 4] = 1;
+                d[NavPvtI2c + offset] = 0;
+                foreach(var k in NmeaI2c.Values)
+                {
+                    d[k + offset] = 1;
+                }
             }
             return d;
         }
@@ -847,7 +885,11 @@ namespace Antmicro.Renode.Peripherals.Sensors
         private const uint I2cOutUbx = 0x10720001, I2cOutNmea = 0x10720002;
         private const uint SpiInUbx = 0x10790001, SpiInNmea = 0x10790002, SpiInRtcm = 0x10790004;
         private const uint SpiOutUbx = 0x107A0001, SpiOutNmea = 0x107A0002;
-        private const uint NavPvtI2c = 0x20910006, NavPvtSpi = 0x2091000A;
+        private const uint Uart1InUbx = 0x10730001, Uart1InNmea = 0x10730002, Uart1InRtcm = 0x10730004;
+        private const uint Uart1OutUbx = 0x10740001, Uart1OutNmea = 0x10740002;
+        protected const uint Uart1Baud = 0x40520001;    // U4 baud
+        protected const ulong DefaultBaud = 38400;
+        private const uint NavPvtI2c = 0x20910006;
         private const uint I2cAddress = 0x20510001;     // kept; the address is the platform's
         private const ulong DefaultMeasMs = 1000;
         private const int MaxOutput = 8192;
@@ -856,7 +898,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
         private static readonly DateTime GpsEpoch = new DateTime(1980, 1, 6, 0, 0, 0, DateTimeKind.Utc);
 
         private readonly IMachine machine;
-        private readonly bool spi;
+        private readonly PortKind port;
         private readonly LimitTimer epochTimer;
         private readonly object sync = new object();
         private readonly Dictionary<uint, ulong> config = new Dictionary<uint, ulong>();
@@ -870,6 +912,13 @@ namespace Antmicro.Renode.Peripherals.Sensors
         private bool refStationSeen;
         private double? lastObservation;
         private double streamStart, refStationAt, positionAt;
+
+        protected enum PortKind
+        {
+            I2c,
+            Uart1,
+            Spi,
+        }
 
         private enum Parse
         {
@@ -891,7 +940,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
     // The receiver on I2C (D_SEL high): one target at 0x42. Header: protocol.
     public class ZedF9pI2c : ZedF9p, II2CPeripheral, II2CStartCondition
     {
-        public ZedF9pI2c(IMachine machine) : base(machine, false)
+        public ZedF9pI2c(IMachine machine) : base(machine, PortKind.I2c)
         {
             Respond = true;
         }
@@ -967,10 +1016,81 @@ namespace Antmicro.Renode.Peripherals.Sensors
         private byte address;
     }
 
+    // The receiver's UART1 (D_SEL high or open), on the MCU's UART: the MCU's
+    // TX is the receiver's input, and the receiver sends its bytes into the
+    // MCU's RX one character time apart (8N1: 10 bits at CFG-UART1-BAUDRATE,
+    // default 38400), as the line would; a byte the MCU's USART is not
+    // enabled to take is lost there, as on the chip. A VALSET of the baud
+    // rate changes the pace at once (the host must follow, as on the chip);
+    // a host UART at another rate (beyond 3 %) is logged once per rate.
+    public class ZedF9pUart : ZedF9p
+    {
+        public ZedF9pUart(IMachine machine, IUART uart) : base(machine, PortKind.Uart1)
+        {
+            this.uart = uart;
+            sendTimer = new LimitTimer(machine.ClockSource, (long)DefaultBaud, this, "uart1", limit: 10,
+                                       direction: Direction.Ascending, enabled: false,
+                                       workMode: WorkMode.Periodic, eventEnabled: true);
+            sendTimer.LimitReached += SendNext;
+            uart.CharReceived += Input;
+            Reset();
+        }
+
+        public override void Reset()
+        {
+            base.Reset();
+            if(sendTimer != null)
+            {
+                sendTimer.Reset();
+                sendTimer.Frequency = DefaultBaud;
+                sendTimer.Limit = 10;
+            }
+        }
+
+        public long BaudRate => (long)sendTimer.Frequency;
+
+        protected override void OutputQueued()
+        {
+            if(sendTimer != null && !sendTimer.Enabled)
+            {
+                sendTimer.Value = 0;
+                sendTimer.Enabled = true;
+            }
+        }
+
+        protected override void ConfigChanged()
+        {
+            sendTimer.Frequency = Math.Max(1UL, ConfigValue(Uart1Baud));
+        }
+
+        private void SendNext()
+        {
+            var b = PopOutput();
+            if(!b.HasValue)
+            {
+                sendTimer.Enabled = false;
+                return;
+            }
+            var host = (long)uart.BaudRate;
+            var rate = (long)sendTimer.Frequency;
+            if(host > 0 && Math.Abs(host - rate) * 100 > 3 * rate && host != warnedBaud)
+            {
+                warnedBaud = host;
+                this.Log(LogLevel.Warning, "Host UART at {0} baud, receiver at {1}: the bytes would arrive garbled",
+                         host, rate);
+            }
+            uart.WriteChar(b.Value);
+        }
+
+        private readonly IUART uart;
+        private readonly LimitTimer sendTimer;
+        private long warnedBaud;
+    }
+
     // The receiver on SPI (D_SEL low): GPIO input 0 is CS, active low.
     public class ZedF9pSpi : ZedF9p, ISPIPeripheral, IGPIOReceiver
     {
-        public ZedF9pSpi(IMachine machine) : base(machine, true)
+        public ZedF9pSpi(IMachine machine) : base(machine, PortKind.Spi)
         {
         }
 

@@ -72,6 +72,8 @@ CARD_DIR_ENV = "VHIL_CARD_DIR"
 PIN_MODEL_FILE = re.compile(r"[a-z0-9][a-z0-9-]*\.pins\.yaml")
 # The board sections whose connectors and pins the emulator wires.
 WIRED = ("can", "spi", "uart", "sdmmc", "i2c", "gpio", "analog_in")
+# A device's fields that name a board endpoint it attaches to by its bus.
+DEVICE_PORTS = ("spi", "cs", "sdmmc", "i2c", "uart")
 
 
 def card_dirs() -> list[Path]:
@@ -374,6 +376,11 @@ def device_interface(name: str, dev: dict) -> dict:
     return {**base, chosen[0]: True, **protocols[chosen[0]]}
 
 
+def _renode_kind(interface: dict) -> str:
+    """The renode section key that places a device on what it wires."""
+    return "targets" if interface.get("i2c") else "uart" if interface.get("uart") else "type"
+
+
 class System:
     def __init__(self, path: Path, catalog: Path = CATALOG,
                  extra_card_dirs: Iterable[Path | str] = ()):
@@ -472,7 +479,7 @@ class System:
         for name, dev in self.devices.items():
             need(NAME, name, "device name")
             need(ID, dev["model"], f"device '{name}': model")
-            for port in ("spi", "cs", "sdmmc", "i2c"):
+            for port in DEVICE_PORTS:
                 if port in dev:
                     need(ENDPOINT, dev[port], f"device '{name}': {port}")
             if "attach" in dev:
@@ -742,7 +749,7 @@ class System:
             interface = device_interface(name, dev)
             boards = set()
             for port, want in (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"),
-                               ("i2c", "i2c")):
+                               ("i2c", "i2c"), ("uart", "uart")):
                 if interface.get(port) and port not in dev:
                     raise SystemError(f"device '{name}' ({dev['model']}) needs '{port}'")
                 if port in dev:
@@ -761,14 +768,16 @@ class System:
                                       f"every analog_out and follow one of its params")
             elif "renode" not in doc:
                 raise SystemError(f"model '{doc['id']}': backend renode needs a renode section")
-            elif (bool(interface.get("i2c")) != ("targets" in doc["renode"])
-                  if "protocols" not in doc.get("interface", {})
-                  else ("targets" if interface.get("i2c") else "type") not in doc["renode"]):
+            elif (_renode_kind(interface) not in doc["renode"]
+                  or ("protocols" not in doc.get("interface", {})
+                      and sum(k in doc["renode"] for k in ("targets", "uart", "type")) != 1)):
                 # An I2C device is one or more targets, each at its address
-                # (a BMI088's two dies); anything else is one peripheral. A
-                # model with protocols gives each choice its own.
+                # (a BMI088's two dies); a UART device the far end of a UART
+                # (renode.uart); anything else one peripheral (type). A model
+                # with protocols gives each choice its own.
                 raise SystemError(f"model '{doc['id']}': an i2c model gives renode targets "
-                                  f"(a type and an address each), any other model a renode type")
+                                  f"(a type and an address each), a uart model renode uart "
+                                  f"(a type and its UART argument), any other a renode type")
             want_out = set(interface.get("analog_out", []))
             if set(dev.get("outputs", {})) != want_out:
                 raise SystemError(f"device '{name}' ({dev['model']}) drives outputs "
@@ -870,7 +879,7 @@ class System:
         """Every board endpoint the system wires, once each, in file order."""
         used = [node for spec in self.buses.values() for node in spec["nodes"]]
         for dev in self.devices.values():
-            used += [dev[p] for p in ("spi", "cs", "sdmmc", "i2c") if p in dev]
+            used += [dev[p] for p in DEVICE_PORTS if p in dev]
             used += list(dev.get("outputs", {}).values())
             used += list(dev.get("pins", {}).values())
         for spec in self.doc.get("port", {}).get("signals", {}).values():
@@ -1005,7 +1014,7 @@ class System:
         if name in _seen:
             raise SystemError(f"devices attach in a cycle: {' -> '.join(_seen + (name,))}")
         dev = self.devices[name]
-        for port in ("spi", "cs", "sdmmc", "i2c"):
+        for port in DEVICE_PORTS:
             if port in dev:
                 return self.resolve(dev[port])[0].name
         for endpoint in [*dev.get("outputs", {}).values(), *dev.get("pins", {}).values()]:
@@ -1097,6 +1106,12 @@ class System:
             for i in range(int(dev.get("count", 1))):
                 lines += [f"{name}{i}: {rn.path(renode['type'])} @ {rn.ident(dev['attach'])} {i}"]
                 lines += body
+        elif "uart" in dev:
+            # On the system bus at no address (so the monitor finds it as
+            # sysbus.<device>): the model holds the MCU's UART.
+            lines += [f"{name}: {rn.path(renode['uart']['type'])} @ sysbus",
+                      f"    {rn.ident(renode['uart']['argument'])}: {local(self.resolve(dev['uart'])[2])}"]
+            lines += body
         elif "targets" in renode and "i2c" in dev:
             # One peripheral per I2C target, named <device>_<target>.
             bus = local(self.resolve(dev["i2c"])[2])

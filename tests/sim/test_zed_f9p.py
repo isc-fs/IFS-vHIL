@@ -13,14 +13,17 @@ from vhil import renode as rn
 
 pytestmark = [pytest.mark.platform_stm32l496, pytest.mark.gnss]
 
-# stm32l496xx.h: I2C2_BASE, SPI1_BASE, GPIOA_BASE; I2C_TypeDef CR1 0x00,
-# CR2 0x04, ISR 0x18, RXDR 0x24, TXDR 0x28; SPI CR1 0x00, CR2 0x04, DR 0x0C.
-I2C2, SPI1, GPIOA = 0x40005800, 0x40013000, 0x48000000
+# stm32l496xx.h: I2C2_BASE, SPI1_BASE, GPIOA_BASE, USART2_BASE; I2C_TypeDef
+# CR1 0x00, CR2 0x04, ISR 0x18, RXDR 0x24, TXDR 0x28; SPI CR1 0x00, CR2 0x04,
+# DR 0x0C; USART CR1 0x00 (UE 0, RE 2, TE 3), BRR 0x0C, ISR 0x1C (RXNE 5),
+# RDR 0x24, TDR 0x28.
+I2C2, SPI1, GPIOA, USART2 = 0x40005800, 0x40013000, 0x48000000, 0x40004400
 CR2_RD_WRN, CR2_START, CR2_AUTOEND = 1 << 10, 1 << 13, 1 << 25
 ISR_NACKF = 1 << 4
 ADDR = 0x42
 RX = "sysbus.i2c2.gnss_rx"
 SPI_RX = "sysbus.spi1.gnss"
+UART_RX = "sysbus.gnss"                         # on sysbus at no address
 CS = 4                                          # PA4, J1.18 SPI_CS_EXT
 
 RATE_MEAS, DGNSS_TO, I2C_OUT_NMEA = 0x30210001, 0x201100C4, 0x10720002
@@ -222,7 +225,7 @@ def test_valset_switches_to_nav_pvt_and_valget_reads_back(hub):
 
 def test_valset_with_an_unknown_key_is_refused_whole(hub):
     i2c = I2c(hub)
-    i2c.write(_valset([(RATE_MEAS, 200), (0x40520001, 115200)]))   # + CFG-UART1-BAUDRATE
+    i2c.write(_valset([(RATE_MEAS, 200), (0x40530001, 115200)]))   # + CFG-UART2-BAUDRATE
     assert _messages(i2c.read(i2c.waiting())) == [_ubx(0x05, 0x00, bytes([0x06, 0x8A]))]
     assert int(hub.value(f"{RX} Config {RATE_MEAS:#x}"), 0) == 1000
 
@@ -287,3 +290,52 @@ def test_on_spi_it_streams_full_duplex_while_selected(spi):
     assert int(spi.value(f"{SPI_RX} Pending"), 0) == waiting
     msgs = _messages(_xfer(spi, b"\xff" * waiting))
     assert [m[:5] for m in msgs] == ["GNGGA"] and _nmea(msgs, "GGA")[0][6] == "1"
+
+
+@pytest.fixture
+def uart(tmp_path):
+    p = Platform()
+    repl = tmp_path / "gnss.repl"
+    repl.write_text("gnss: Sensors.ZedF9pUart @ sysbus\n    uart: usart2\n")
+    p.mon.execute(f"machine LoadPlatformDescription {rn.file_arg(repl)}")
+    p.run_program([], seconds="0.001")
+    p.wr(USART2 + 0x0C, 104)                     # BRR: 4 MHz / 104 = 38462 baud
+    p.wr(USART2 + 0x00, 0b1101)                  # CR1: UE, RE, TE
+    yield p
+    p.close()
+
+
+def _rx(p) -> bytes:
+    out = b""
+    while p.rd(USART2 + 0x1C) & (1 << 5):
+        out += bytes([p.rd(USART2 + 0x24) & 0xFF])
+    return out
+
+
+def test_on_uart_it_sends_one_character_time_apart(uart):
+    """38400 8N1 is 3840 characters a second: 50 ms after the epoch, 192 of
+    the epoch's bytes are in the MCU's RX (within one, the sync quantum);
+    the rest follow."""
+    assert int(uart.value(f"{UART_RX} BaudRate"), 0) == 38400
+    uart.mon.execute(f"{UART_RX} SetPosition 404168000 -37038000 650000")
+    uart.mon.execute('emulation RunFor "1.049"')       # to 1.050 s; the epoch at 1.000 s
+    first = _rx(uart)
+    assert abs(len(first) - 0.050 * 3840) <= 1, len(first)
+    uart.mon.execute('emulation RunFor "0.5"')
+    msgs = _messages(first + _rx(uart))
+    assert [m[:5] for m in msgs] == ["GNRMC", "GNVTG", "GNGGA", "GNGSA", "GPGSV", "GPGSV", "GPGSV", "GNGLL"]
+    assert _nmea(msgs, "GGA")[0][6] == "1"
+
+
+def test_on_uart_the_mcus_tx_is_its_input(uart):
+    """A VALSET written to the MCU's TDR is acknowledged on its RX; the baud
+    rate it sets paces what follows."""
+    for b in _valset([(0x40520001, 115200)]):      # CFG-UART1-BAUDRATE
+        uart.wr(USART2 + 0x28, b)
+    uart.mon.execute('emulation RunFor "0.01"')
+    assert _messages(_rx(uart)) == [_ubx(0x05, 0x01, bytes([0x06, 0x8A]))]
+    assert int(uart.value(f"{UART_RX} BaudRate"), 0) == 115200
+    for b in _rtcm(1005, station=12) + b"$GNGGA,dummy*00\r\n":
+        uart.wr(USART2 + 0x28, b)
+    assert int(uart.value(f"{UART_RX} RtcmCount 1005"), 0) == 1
+    assert int(uart.value(f"{UART_RX} NmeaInput"), 0) == 1
