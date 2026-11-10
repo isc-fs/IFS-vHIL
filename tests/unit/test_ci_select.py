@@ -230,7 +230,7 @@ def _registered():
 
 SUBSYSTEMS = {"can", "bootloader", "flash", "adc", "dma", "sd", "isospi", "i2c", "radio", "plant",
               "timers", "cpu_timing", "fast_forward", "fault_hooks", "reset", "live_session", "server",
-              "debugger", "broker", "probe"}
+              "debugger", "broker", "probe", "gnss"}
 BUILTIN = {"skipif", "xfail", "parametrize", "usefixtures", "filterwarnings", "skip"}
 
 
