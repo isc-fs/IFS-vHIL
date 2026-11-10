@@ -84,7 +84,7 @@ const LAYOUT = {
 };
 
 export const ws = reactive({
-    config: { run_virtual_ms: 3000, base_branch: 'dev', can_open_pr: false },
+    config: { run_virtual_ms: 5000, base_branch: 'dev', can_open_pr: false },
     systems: [],
     firmware: {}, // id -> catalogue firmware (repo, ref)
     // The open system. saved: the signature of the graph when it was opened
@@ -115,7 +115,7 @@ export const ws = reactive({
     checked: false,
     run: null, // {id, state, counts, what}
     runs: [], // the open system's history
-    virtualMs: 3000,
+    virtualMs: 5000,
     // The sync quantum Run and Live run at, us: the gate's 500 unless picked
     // 1000 (#348; shell/editor-run.js QUANTA_US). Not remembered: a reload
     // is back at 500.
@@ -396,7 +396,7 @@ export function createScenario(name) {
         say('Open a system first', 'warning');
         return;
     }
-    if (!newScenario(name, Number(ws.virtualMs) || 3000)) return;
+    if (!newScenario(name, Number(ws.virtualMs) || 5000)) return;
     ws.commit.scenario = true;
     ws.commit.scenarioMessage = `test(scenarios): add ${ws.id}/${name}`;
     ws.layout.dock = true;

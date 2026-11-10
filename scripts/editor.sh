@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Start the system editor: Antmicro's Pipeline Manager (UI on :5000) and the
 # vHIL backend it talks to (python -m vhil.editor serve, TCP :9000).
+# This is the native editor alone. For the whole app (editor, Run, runs,
+# state), use `bin/vhil ui` instead: http://localhost:8080/editor/.
 #
 #   scripts/editor.sh
 #

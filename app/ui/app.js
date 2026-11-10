@@ -94,7 +94,7 @@ function render() {
       vmLevel === "ok" ? [] : mac ? [{ label: "Start", task: "vm" }] : [{ label: "Check again", run: refresh }]);
     const rest = checksOf((m) => !isVm(m));
     const level = vmLevel === "ok" ? worst(rest) : "";
-    step("setup", level, level === "ok" ? "Ready." : "Pulls the images and builds the firmware (~15 min the first time).",
+    step("setup", level, level === "ok" ? "Ready." : "Pulls the images and builds the firmware: ~15 min the first time; ~30 min more if no published image fits and it builds them.",
       vmLevel === "ok" ? [{ label: level === "ok" ? "Run again" : "Run set-up", task: "setup" }] : []);
     $("#step-setup .checks").replaceChildren(
       ...rest.map((c) => {

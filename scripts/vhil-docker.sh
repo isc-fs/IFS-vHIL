@@ -22,7 +22,7 @@
 #   scripts/vhil-docker.sh ifs-hil [suite] [pytest args]
 #                                                IFS_HIL's ECU suite over vcan (VHIL_DUT=ams: AMS suite)
 #                                                (VHIL_SYSTEM=systems/ecu-ams.yaml: with the AMS)
-#   scripts/vhil-docker.sh editor                system editor on http://localhost:8080/editor/
+#   scripts/vhil-docker.sh editor                system editor on http://localhost:8080/editor/ (and the run worker)
 #                                                (with the app's api and proxy)
 #   scripts/vhil-docker.sh server                web app API + shell on http://localhost:8080
 #                                                (M5; full stack: docker/compose.yaml)
@@ -291,10 +291,10 @@ ifs-hil)
 editor)
     # Pipeline Manager on the web app's origin, under /editor/, behind the
     # proxy (docker/compose.yaml; the api comes up with it, for the login
-    # check). It publishes no port of its own and runs nothing: Run is the
-    # web app's (`worker` executes it).
+    # check). It publishes no port of its own. Run is the web app's, which
+    # the worker executes: it comes up too, or a run here stays queued (#393).
     ensure_images
-    VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy ;;
+    VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy worker ;;
 export-run|import-run)
     # The app's runs (the vhil-data volume, as the api sees it) to and from
     # a file on the host: its directory is mounted at /xfer.

@@ -53,6 +53,7 @@ from vhil.system import CATALOG, ID, REPO, System, SystemError
 FORMAT_VERSION = "20250623.14"
 
 BUS_NODE = "CAN bus"
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")             # $defs/name: a bus, board or device
 GRAPH_ID = "system"
 # Between a pin and its label in an interface's name ("PF8 · APPS_1").
 ROLE_SEP = " · "
@@ -526,6 +527,33 @@ def to_dataflow(doc: dict, spec: dict | None = None, source: str | None = None) 
 
 # -- graph -> system -------------------------------------------------------------
 
+def _instance_names(nodes: list[dict], kinds: dict[str, str]) -> dict[str, str]:
+    """Each node's name in the system file (#388). Pipeline Manager names a
+    node it adds after its type: "CAN bus", which `$defs/name` refuses, and a
+    second one would overwrite the first. A node keeps its instance name when
+    it is a valid name no earlier node took; any other gets the next free
+    `<base>_<n>`: can_1, can_2 for buses, the type's name made valid otherwise."""
+    names, taken = {}, set()
+    for n in nodes:
+        want = n.get("instanceName") or ""
+        if NAME.fullmatch(want) and want not in taken:
+            names[n["id"]] = want
+            taken.add(want)
+    for n in nodes:
+        if n["id"] in names:
+            continue
+        base = "can" if kinds[n["name"]] == "bus" else \
+            re.sub(r"\W", "_", n["name"]).strip("_") or "node"
+        if base[0].isdigit():
+            base = "_" + base
+        k = 1
+        while f"{base}_{k}" in taken:
+            k += 1
+        names[n["id"]] = f"{base}_{k}"
+        taken.add(names[n["id"]])
+    return names
+
+
 def from_dataflow(dataflow: dict, spec: dict | None = None) -> dict:
     """The system document a dataflow describes. Raises SystemError on a graph
     that is not a system (unknown node type, a connection the catalogue has no
@@ -538,12 +566,12 @@ def from_dataflow(dataflow: dict, spec: dict | None = None) -> dict:
     graphs = {g["id"]: g for g in dataflow["graphs"]}
     graph = graphs[dataflow.get("entryGraph") or dataflow["graphs"][0]["id"]]
 
-    by_iface, names = {}, {}
     for n in graph["nodes"]:
         if n["name"] not in kinds:
             raise SystemError(f"node type '{n['name']}' is not in the catalogue")
-        name = n.get("instanceName") or n["id"]
-        names[n["id"]] = name
+    by_iface, names = {}, _instance_names(graph["nodes"], kinds)
+    for n in graph["nodes"]:
+        name = names[n["id"]]
         for i in n["interfaces"]:
             # A board interface stands for its pin, whatever its label.
             by_iface[i["id"]] = (n, name, pin_of(i["name"]) if kinds[n["name"]] == "board"
