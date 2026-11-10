@@ -14,7 +14,8 @@ import pytest
 from vhil.sim import Sim
 from vhil.system import REPO
 
-pytestmark = [pytest.mark.system_sensorhub, pytest.mark.can, pytest.mark.adc, pytest.mark.i2c]
+pytestmark = [pytest.mark.system_sensorhub, pytest.mark.can, pytest.mark.adc, pytest.mark.i2c,
+              pytest.mark.gnss]
 
 SYSTEM = REPO / "systems" / "sensorhub.yaml"
 FLASH, SP = 0x08000000, 0x20010000
@@ -129,3 +130,32 @@ def test_the_imu_answers_on_spi3_with_its_chip_selects(sim):
     wr(spi3 + 0x00, (1 << 2) | (1 << 6))                # MSTR, SPE
     assert xfer(4, [0x80, 0, 0])[2] == 0x1E
     assert xfer(5, [0x80, 0])[1] == 0x0F
+
+
+def test_the_gnss_receiver_answers_on_i2c2_with_a_fix(sim):
+    """systems/sensorhub.yaml wires a ZED-F9P on I2C2 at 0x42: after its
+    first epoch (1 s) the bytes waiting (0xFD/0xFE) are NMEA, its GGA with
+    the position set. I2C2_BASE 0x40005800 (stm32l496xx.h); CR2 SADD, RD_WRN
+    bit 10, START 13, NBYTES 16, AUTOEND 25; RXDR 0x24, TXDR 0x28."""
+    i2c2, rx = 0x40005800, "sysbus.i2c2.gnss_rx"
+
+    def wr(address, value):
+        sim.monitor(f"sysbus WriteDoubleWord {address:#x} {value:#x}", board="sensorhub")
+
+    def read(n):
+        wr(i2c2 + 0x04, (0x42 << 1) | (1 << 10) | (n << 16) | (1 << 25) | (1 << 13))
+        return bytes(int(sim.monitor(f"sysbus ReadDoubleWord {i2c2 + 0x24:#x}", board="sensorhub"), 16)
+                     for _ in range(n))
+
+    sim.monitor(f"{rx} SetPosition 404168000 -37038000 650000", board="sensorhub")
+    sim.run_for(ms=1010)
+    wr(i2c2, 1)                                          # CR1: PE
+    wr(i2c2 + 0x04, (0x42 << 1) | (1 << 16) | (1 << 13))  # write 0xFD, no AUTOEND
+    wr(i2c2 + 0x28, 0xFD)
+    hi, lo = read(2)
+    stream = b""
+    n = hi << 8 | lo
+    while len(stream) < n:
+        stream += read(min(255, n - len(stream)))
+    gga = [line for line in stream.decode().split("\r\n") if line.startswith("$GNGGA")]
+    assert gga and gga[0].split(",")[2:7] == ["4025.00800", "N", "00342.22800", "W", "1"]

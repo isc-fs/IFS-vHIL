@@ -19,3 +19,7 @@ devices:
   # The on-board BMI088 on SPI3: CSB1 (accelerometer) PC4, CSB2 (gyroscope)
   # PC5 (catalog/boards/sensorhub.yaml). The MainLite's is on I2C2.
   imu: {model: bmi088, spi: sensorhub.SPI3, pins: {csb1: sensorhub.PC4, csb2: sensorhub.PC5}}
+  # A ZED-F9P RTK receiver on J1's I2C2 (PB10 SCL J1.13 / PB11 SDA J1.14), at
+  # its default address 0x42. The receiver is not on the board: it is an
+  # external part on J1. On SPI it would be spi: sensorhub.SPI1, cs: sensorhub.PA4.
+  gnss: {model: zed-f9p, i2c: sensorhub.I2C2}
