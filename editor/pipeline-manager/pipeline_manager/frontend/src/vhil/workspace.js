@@ -52,6 +52,13 @@ function stored(key) {
 function store(key, value) {
     try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* not kept */ }
 }
+function unstore(key) {
+    try { window.localStorage.removeItem(key); } catch { /* not kept */ }
+}
+
+// A new (never committed) system has no file to reopen: its graph is kept
+// here as a local draft until it is committed.
+const draftKey = (id) => `vhil.draft.${id}`;
 
 export const DOCK_TABS = [
     // id, label, the step that fills it (none: here now)
@@ -183,6 +190,32 @@ export function currentGraph() {
 export function refreshDirty() {
     if (!ws.id || ws.saved === null) { ws.dirty = ws.isNew; return; }
     try { ws.dirty = ws.isNew || signature(saveDataflow()) !== ws.saved; } catch { /* mid-load */ }
+    saveDraft();
+}
+
+/** Keeps the open new system's graph as a local draft (no-op otherwise). */
+export function saveDraft() {
+    if (!ws.id || !ws.isNew || ws.saved === null) return;
+    try { store(draftKey(ws.id), currentGraph()); } catch { /* mid-load */ }
+}
+
+/** Asks before replacing unsaved edits; false keeps the current graph. */
+function discardOk(what) {
+    if (!ws.dirty) return true;
+    saveDraft();
+    // eslint-disable-next-line no-alert
+    return window.confirm(`${ws.id} has unsaved changes. Discard them and ${what}?`);
+}
+
+// A reload or closed tab with unsaved edits asks first.
+if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', (e) => {
+        if (!ws.dirty) return undefined;
+        saveDraft();
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+    });
 }
 
 async function previewYaml() {
@@ -207,7 +240,8 @@ export const problemCount = (severity) => allProblems()
 // shared link opens it again.
 function remember() {
     const u = new URL(window.location.href);
-    if (ws.id && !ws.isNew) u.searchParams.set('system', ws.id); else u.searchParams.delete('system');
+    if (ws.id) u.searchParams.set('system', ws.id); else u.searchParams.delete('system');
+    if (ws.id && ws.isNew) u.searchParams.set('new', '1'); else u.searchParams.delete('new');
     if (ws.branch) u.searchParams.set('branch', ws.branch); else u.searchParams.delete('branch');
     if (replay.id) u.searchParams.set('run', String(replay.id)); else u.searchParams.delete('run');
     if (scen.name && !scen.isNew) u.searchParams.set('scenario', scen.name);
@@ -246,6 +280,7 @@ export function open(id, {
     branch = '', isNew = false, keepReplay = false, scenario = '',
 } = {}) {
     return guarded(`could not open ${id}`, async () => {
+        if (!(id === ws.id && branch === ws.branch) && !discardOk(isNew ? `create ${id}` : `open ${id}`)) return;
         if (!keepReplay) exitReplay();
         ws.status = `opening ${id}…`;
         const q = new URLSearchParams();
@@ -254,6 +289,9 @@ export function open(id, {
         const s = await call('GET', `/api/systems/${encodeURIComponent(id)}/dataflow?${q}`);
         ws.selectedId = null;
         await loadGraph(s.dataflow);
+        const draft = !s.exists && isNew ? stored(draftKey(id)) : null;
+        if (draft) await loadGraph(draft);
+        else if (s.exists) unstore(draftKey(id));
         Object.assign(ws, {
             id,
             isNew: !s.exists,
@@ -280,7 +318,7 @@ export function open(id, {
         // eslint-disable-next-line no-use-before-define
         await openScenarios(scenario);
         const where = `${branch || 'checked-out tree'} @ ${(s.ref || '').slice(0, 8)}`;
-        say(`Opened ${id}${s.exists ? '' : ' (new)'} · ${where}`);
+        say(`Opened ${id}${s.exists ? '' : ' (new)'}${draft ? ' (local draft restored)' : ''} · ${where}`);
         if (s.errors.length) {
             ws.layout.dock = true;
             ws.layout.dockTab = 'problems';
@@ -482,6 +520,7 @@ async function commitSystem({ takeover = false } = {}) {
         out = await send({ ...body, takeover: true });
     }
     ws.isNew = false;
+    unstore(draftKey(ws.id));
     ws.runRef = out.ref;
     ws.base = out.ref;
     ws.saved = signature(saveDataflow());
@@ -907,7 +946,10 @@ export async function start() {
     const run = Number(q.get('run'));
     if (id) {
         await open(id, {
-            branch: q.get('branch') || '', keepReplay: true, scenario: q.get('scenario') || '',
+            branch: q.get('branch') || '',
+            isNew: q.get('new') === '1',
+            keepReplay: true,
+            scenario: q.get('scenario') || '',
         });
     }
     if (run > 0) {
