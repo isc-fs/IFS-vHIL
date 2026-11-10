@@ -926,6 +926,39 @@ def test_worker_runs_at_the_run_quantum_and_records_it(settings, store, asked):
     assert len(opted) == (1 if asked == 1000 else 0)
 
 
+def test_run_warnings_say_why_a_run_without_expects_showed_nothing():
+    from vhil.worker import run_warnings
+    frames = {"can_acu": 3}
+    assert run_warnings({}, {"frames": frames}, {"ecu": False, "ams": False}, 1_000_000) == [
+        "the app never started (run ended at 1.0 s, auto-jump at 2 s)"]
+    assert run_warnings({}, {"frames": frames}, {"ecu": True, "ams": False}, 2_500_000) == [
+        "the app never started on ams (run ended at 2.5 s, auto-jump at 2 s)"]
+    assert run_warnings({}, {"frames": {"can_acu": 0}}, {"ecu": True}, 5_000_000) == [
+        "no CAN frames: the bus saw none"]
+    assert run_warnings({}, {"frames": frames}, {"ecu": True}, 5_000_000) == []
+    # Unknown app state (no sim answer) and a run with expects: no warning.
+    assert run_warnings({}, {"frames": frames}, {}, 1_000_000) == []
+    assert run_warnings({"expect": [{}]}, {"frames": {}}, {"ecu": False}, 1_000_000) == []
+
+
+@pytest.mark.parametrize("in_app, warned", [(False, True), (True, False)])
+def test_worker_records_a_warning_when_the_app_never_started(settings, store, in_app, warned):
+    class Sim(FakeSim):
+        def in_app(self, board):
+            return in_app
+
+    run_id = store.create("ecu", "", {}, {"kind": "run", "virtual_ms": 1000})
+    Worker(settings, sim_factory=lambda *a: Sim(), resolver=FixedResolver()).run_once()
+    run = store.get(run_id)
+    assert run["state"] == "passed"
+    warnings = run["summary"].get("warnings", [])
+    assert bool(warnings) == warned
+    if warned:
+        assert warnings == ["the app never started (run ended at 1.0 s, auto-jump at 2 s)"]
+        trace = read_trace(settings.results / str(run_id) / "trace.jsonl")
+        assert any("the app never started" in r.get("text", "") for r in trace)
+
+
 def test_a_run_at_another_quantum_is_refused(settings, store):
     run_id = store.create("ecu", "", {}, {"kind": "run", "virtual_ms": 200, "quantum_us": 750})
     Worker(settings, sim_factory=lambda *a, **k: FakeSim(), resolver=FixedResolver()).run_once()
