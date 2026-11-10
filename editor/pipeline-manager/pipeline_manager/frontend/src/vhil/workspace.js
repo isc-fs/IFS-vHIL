@@ -106,6 +106,8 @@ export const ws = reactive({
     // Check's (and opening's) findings: {severity: error|warning, text, nodeId}.
     problems: [],
     checked: false,
+    // The graph was edited after the findings above (the auto-check is due).
+    stale: false,
     run: null, // {id, state, counts, what}
     runs: [], // the open system's history
     virtualMs: 3000,
@@ -168,6 +170,11 @@ export function cycleTheme() {
 
 // -- the graph ------------------------------------------------------------------
 
+// The graph (signature) the findings are of, and the pending auto-check.
+let checkedSig = null;
+let autoTimer = null;
+const AUTO_CHECK_MS = 1000;
+
 /** The dataflow with what Pipeline Manager drops put back (the file's id,
  *  description, bench wiring and source text, from when it was opened). */
 export function currentGraph() {
@@ -183,6 +190,8 @@ export function currentGraph() {
 export function refreshDirty() {
     if (!ws.id || ws.saved === null) { ws.dirty = ws.isNew; return; }
     try { ws.dirty = ws.isNew || signature(saveDataflow()) !== ws.saved; } catch { /* mid-load */ }
+    // eslint-disable-next-line no-use-before-define
+    noteEdit();
 }
 
 async function previewYaml() {
@@ -273,7 +282,11 @@ export function open(id, {
         ws.pr.title = ws.commit.message;
         refreshDirty();
         setProblems(s.errors, s.warnings);
-        ws.checked = true;
+        // A new system's findings are of an empty file, not a Check.
+        ws.checked = s.exists;
+        ws.stale = false;
+        checkedSig = s.exists ? ws.saved : null;
+        clearTimeout(autoTimer);
         remember();
         document.title = `${id} · IFS vHIL`;
         clearScenario();
@@ -299,12 +312,39 @@ export function newSystem(id) {
     return open(id, { isNew: true });
 }
 
+/** Validates the open system and shows the findings; returns the preview. */
+async function runCheck() {
+    if (!ws.id) throw new Error('open a system first');
+    const sig = signature(saveDataflow());
+    const p = await previewYaml();
+    setProblems(p.errors, p.warnings);
+    ws.checked = true;
+    checkedSig = sig;
+    ws.stale = false;
+    // eslint-disable-next-line no-use-before-define
+    noteEdit(); // edited while it ran: stale again, re-check
+    return p;
+}
+
+/** After an edit: the findings are stale, and a Check follows once edits
+ *  pause. Quiet: no toast, the dock stays as it is. */
+function noteEdit() {
+    if (!ws.id) return;
+    let sig;
+    try { sig = signature(saveDataflow()); } catch { return; /* mid-load */ }
+    if (sig === checkedSig) return;
+    ws.stale = true;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(async () => {
+        if (ws.busy) { noteEdit(); return; }
+        try { await runCheck(); } catch { /* the explicit Check reports it */ }
+    }, AUTO_CHECK_MS);
+}
+
 export function check() {
     return guarded('Check', async () => {
-        if (!ws.id) throw new Error('open a system first');
-        const p = await previewYaml();
-        setProblems(p.errors, p.warnings);
-        ws.checked = true;
+        clearTimeout(autoTimer);
+        const p = await runCheck();
         ws.layout.dock = true;
         ws.layout.dockTab = 'problems';
         if (p.errors.length) say(`${ws.id} is not valid: ${p.errors.length} error(s)`, 'error');
