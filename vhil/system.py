@@ -482,6 +482,9 @@ class System:
             for port in DEVICE_PORTS:
                 if port in dev:
                     need(ENDPOINT, dev[port], f"device '{name}': {port}")
+            for port, endpoint in dev.get("uarts", {}).items():
+                need(NAME, port, f"device '{name}': uart port")
+                need(ENDPOINT, endpoint, f"device '{name}': uarts.{port}")
             if "attach" in dev:
                 need(NAME, dev["attach"], f"device '{name}': attach")
             for out, endpoint in dev.get("outputs", {}).items():
@@ -797,6 +800,9 @@ class System:
                 if ins & outs or ins | outs != set(want_pins):
                     raise SystemError(f"model '{doc['id']}': renode gpio_in and gpio_out must "
                                       f"split its gpio pins {want_pins} between them")
+            if set(interface.get("uarts", [])) != set(doc.get("renode", {}).get("uarts", {})):
+                raise SystemError(f"model '{doc['id']}': renode uarts must name a constructor "
+                                  f"argument for each of its uarts {interface.get('uarts', [])}")
             if set(dev.get("pins", {})) != set(want_pins):
                 raise SystemError(f"device '{name}' ({dev['model']}) wires pins "
                                   f"{sorted(want_pins)}, got {sorted(dev.get('pins', {}))}")
@@ -818,6 +824,16 @@ class System:
                                       f"{interface['attach']} port")
             elif "attach" in dev or "count" in dev:
                 raise SystemError(f"device '{name}' ({dev['model']}) does not attach to a device")
+            # A model's further UART ports (a ZED-F9P's UART2), each wired to
+            # a board UART or left open.
+            for port, endpoint in dev.get("uarts", {}).items():
+                if port not in interface.get("uarts", []):
+                    raise SystemError(f"device '{name}' ({dev['model']}) has no UART port "
+                                      f"'{port}' (has {interface.get('uarts', [])})")
+                board, kind, _ = self.resolve(endpoint)
+                if kind != "uart":
+                    raise SystemError(f"device '{name}': uarts.{port} '{endpoint}' is {kind}, not uart")
+                boards.add(board.name)
             if len(boards) > 1:
                 raise SystemError(f"device '{name}' spans boards {sorted(boards)}")
             self._check_params(name, dev, dev.get("params", {}))
@@ -880,6 +896,7 @@ class System:
         used = [node for spec in self.buses.values() for node in spec["nodes"]]
         for dev in self.devices.values():
             used += [dev[p] for p in DEVICE_PORTS if p in dev]
+            used += list(dev.get("uarts", {}).values())
             used += list(dev.get("outputs", {}).values())
             used += list(dev.get("pins", {}).values())
         for spec in self.doc.get("port", {}).get("signals", {}).values():
@@ -1100,6 +1117,9 @@ class System:
                 return str(v).lower()
             return rn.quote(v) if isinstance(v, str) else rn.number(v)
         body = [f"    {k}: {value(v)}" for k, v in args.items()]
+        # Further UART ports, each a constructor argument naming the MCU's UART.
+        body += [f"    {rn.ident(renode['uarts'][port])}: {local(self.resolve(endpoint)[2])}"
+                 for port, endpoint in dev.get("uarts", {}).items()]
         name = rn.ident(name)
         lines = []
         if "attach" in dev:

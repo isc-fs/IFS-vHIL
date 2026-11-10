@@ -225,7 +225,7 @@ def test_valset_switches_to_nav_pvt_and_valget_reads_back(hub):
 
 def test_valset_with_an_unknown_key_is_refused_whole(hub):
     i2c = I2c(hub)
-    i2c.write(_valset([(RATE_MEAS, 200), (0x40530001, 115200)]))   # + CFG-UART2-BAUDRATE
+    i2c.write(_valset([(RATE_MEAS, 200), (0x10770001, 1)]))   # + CFG-USBINPROT-UBX (no USB)
     assert _messages(i2c.read(i2c.waiting())) == [_ubx(0x05, 0x00, bytes([0x06, 0x8A]))]
     assert int(hub.value(f"{RX} Config {RATE_MEAS:#x}"), 0) == 1000
 
@@ -339,3 +339,56 @@ def test_on_uart_the_mcus_tx_is_its_input(uart):
         uart.wr(USART2 + 0x28, b)
     assert int(uart.value(f"{UART_RX} RtcmCount 1005"), 0) == 1
     assert int(uart.value(f"{UART_RX} NmeaInput"), 0) == 1
+
+
+def test_a_correction_radio_on_uart2_gives_rtk(hub):
+    """RTCM3 from a radio on UART2 (InjectUart2), position read on I2C: the
+    usual RTK wiring. UART2 is open, so nothing queues there."""
+    hub.mon.execute(f"{RX} SetPosition 404168000 -37038000 650000")
+    hub.mon.execute(f"{RX} FixTimeS 0")
+    frames = _rtcm(1005, station=401) + _rtcm(1077, length=40)
+    hub.mon.execute(f'{RX} InjectUart2 "{frames.hex()}"')
+    assert int(hub.value(f"{RX} RtcmCount 1077"), 0) == 1
+    _run(hub, "1.01")
+    gga = _nmea(I2c(hub).drain(), "GGA")[0]
+    assert (gga[6], gga[14]) == ("4", "0401")
+    assert int(hub.value(f"{RX} Uart2Pending"), 0) == 0
+
+
+@pytest.fixture
+def hub_uart2(tmp_path):
+    """The receiver on I2C2, its UART2 on the MCU's USART2."""
+    p = Platform()
+    repl = tmp_path / "gnss.repl"
+    repl.write_text(f"gnss_rx: Sensors.ZedF9pI2c @ i2c2 0x{ADDR:02X}\n    uart2: usart2\n")
+    p.mon.execute(f"machine LoadPlatformDescription {rn.file_arg(repl)}")
+    p.run_program([], seconds="0.001")
+    p.wr(I2C2, 1)
+    p.wr(USART2 + 0x0C, 104)
+    p.wr(USART2 + 0x00, 0b1101)
+    yield p
+    p.close()
+
+
+def test_uart2_on_a_board_uart_answers_there_and_sends_what_it_enables(hub_uart2):
+    p = hub_uart2
+    i2c = I2c(p)
+    p.mon.execute(f"{RX} SetPosition 404168000 -37038000 650000")
+    # A VALSET in on UART2: its ACK goes out on UART2, not on I2C.
+    for b in _valset([(0x10760002, 1)] + [(k - 2, 0) for n, k in NMEA_SPI.items() if n != "GGA"]):
+        p.wr(USART2 + 0x28, b)                   # CFG-UART2OUTPROT-NMEA on, GGA only
+    p.mon.execute('emulation RunFor "0.01"')
+    assert _messages(_rx(p)) == [_ubx(0x05, 0x01, bytes([0x06, 0x8A]))]
+    assert i2c.waiting() == 0
+    # The keys were UART2's (SPI's minus 2): I2C still sends the full set.
+    # GGA's ~70 bytes take ~18 ms at 38400: read 50 ms after the epoch.
+    p.mon.execute('emulation RunFor "1.04"')
+    assert [m[:5] for m in _messages(_rx(p))] == ["GNGGA"]
+    assert len(i2c.drain()) == 8
+    assert int(p.value(f"{RX} Uart2BaudRate"), 0) == 38400
+
+
+def test_uart2_sends_no_nmea_by_default(hub_uart2):
+    hub_uart2.mon.execute('emulation RunFor "1.05"')
+    assert _rx(hub_uart2) == b""
+    assert len(I2c(hub_uart2).drain()) == 6, "no fix: one GSV"

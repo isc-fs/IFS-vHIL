@@ -7,7 +7,10 @@ description: >-
   `i2c:` puts it at 0x42 (bytes waiting at 0xFD/0xFE, the stream at 0xFF);
   `uart:` makes it the far end of a board UART (its UART1, 38400 8N1 by
   default, bytes paced at the baud rate); `spi:` makes it a full-duplex SPI
-  slave with its chip select as `cs`.
+  slave with its chip select as `cs`. UART2, which on the chip runs beside
+  any of them (UBX and RTCM3 in, 38400), is `uarts: {uart2: <board UART>}`
+  on the same board, or open; a correction radio on it is the test API's
+  InjectUart2.
   Every epoch (CFG-RATE-MEAS, 1 s by default) it sends NMEA GGA, GLL, GSA,
   GSV, RMC and VTG, and UBX NAV-PVT once enabled or polled; it takes
   CFG-VALSET/VALGET on the RAM layer and RTCM3 corrections (CRC-24Q
@@ -19,13 +22,16 @@ description: >-
   ClearPosition, SetVelocity, Satellites, GeoidSeparationMm, Hdop/Vdop/Pdop,
   FixTimeS, UtcStart, Solution, CorrectionsAge, StationId, RtcmCount, RtcmCrcErrors, UbxChecksumErrors,
   NmeaInput, Pending, Dropped, Config; on I2C also Respond and NackCount,
-  on UART BaudRate. On I2C it is <device>_rx, on UART sysbus.<device>.
+  on UART BaudRate; for UART2 InjectUart2 (hex), Uart2Pending,
+  Uart2BaudRate. On I2C it is <device>_rx, on UART sysbus.<device>.
 interface:
   protocols:
     i2c: {}
     uart: {}
     # The SPI chip select, active low; the MCU drives it.
     spi: {cs: true}
+  # UART2: optional, beside the port above.
+  uarts: [uart2]
 backend: renode
 renode:
   source: models/renode/ZedF9p.cs
@@ -34,5 +40,7 @@ renode:
     rx: {type: Sensors.ZedF9pI2c, address: 0x42}
   # UART: on sysbus at no address, the MCU's UART its constructor argument.
   uart: {type: Sensors.ZedF9pUart, argument: uart}
+  # UART2's MCU UART, if wired: a constructor argument of every type.
+  uarts: {uart2: uart2}
   # SPI: one slave; GPIO input 0 is CS.
   type: Sensors.ZedF9pSpi

@@ -138,7 +138,7 @@ _RIGHT = ("can", "gpio")
 _MODEL_HOST_PORTS = (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"), ("i2c", "i2c"),
                      ("uart", "uart"))
 # Field order in a written system file.
-_DEVICE_FIELDS = ("model", "spi", "cs", "sdmmc", "i2c", "uart", "pins", "outputs", "attach", "count",
+_DEVICE_FIELDS = ("model", "spi", "cs", "sdmmc", "i2c", "uart", "uarts", "pins", "outputs", "attach", "count",
                   "params")
 _SYSTEM_FIELDS = ("kind", "id", "description", "time", "boards", "buses", "devices", "plants",
                   "port", "bench")
@@ -409,6 +409,9 @@ def specification(catalog: Path = CATALOG) -> dict:
         interfaces = [{"name": field, "type": itype, "direction": "inout", "side": "left",
                        "maxConnectionsCount": 1}
                       for field, itype in _MODEL_HOST_PORTS if iface.get(field)]
+        # Further UART ports (a ZED-F9P's UART2; a device's `uarts`).
+        interfaces += [{"name": port, "type": "uart", "direction": "inout", "side": "left",
+                        "maxConnectionsCount": 1} for port in iface.get("uarts", [])]
         # GPIO pins, each wired to a board GPIO (a device's `pins`).
         interfaces += [{"name": pin, "type": "gpio", "direction": "inout", "side": "left",
                         "maxConnectionsCount": 1} for pin in iface.get("gpio", [])]
@@ -525,7 +528,7 @@ def to_dataflow(doc: dict, spec: dict | None = None, source: str | None = None) 
             if field in dev:
                 board, pin = dev[field].split(".", 1)
                 connect(f"i:{board}:{pin}", f"i:{name}:{field}")
-        for field, endpoint in dev.get("pins", {}).items():
+        for field, endpoint in [*dev.get("pins", {}).items(), *dev.get("uarts", {}).items()]:
             board, pin = endpoint.split(".", 1)
             connect(f"i:{board}:{pin}", f"i:{name}:{field}")
         for out, endpoint in dev.get("outputs", {}).items():
@@ -633,6 +636,8 @@ def from_dataflow(dataflow: dict, spec: dict | None = None) -> dict:
                 devices[dev].setdefault("outputs", {})[field] = f"{board}.{pin}"
             elif field in _every_protocol(model).get("gpio", []):
                 devices[dev].setdefault("pins", {})[field] = f"{board}.{pin}"
+            elif field in _every_protocol(model).get("uarts", []):
+                devices[dev].setdefault("uarts", {})[field] = f"{board}.{pin}"
             else:
                 devices[dev][field] = f"{board}.{pin}"
         elif ka == kb == "model":

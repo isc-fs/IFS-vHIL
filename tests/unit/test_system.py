@@ -423,6 +423,8 @@ def _ams(tmp_path, devices):
     ("  gnss: {model: zed-f9p, uart: ams.I2C2}\n", "is i2c, not uart"),
     ("  gnss: {model: zed-f9p, uart: ams.USART10, i2c: ams.I2C2}\n", "got i2c, uart"),
     ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, uart: ams.USART10}\n", "takes no 'uart'"),
+    ("  gnss: {model: zed-f9p, i2c: ams.I2C2, uarts: {uart3: ams.USART10}}\n", "has no UART port 'uart3'"),
+    ("  gnss: {model: zed-f9p, i2c: ams.I2C2, uarts: {uart2: ams.I2C2}}\n", "uarts.uart2 'ams.I2C2' is i2c, not uart"),
 ])
 def test_bad_devices_are_rejected_with_a_reason(tmp_path, devices, message):
     with pytest.raises(SystemError, match=message):
@@ -776,6 +778,9 @@ def test_the_bus_a_zed_f9p_wires_picks_its_port(tmp_path):
                      f"devices:\n  gnss: {{model: zed-f9p, {wiring}}}\n")
         script = System(p).render_renode()
         assert want in script and "ZedF9pI2c" not in script
+    p.write_text("kind: system\nid: t\nboards:\n  sensorhub: {board: sensorhub}\n"
+                 "devices:\n  gnss: {model: zed-f9p, i2c: sensorhub.I2C2, uarts: {uart2: sensorhub.USART2}}\n")
+    assert "gnss_rx: Sensors.ZedF9pI2c @ i2c2 0x42\n    uart2: usart2" in System(p).render_renode()
 
 
 def test_a_board_without_roles_takes_its_own_front_end():

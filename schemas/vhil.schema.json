@@ -952,6 +952,12 @@
                 "$ref": "#/$defs/endpoint",
                 "description": "The board's UART connector the device is the far end of."
               },
+              "uarts": {
+                "type": "object",
+                "description": "The model's further UART ports (interface.uarts) -> the board UART each is wired to; one left out is open.",
+                "propertyNames": {"$ref": "#/$defs/name"},
+                "additionalProperties": {"$ref": "#/$defs/endpoint"}
+              },
               "attach": {
                 "$ref": "#/$defs/name",
                 "description": "Device whose port this one attaches to."
@@ -1138,6 +1144,13 @@
               "type": "boolean",
               "description": "The far end of a board's UART (renode.uart): the MCU's TX is its input, its output the MCU's RX."
             },
+            "uarts": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/name"},
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "Further UART ports, each optional (a ZED-F9P's UART2): a device wires each to a board UART on its own board (uarts), or leaves it open. renode.uarts names the constructor argument of each."
+            },
             "attach": {
               "type": "string",
               "description": "Kind of port on another device this model attaches to, e.g. isospi."
@@ -1256,6 +1269,12 @@
                   }
                 }
               }
+            },
+            "uarts": {
+              "type": "object",
+              "description": "For interface.uarts: port -> the constructor argument the MCU's UART is passed as.",
+              "propertyNames": {"$ref": "#/$defs/name"},
+              "additionalProperties": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
             },
             "uart": {
               "type": "object",
