@@ -1,23 +1,155 @@
 {
   "name": "vhil-tests",
   "displayName": "ISC vHIL",
-  "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel, in the vHIL's Docker image.",
-  "version": "0.1.0",
+  "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel, and its tools from a vHIL sidebar, in the vHIL's Docker image.",
+  "version": "0.2.0",
   "publisher": "isc-fs",
   "private": true,
-  "repository": {"type": "git", "url": "https://github.com/isc-fs/IFS-vHIL"},
-  "engines": {"vscode": "^1.85.0"},
-  "categories": ["Testing"],
-  "activationEvents": ["workspaceContains:scripts/vhil-docker.sh"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/isc-fs/IFS-vHIL"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "activationEvents": [
+    "workspaceContains:scripts/vhil-docker.sh"
+  ],
   "main": "./out/src/extension.js",
   "contributes": {
     "commands": [
-      {"command": "vhil.refreshTests", "title": "Refresh tests", "category": "vHIL", "icon": "$(refresh)"},
-      {"command": "vhil.menu", "title": "Show actions", "category": "vHIL"},
-      {"command": "vhil.startVm", "title": "Start the Docker VM", "category": "vHIL"},
-      {"command": "vhil.buildFirmware", "title": "Build firmware", "category": "vHIL"},
-      {"command": "vhil.openEditor", "title": "Open the system editor", "category": "vHIL"},
-      {"command": "vhil.checkStatus", "title": "Check VM and firmware", "category": "vHIL"}
+      {
+        "command": "vhil.refreshTests",
+        "title": "Refresh tests",
+        "category": "vHIL",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vhil.menu",
+        "title": "Show actions",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.checkStatus",
+        "title": "Check VM and firmware",
+        "category": "vHIL",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vhil.startVm",
+        "title": "Start the Docker VM",
+        "category": "vHIL",
+        "icon": "$(play)"
+      },
+      {
+        "command": "vhil.pullImages",
+        "title": "Pull images",
+        "category": "vHIL",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "vhil.buildImages",
+        "title": "Build images",
+        "category": "vHIL",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "vhil.buildFirmware",
+        "title": "Build firmware",
+        "category": "vHIL",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "vhil.rebuildBoard",
+        "title": "Rebuild this firmware",
+        "category": "vHIL",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "vhil.openEditor",
+        "title": "Open the system editor",
+        "category": "vHIL",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "vhil.stopEditor",
+        "title": "Stop the system editor",
+        "category": "vHIL",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "vhil.openSettings",
+        "title": "Settings",
+        "category": "vHIL",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "vhil.openSystemFile",
+        "title": "Open the system file",
+        "category": "vHIL",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "vhil.validateSystem",
+        "title": "Validate",
+        "category": "vHIL",
+        "icon": "$(check)"
+      },
+      {
+        "command": "vhil.runSystemSim",
+        "title": "Run its sim tests",
+        "category": "vHIL",
+        "icon": "$(play)"
+      },
+      {
+        "command": "vhil.runSystemScenarios",
+        "title": "Run its scenarios",
+        "category": "vHIL",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "vhil.runSystemSmoke",
+        "title": "Run its smoke suite",
+        "category": "vHIL",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "vhil.runAgain",
+        "title": "Run again",
+        "category": "vHIL",
+        "icon": "$(debug-rerun)"
+      },
+      {
+        "command": "vhil.rerunFailed",
+        "title": "Re-run the failures",
+        "category": "vHIL",
+        "icon": "$(run-errors)"
+      },
+      {
+        "command": "vhil.showRunOutput",
+        "title": "Show output",
+        "category": "vHIL",
+        "icon": "$(output)"
+      },
+      {
+        "command": "vhil.clearRuns",
+        "title": "Clear runs",
+        "category": "vHIL",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "vhil.revealTest",
+        "title": "Show in the Testing panel",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.tool",
+        "title": "Run a tool",
+        "category": "vHIL"
+      }
     ],
     "configuration": {
       "title": "vHIL",
@@ -44,11 +176,231 @@
         },
         "vhil.pytestArgs": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "markdownDescription": "Extra pytest arguments for every run, e.g. `--vhil-trace`."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vhil",
+          "title": "vHIL",
+          "icon": "media/vhil.svg"
+        }
+      ]
+    },
+    "views": {
+      "vhil": [
+        {
+          "id": "vhil.status",
+          "name": "Status"
+        },
+        {
+          "id": "vhil.systems",
+          "name": "Systems"
+        },
+        {
+          "id": "vhil.runs",
+          "name": "Runs"
+        },
+        {
+          "id": "vhil.tools",
+          "name": "Tools"
+        }
+      ]
+    },
+    "taskDefinitions": [
+      {
+        "type": "vhil",
+        "required": [
+          "args"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "scripts/vhil-docker.sh's arguments"
+          }
+        }
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "vhil.checkStatus",
+          "when": "view == vhil.status",
+          "group": "navigation"
+        },
+        {
+          "command": "vhil.openSettings",
+          "when": "view == vhil.status",
+          "group": "navigation"
+        },
+        {
+          "command": "vhil.refreshTests",
+          "when": "view == vhil.systems",
+          "group": "navigation"
+        },
+        {
+          "command": "vhil.clearRuns",
+          "when": "view == vhil.runs",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vhil.startVm",
+          "when": "view == vhil.status && viewItem == vm.down",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.pullImages",
+          "when": "view == vhil.status && viewItem == images",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.buildImages",
+          "when": "view == vhil.status && viewItem == images",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.buildFirmware",
+          "when": "view == vhil.status && viewItem == firmware",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.rebuildBoard",
+          "when": "view == vhil.status && viewItem == fw.board",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.openEditor",
+          "when": "view == vhil.status && viewItem =~ /^editor\\./",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.stopEditor",
+          "when": "view == vhil.status && viewItem =~ /^editor\\..*ours$/",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.runSystemSim",
+          "when": "view == vhil.systems && viewItem =~ /^system/",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "view == vhil.systems && viewItem =~ /^system.*scenarios/",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.validateSystem",
+          "when": "view == vhil.systems && viewItem =~ /^system/",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.runSystemSim",
+          "when": "view == vhil.systems && viewItem =~ /^system/",
+          "group": "1_run@1"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "view == vhil.systems && viewItem =~ /^system.*scenarios/",
+          "group": "1_run@2"
+        },
+        {
+          "command": "vhil.runSystemSmoke",
+          "when": "view == vhil.systems && viewItem =~ /^system.*smoke/",
+          "group": "1_run@3"
+        },
+        {
+          "command": "vhil.validateSystem",
+          "when": "view == vhil.systems && viewItem =~ /^system/",
+          "group": "2_check@1"
+        },
+        {
+          "command": "vhil.openSystemFile",
+          "when": "view == vhil.systems && viewItem =~ /^system/",
+          "group": "3_open@1"
+        },
+        {
+          "command": "vhil.rerunFailed",
+          "when": "view == vhil.runs && viewItem =~ /^run\\.tests\\.failed/",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.runAgain",
+          "when": "view == vhil.runs && viewItem =~ /^run\\./",
+          "group": "inline"
+        },
+        {
+          "command": "vhil.showRunOutput",
+          "when": "view == vhil.runs && viewItem =~ /output$/",
+          "group": "1_run@0"
+        },
+        {
+          "command": "vhil.rerunFailed",
+          "when": "view == vhil.runs && viewItem =~ /^run\\.tests\\.failed/",
+          "group": "1_run@1"
+        },
+        {
+          "command": "vhil.runAgain",
+          "when": "view == vhil.runs && viewItem =~ /^run\\./",
+          "group": "1_run@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vhil.rebuildBoard",
+          "when": "false"
+        },
+        {
+          "command": "vhil.openSystemFile",
+          "when": "false"
+        },
+        {
+          "command": "vhil.validateSystem",
+          "when": "false"
+        },
+        {
+          "command": "vhil.runSystemSim",
+          "when": "false"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "false"
+        },
+        {
+          "command": "vhil.runSystemSmoke",
+          "when": "false"
+        },
+        {
+          "command": "vhil.runAgain",
+          "when": "false"
+        },
+        {
+          "command": "vhil.rerunFailed",
+          "when": "false"
+        },
+        {
+          "command": "vhil.showRunOutput",
+          "when": "false"
+        },
+        {
+          "command": "vhil.revealTest",
+          "when": "false"
+        },
+        {
+          "command": "vhil.tool",
+          "when": "false"
+        }
+      ]
     }
   },
   "scripts": {
