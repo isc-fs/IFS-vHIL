@@ -72,6 +72,10 @@ BOARD_PITCH = 900
 # ("PC2_C · DEBUG_LED3"), so its pins sit in two columns and the node is
 # about as wide as it is tall.
 BOARD_WIDTH = 520
+# A device node's height: its header, then a row per interface and per
+# property, in pixels (Pipeline Manager v0.5.2 at the canvas's default
+# zoom), plus the margin to the next device in the column.
+DEVICE_HEADER, DEVICE_ROW, DEVICE_PROPERTY, DEVICE_MARGIN = 72, 36, 64, 40
 
 # The canvas look (docs/architecture/editor-workspace.md, "Tokens"), in
 # what Pipeline Manager v0.5.2's metadata takes (its
@@ -519,11 +523,15 @@ def to_dataflow(doc: dict, spec: dict | None = None, source: str | None = None) 
         for endpoint, stub in zip(bus["nodes"], stubs):
             board, pin = endpoint.split(".", 1)
             connect(f"i:{board}:{pin}", stub["id"])
-    for row, (name, dev) in enumerate(devices.items()):
+    y = 0
+    for name, dev in devices.items():
         values = dict(dev.get("params", {}))
         if "count" in dev:
             values["count"] = dev["count"]
-        node(dev["model"], name, values, -560, 200 * row)
+        node(dev["model"], name, values, -560, y)
+        t = types[dev["model"]]
+        y += (DEVICE_HEADER + DEVICE_ROW * len(t["interfaces"])
+              + DEVICE_PROPERTY * len(t["properties"]) + DEVICE_MARGIN)
         for field, _ in _MODEL_HOST_PORTS:
             if field in dev:
                 board, pin = dev[field].split(".", 1)
