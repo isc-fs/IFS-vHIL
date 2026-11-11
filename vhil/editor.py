@@ -73,6 +73,10 @@ BOARD_PITCH = 900
 # ("PC2_C · DEBUG_LED3"), so its pins sit in two columns and the node is
 # about as wide as it is tall.
 BOARD_WIDTH = 520
+# A device node's height: its header, then a row per interface and per
+# property, in pixels (Pipeline Manager v0.5.2 at the canvas's default
+# zoom), plus the margin to the next device in the column.
+DEVICE_HEADER, DEVICE_ROW, DEVICE_PROPERTY, DEVICE_MARGIN = 72, 36, 64, 40
 
 # The canvas look (docs/architecture/editor-workspace.md, "Tokens"), in
 # what Pipeline Manager v0.5.2's metadata takes (its
@@ -136,9 +140,10 @@ _BOARD_PORTS = (("can", "can"), ("spi", "spi"), ("uart", "uart"), ("sdmmc", "sdm
                 ("i2c", "i2c"), ("gpio", "gpio"), ("analog_in", "analog"))
 _RIGHT = ("can", "gpio")
 # Model host-side ports: system device field -> interface type.
-_MODEL_HOST_PORTS = (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"), ("i2c", "i2c"))
+_MODEL_HOST_PORTS = (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"), ("i2c", "i2c"),
+                     ("uart", "uart"))
 # Field order in a written system file.
-_DEVICE_FIELDS = ("model", "spi", "cs", "sdmmc", "i2c", "pins", "outputs", "attach", "count",
+_DEVICE_FIELDS = ("model", "spi", "cs", "sdmmc", "i2c", "uart", "uarts", "pins", "outputs", "attach", "count",
                   "params")
 _SYSTEM_FIELDS = ("kind", "id", "description", "time", "boards", "buses", "devices", "plants",
                   "port", "bench")
@@ -304,6 +309,19 @@ def _role_description(board: dict, firmware: dict) -> str:
         f"analog) is removed, with a notice."])
 
 
+NO_FIRMWARE = "(none)"
+
+
+def _every_protocol(model: dict) -> dict:
+    """A model's interface with each of its protocols' ports and pins added."""
+    iface = dict(model.get("interface", {}))
+    for proto, adds in (iface.pop("protocols", None) or {}).items():
+        iface[proto] = True
+        for key, value in adds.items():
+            iface[key] = [*iface.get(key, []), *value] if isinstance(value, list) else value
+    return iface
+
+
 def specification(catalog: Path = CATALOG) -> dict:
     """Pipeline Manager node types for everything in the catalogue."""
     firmware_docs = _catalog("firmware", catalog)
@@ -335,8 +353,13 @@ def specification(catalog: Path = CATALOG) -> dict:
                 "description": board.get("description", ""),
                 "interfaces": _rows([_iface(name, kind)
                                      for _, name, kind in _readings(board, None)]),
-                "properties": [{"name": "firmware", "type": "select", "values": firmware,
-                                "default": firmware[0]}, ref, *tail],
+                # NO_FIRMWARE: none from the catalogue (the system names
+                # none; its image is given at render), the default.
+                "properties": [{"name": "firmware", "type": "select",
+                                "values": [NO_FIRMWARE, *firmware], "default": NO_FIRMWARE,
+                                "description": "Catalogue firmware to build, or "
+                                               f"'{NO_FIRMWARE}': an image given at render."},
+                               ref, *tail],
                 "additionalData": {"vhil": {"kind": "board", "board": board_id}},
             })
             continue
@@ -385,10 +408,15 @@ def specification(catalog: Path = CATALOG) -> dict:
         "additionalData": {"vhil": {"kind": "bus", "bitrate": CAN_BITRATE}},
     })
     for model_id, model in _catalog("model", catalog).items():
-        iface = model.get("interface", {})
+        # A model with protocols offers every bus it speaks and what each adds
+        # (a BMI088: I2C, or SPI and its chip selects); the one wired picks.
+        iface = _every_protocol(model)
         interfaces = [{"name": field, "type": itype, "direction": "inout", "side": "left",
                        "maxConnectionsCount": 1}
                       for field, itype in _MODEL_HOST_PORTS if iface.get(field)]
+        # Further UART ports (a ZED-F9P's UART2; a device's `uarts`).
+        interfaces += [{"name": port, "type": "uart", "direction": "inout", "side": "left",
+                        "maxConnectionsCount": 1} for port in iface.get("uarts", [])]
         # GPIO pins, each wired to a board GPIO (a device's `pins`).
         interfaces += [{"name": pin, "type": "gpio", "direction": "inout", "side": "left",
                         "maxConnectionsCount": 1} for pin in iface.get("gpio", [])]
@@ -496,16 +524,20 @@ def to_dataflow(doc: dict, spec: dict | None = None, source: str | None = None) 
         for endpoint, stub in zip(bus["nodes"], stubs):
             board, pin = endpoint.split(".", 1)
             connect(f"i:{board}:{pin}", stub["id"])
-    for row, (name, dev) in enumerate(devices.items()):
+    y = 0
+    for name, dev in devices.items():
         values = dict(dev.get("params", {}))
         if "count" in dev:
             values["count"] = dev["count"]
-        node(dev["model"], name, values, -560, 200 * row)
+        node(dev["model"], name, values, -560, y)
+        t = types[dev["model"]]
+        y += (DEVICE_HEADER + DEVICE_ROW * len(t["interfaces"])
+              + DEVICE_PROPERTY * len(t["properties"]) + DEVICE_MARGIN)
         for field, _ in _MODEL_HOST_PORTS:
             if field in dev:
                 board, pin = dev[field].split(".", 1)
                 connect(f"i:{board}:{pin}", f"i:{name}:{field}")
-        for field, endpoint in dev.get("pins", {}).items():
+        for field, endpoint in [*dev.get("pins", {}).items(), *dev.get("uarts", {}).items()]:
             board, pin = endpoint.split(".", 1)
             connect(f"i:{board}:{pin}", f"i:{name}:{field}")
         for out, endpoint in dev.get("outputs", {}).items():
@@ -599,7 +631,7 @@ def from_dataflow(dataflow: dict, spec: dict | None = None) -> dict:
             if where.get("roles"):
                 choice = props.get("role")
                 boards[name]["role"] = where["roles"].get(choice) or role_of(choice)
-            else:
+            elif props.get("firmware") not in (None, "", NO_FIRMWARE):
                 boards[name]["firmware"] = props["firmware"]
             if str(props.get("firmware_ref") or "").strip():
                 boards[name]["firmware_ref"] = str(props["firmware_ref"]).strip()
@@ -638,8 +670,10 @@ def from_dataflow(dataflow: dict, spec: dict | None = None) -> dict:
             model = models[devices[dev]["model"]]
             if field in model.get("interface", {}).get("analog_out", []):
                 devices[dev].setdefault("outputs", {})[field] = f"{board}.{pin}"
-            elif field in model.get("interface", {}).get("gpio", []):
+            elif field in _every_protocol(model).get("gpio", []):
                 devices[dev].setdefault("pins", {})[field] = f"{board}.{pin}"
+            elif field in _every_protocol(model).get("uarts", []):
+                devices[dev].setdefault("uarts", {})[field] = f"{board}.{pin}"
             else:
                 devices[dev][field] = f"{board}.{pin}"
         elif ka == kb == "model":

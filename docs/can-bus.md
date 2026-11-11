@@ -36,7 +36,13 @@ frame, jitter under one kernel tick), not exact 10 000 µs intervals.
 
 The model works at frame granularity, with no bit-level physics. It follows
 ISO 11898-1 (Bosch CAN 2.0B) for the bus, and RM0468's FDCAN chapter for the
-controller (`Stm32H7Fdcan.cs`).
+H733's controller (`Stm32H7Fdcan.cs`). The STM32L496's bxCAN
+(`Stm32BxCan.cs`, after RM0351's bxCAN chapter) joins the bus the same way:
+its three Tx mailboxes are offered by lowest ID, or in request order with
+`MCR.TXFP`; `MCR.NART` plays DAR's part (`TSR.ALSTx`/`TERRx` instead of
+`TXBCF`); `TSR` and `ESR.TEC/LEC/EWGF/EPVF` read the bus's verdicts; the bit
+rate comes from BTR on PCLK1; the Tx interrupt (`IER.TMEIE`) is raised, the
+status-change interrupt is not.
 
 | | |
 |---|---|
@@ -53,6 +59,7 @@ controller (`Stm32H7Fdcan.cs`).
 - Bus-off reached from errors. `ForceBusOff` still forces it.
 - CAN FD frames, which are timed as classic frames.
 - The FDCAN's Tx and error interrupts (`IR.TC/TCF/TFE`, the Tx event FIFO, `IR.EP/EW/BO/PEA`), and the Tx event FIFO itself.
+- The bxCAN's error (status change) interrupt.
 
 The model logs these once when a firmware asks for them. Neither firmware does: both poll `PSR`, `TXFQS` and `TXBRP`.
 

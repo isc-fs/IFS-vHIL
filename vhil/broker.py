@@ -39,13 +39,6 @@ from vhil.renode import RenodeMonitor
 log = logging.getLogger("vhil.broker")
 REPO = Path(__file__).resolve().parent.parent
 
-# RTC backup registers: RTC_BASE 0x58004000 (stm32h733xx.h:2394), BKP0R at
-# offset 0x50 (stm32h733xx.h:1331). Renode's STM32F4_RTC holds the F4's 20,
-# BKP0R..BKP19R; the H733's BKP20R..BKP31R (to 0xCC) are unmodelled, so they
-# hold nothing to wipe.
-RTC_BKP = range(0x58004050, 0x58004050 + 20 * 4, 4)
-
-
 # After a power-on, where a CPU must not be (#125), and the system-control
 # registers that say why it is there (ARMv7-M ARM B3.2: ICSR, SHCSR, CFSR,
 # HFSR, MMFAR, BFAR).
@@ -101,16 +94,16 @@ def seed_commands(cells: dict | None, machine: str) -> list[str]:
             f"{bridge} SetAllTemperatures {int(cells['temp_dC'])}"]
 
 
-def power_on_commands(machine: str, vbat: bool) -> list[str]:
+def power_on_commands(machine: str, power_cut: list[str]) -> list[str]:
     """Monitor commands that power a board on, with its machine selected.
     Shared by the virtual broker and vhil.sim, so both mean the same thing.
 
     machine Reset keeps the backup domain, as a warm reset does. Without VBAT
     a power cut wipes it (the AMS's sticky ErrorLatch must not outlive the
     board's power), so it is cleared first, before the booting firmware can
-    read the old value: the RTC backup registers, and the 4 KB backup SRAM
-    at 0x38800000 that the CAN bootloader keeps its DTC log in (RM0468:
-    retained only from the backup domain supply). The reset macro points VTOR
+    read the old value: `power_cut`, the platform's commands for a board
+    without VBAT (System.power_cut; on the H733 the RTC backup registers and
+    the backup SRAM the CAN bootloader keeps its DTC log in). The reset macro points VTOR
     at the bootloader in sector 0, which boots the app; flash keeps what it
     held, as on the chip.
     Renode 1.17: Reset zeroes BASEPRI as read, but not the masking it applies
@@ -120,9 +113,7 @@ def power_on_commands(machine: str, vbat: bool) -> list[str]:
     included: catalog/platforms/stm32h733.yaml, renode.reset.)
     The reset-flag model is told the reset is a power-on, so RCC_RSR reads
     POR (models/renode/VhilResetFlags.cs)."""
-    wipe = [] if vbat else ([f"sysbus WriteDoubleWord {addr:#x} 0x0" for addr in RTC_BKP]
-                            + ["sysbus.backupSram ZeroAll"])
-    return wipe + [f"vhil_reset_{rn.ident(machine)} PowerOn", "machine Reset",
+    return list(power_cut) + [f"vhil_reset_{rn.ident(machine)} PowerOn", "machine Reset",
                    'cpu SetRegister "BasePri" 0x0']
 
 
@@ -131,7 +122,7 @@ def make_backend(fake_cls, monitor: RenodeMonitor, config: dict, boot_check: boo
 
     relays = {(c["relay"]["addr"], c["relay"]["port"], c["relay"]["pin"]): c
                 for c in config.get("power", [])}
-    vbat = {c["machine"]: c.get("vbat", True) for c in config.get("power", [])}
+    power_cut = {c["machine"]: c.get("power_cut", []) for c in config.get("power", [])}
     by_ina = {c["ina_addr"]: c for c in config.get("power", [])}
     routes = {(r["dac"], r["channel"]): r for r in config.get("dac_routes", [])}
     gpio_routes = {(r["tca"], r["port"], r["pin"]): r for r in config.get("gpio_routes", [])}
@@ -212,7 +203,7 @@ def make_backend(fake_cls, monitor: RenodeMonitor, config: dict, boot_check: boo
                     try:
                         for controller, hub in can_of[machine].items():
                             checked(connector("Connect", controller, hub))
-                        for command in power_on_commands(machine, vbat[machine]):
+                        for command in power_on_commands(machine, power_cut[machine]):
                             checked(command)
                         for command in seed_commands(cells, machine):
                             checked(command)
