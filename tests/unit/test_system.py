@@ -413,9 +413,18 @@ def _ams(tmp_path, devices):
     ("  b: {model: ltc6820, spi: ams.SPI1, cs: ams.PB9}\n"
      "  c: {model: ltc6811, attach: b, params: {bogus: 1}}\n", "unknown params"),    ("  i: {model: ssa-2-250a, outputs: {out_p: ams.PF7}}\n", "drives outputs"),
     ("  i: {model: acs758lcb-050b, outputs: {out: ams.FDCAN1}}\n", "not an analog input"),
-    ("  imu: {model: bmi088}\n", "needs 'i2c'"),
+    ("  imu: {model: bmi088}\n", r"wires one of i2c, spi \(its protocol\), got none"),
+    ("  imu: {model: bmi088, i2c: ams.I2C2, spi: ams.SPI1}\n", "got i2c, spi"),
+    ("  imu: {model: bmi088, spi: ams.SPI1}\n", r"wires pins \['csb1', 'csb2'\], got \[\]"),
+    ("  imu: {model: bmi088, i2c: ams.I2C2, pins: {csb1: ams.PB9, csb2: ams.PB8}}\n",
+     r"wires pins \[\], got"),
     ("  imu: {model: bmi088, i2c: ams.SDMMC1}\n", "is sdmmc, not i2c"),
     ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, i2c: ams.I2C2}\n", "takes no 'i2c'"),
+    ("  gnss: {model: zed-f9p, uart: ams.I2C2}\n", "is i2c, not uart"),
+    ("  gnss: {model: zed-f9p, uart: ams.USART10, i2c: ams.I2C2}\n", "got i2c, uart"),
+    ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, uart: ams.USART10}\n", "takes no 'uart'"),
+    ("  gnss: {model: zed-f9p, i2c: ams.I2C2, uarts: {uart3: ams.USART10}}\n", "has no UART port 'uart3'"),
+    ("  gnss: {model: zed-f9p, i2c: ams.I2C2, uarts: {uart2: ams.I2C2}}\n", "uarts.uart2 'ams.I2C2' is i2c, not uart"),
 ])
 def test_bad_devices_are_rejected_with_a_reason(tmp_path, devices, message):
     with pytest.raises(SystemError, match=message):
@@ -537,7 +546,10 @@ def test_every_mainlite_boots_through_the_can_bootloader(path):
     2026-10-05; PROVISIONING.md step 1.3). No system boots its app directly."""
     system = System(path)
     roles = {"ecu": (1, "FDCAN2"), "ams": (2, "FDCAN1"), "udv": (3, "FDCAN2")}
-    for b in system.boards.values():
+    mainlites = [b for b in system.boards.values() if b.board["id"] == "mainlite"]
+    if not mainlites:
+        pytest.skip("no MainLite in this system")
+    for b in mainlites:
         assert b.bootloader["id"] == "can-bootloader"
         assert f"{b.name}.bootloader" in system.images()
         assert (b.node_id, b.flash_bus) == roles[b.role]
@@ -623,8 +635,16 @@ def test_a_board_without_roles_names_its_firmware(tmp_path):
     p = tmp_path / "r.yaml"
     p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain, firmware: ams}\n")
     assert System(p, catalog).boards["a"].firmware["id"] == "ams"
+    # Without one (a firmware not in the catalogue yet, the SensorHub's) its
+    # image is given at render, and there is nothing to build.
     p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain}\n")
-    with pytest.raises(SystemError, match="has no roles, so it needs a firmware"):
+    system = System(p, catalog)
+    assert system.boards["a"].firmware is None and system.images() == ["a"]
+    assert "running the image given at render" in system.render_renode({"a": Path("a.elf")})
+    with pytest.raises(SystemError, match="no firmware in the catalogue to build"):
+        system.build_firmware(tmp_path / "fw")
+    p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain, firmware_ref: dev}\n")
+    with pytest.raises(SystemError, match="a firmware_ref needs a firmware"):
         System(p, catalog)
 
 
@@ -733,6 +753,53 @@ def test_a_single_ended_transfer_other_than_identity_is_rendered():
     script = system.render_renode()
     assert "sysbus.adc3_h73x SingleEndedTransfer 7 0.98 -3" in script
     assert "SingleEndedNoise" not in script
+
+
+def test_the_bus_a_bmi088_wires_picks_its_protocol():
+    """The same catalogue model: I2C dies on the MainLite, one SPI slave with
+    its chip selects on the SensorHub."""
+    ams = System(REPO / "systems" / "ams.yaml").render_renode()
+    assert "imu_acc: Sensors.Bmi088Accelerometer @ i2c2_h7 0x18" in ams and "Bmi088Spi" not in ams
+    hub = System(REPO / "systems" / "sensorhub.yaml").render_renode()
+    assert "imu: Sensors.Bmi088Spi @ spi3" in hub and "Bmi088Accelerometer" not in hub
+    assert "gpioPortC:\n    4 -> imu@0\n    5 -> imu@1" in hub
+
+
+def test_the_bus_a_zed_f9p_wires_picks_its_port(tmp_path):
+    """I2C (systems/sensorhub.yaml), SPI with its chip select, or UART: the
+    UART's far end sits on sysbus at no address and holds the MCU's UART."""
+    hub = System(REPO / "systems" / "sensorhub.yaml").render_renode()
+    assert "gnss_rx: Sensors.ZedF9pI2c @ i2c2 0x42" in hub
+    for wiring, want in (("spi: sensorhub.SPI1, cs: sensorhub.PA4",
+                          "gnss: Sensors.ZedF9pSpi @ spi1\n\ngpioPortA:\n    4 -> gnss@0"),
+                         ("uart: sensorhub.USART2", "gnss: Sensors.ZedF9pUart @ sysbus\n    uart: usart2")):
+        p = tmp_path / "s.yaml"
+        p.write_text("kind: system\nid: t\nboards:\n  sensorhub: {board: sensorhub}\n"
+                     f"devices:\n  gnss: {{model: zed-f9p, {wiring}}}\n")
+        script = System(p).render_renode()
+        assert want in script and "ZedF9pI2c" not in script
+    p.write_text("kind: system\nid: t\nboards:\n  sensorhub: {board: sensorhub}\n"
+                 "devices:\n  gnss: {model: zed-f9p, i2c: sensorhub.I2C2, uarts: {uart2: sensorhub.USART2}}\n")
+    assert "gnss_rx: Sensors.ZedF9pI2c @ i2c2 0x42\n    uart2: usart2" in System(p).render_renode()
+
+
+def test_a_board_without_roles_takes_its_own_front_end():
+    """The SensorHub's 0-5 V inputs: 5k11 / 10k dividers (R15/R16) on PC0-PC3,
+    so 5 V at J1 is 3.31 V at the pin (catalog/boards/sensorhub.yaml)."""
+    system = System(REPO / "systems" / "sensorhub.yaml")
+    assert system.sensor_to_pin("sensorhub.PC0", 5.0) == pytest.approx(3.309, abs=1e-3)
+    assert system.sensor_to_pin("sensorhub.PC3", 0.0) == 0.0
+
+
+def test_a_power_cut_wipes_what_the_platform_says():
+    """vbat: false runs the platform's power_cut first (the RTC backup
+    registers of each MCU); a board with VBAT runs nothing."""
+    hub, ams = System(REPO / "systems" / "sensorhub.yaml"), System(REPO / "systems" / "ams.yaml")
+    assert hub.power_cut("sensorhub")[0] == "sysbus WriteDoubleWord 0x40002850 0x0"
+    assert ams.power_cut("ams")[0] == "sysbus WriteDoubleWord 0x58004050 0x0"
+    assert ams.power_cut("ams")[-1] == "sysbus.backupSram ZeroAll"
+    ams.boards["ams"].board = dict(ams.boards["ams"].board, vbat=True)
+    assert ams.power_cut("ams") == []
 
 
 def test_a_sensor_side_voltage_reaches_the_pin_through_the_front_end():

@@ -73,6 +73,35 @@ renode:
   # with its HAL tick (priority 15) masked: its 2 s auto-jump deadline never
   # came and the board stayed in the bootloader for good. On the chip every
   # reset clears it (ARMv7-M ARM B1.5.5, TakeReset: BASEPRI = 0).
+  # A power cut on a board without VBAT (vhil.broker.power_on_commands) wipes
+  # the backup domain: the RTC backup registers, RTC_BASE 0x58004000
+  # (stm32h733xx.h:2394) + BKP0R at 0x50 (stm32h733xx.h:1331); Renode's
+  # STM32F4_RTC holds the F4's 20, BKP0R..BKP19R, and the H733's
+  # BKP20R..BKP31R are unmodelled. And the 4 KB backup SRAM at 0x38800000,
+  # retained only from the backup domain supply (RM0468), where the CAN
+  # bootloader keeps its DTC log.
+  power_cut:
+    - sysbus WriteDoubleWord 0x58004050 0x0
+    - sysbus WriteDoubleWord 0x58004054 0x0
+    - sysbus WriteDoubleWord 0x58004058 0x0
+    - sysbus WriteDoubleWord 0x5800405c 0x0
+    - sysbus WriteDoubleWord 0x58004060 0x0
+    - sysbus WriteDoubleWord 0x58004064 0x0
+    - sysbus WriteDoubleWord 0x58004068 0x0
+    - sysbus WriteDoubleWord 0x5800406c 0x0
+    - sysbus WriteDoubleWord 0x58004070 0x0
+    - sysbus WriteDoubleWord 0x58004074 0x0
+    - sysbus WriteDoubleWord 0x58004078 0x0
+    - sysbus WriteDoubleWord 0x5800407c 0x0
+    - sysbus WriteDoubleWord 0x58004080 0x0
+    - sysbus WriteDoubleWord 0x58004084 0x0
+    - sysbus WriteDoubleWord 0x58004088 0x0
+    - sysbus WriteDoubleWord 0x5800408c 0x0
+    - sysbus WriteDoubleWord 0x58004090 0x0
+    - sysbus WriteDoubleWord 0x58004094 0x0
+    - sysbus WriteDoubleWord 0x58004098 0x0
+    - sysbus WriteDoubleWord 0x5800409c 0x0
+    - sysbus.backupSram ZeroAll
   reset:
     - '{cpu} SetRegister "BasePri" 0x0'
   # A board's write_protect (systems/*.yaml): its option bytes as burned

@@ -120,7 +120,10 @@ Examples (`full-ci`):
 | `vhil/sim.py`, a workflow, an unmapped path | everything |
 
 Every tests/sim file carries a module-level `pytestmark` with its boards, its
-systems and at least one subsystem; `tests/unit/test_ci_select.py` checks
+systems and at least one subsystem. A file that tests a platform on its own,
+with no system or firmware (`test_stm32l496_platform.py`, for a board whose
+firmware does not exist yet), names `platform_<id>` instead of a system, and
+no board. `tests/unit/test_ci_select.py` checks
 it, the board markers against the systems' roles, every rule's targets, and
 the selection's fail-safes. Scenarios are grouped by system already
 (`systems/<system>.scenarios/`); the scenario job runs the selected systems'
