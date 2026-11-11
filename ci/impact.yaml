@@ -104,11 +104,14 @@ rules:
     select: {}
   - name: unit-tested only (tests/unit runs on every PR)
     paths: [tests/unit/**, tests/js/**, deploy/**, docker/compose.yaml,
-            vhil/coverage.py, vhil/fwprune.py, vhil/trace.py,
+            vhil/coverage.py, vhil/fwprune.py, vhil/trace.py, vhil/pytest_vscode.py,
             models/renode/VhilTrace.cs, tests/sim/durations.json]
     select: {importers: true}
   - name: desktop app (app/README.md; app.yml builds it)
     paths: [app/**]
+    select: {}
+  - name: VS Code extension (vscode/README.md; vscode.yml builds it)
+    paths: [vscode/**]
     select: {}
   - name: developer scripts
     paths: [bin/vhil, scripts/explore.sh, scripts/probe.sh, scripts/vhil-docker.sh, scripts/image-key.sh, scripts/wsl-vcan.sh,

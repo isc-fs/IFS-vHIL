@@ -1,0 +1,66 @@
+{
+  "name": "vhil-tests",
+  "displayName": "ISC vHIL",
+  "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel, in the vHIL's Docker image.",
+  "version": "0.1.0",
+  "publisher": "isc-fs",
+  "private": true,
+  "repository": {"type": "git", "url": "https://github.com/isc-fs/IFS-vHIL"},
+  "engines": {"vscode": "^1.85.0"},
+  "categories": ["Testing"],
+  "activationEvents": ["workspaceContains:scripts/vhil-docker.sh"],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {"command": "vhil.refreshTests", "title": "Refresh tests", "category": "vHIL", "icon": "$(refresh)"},
+      {"command": "vhil.menu", "title": "Show actions", "category": "vHIL"},
+      {"command": "vhil.startVm", "title": "Start the Docker VM", "category": "vHIL"},
+      {"command": "vhil.buildFirmware", "title": "Build firmware", "category": "vHIL"},
+      {"command": "vhil.openEditor", "title": "Open the system editor", "category": "vHIL"},
+      {"command": "vhil.checkStatus", "title": "Check VM and firmware", "category": "vHIL"}
+    ],
+    "configuration": {
+      "title": "vHIL",
+      "properties": {
+        "vhil.dockerContext": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Docker context the vHIL runs in (`VHIL_DOCKER_CONTEXT`). Empty: `colima-vhil` on macOS, `default` elsewhere."
+        },
+        "vhil.ifsHilRef": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "IFS_HIL ref the firmware is built from (`IFS_HIL_REF`). Empty: `dev`."
+        },
+        "vhil.firmwareRefs": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Firmware refs for **Build firmware** (`FW_REFS`), e.g. `ecu=feat/x ams=dev`."
+        },
+        "vhil.cpus": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Limit each run to this many cores, like CI's 4-core runners (`VHIL_DOCKER_CPUS`). 0: no limit."
+        },
+        "vhil.pytestArgs": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": [],
+          "markdownDescription": "Extra pytest arguments for every run, e.g. `--vhil-trace`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "tsc -p . && node --test out/test/",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.10",
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "3.2.1",
+    "typescript": "5.7.2"
+  }
+}
