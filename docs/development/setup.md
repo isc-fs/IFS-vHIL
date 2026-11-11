@@ -46,6 +46,10 @@ its container `--privileged --network host` (it creates `can0..can2`); every
 other job runs unprivileged on Docker's default network (`VHIL_DOCKER_VCAN=1`
 gives `shell`/`run` vcan too), and `server`/`editor` publish on 127.0.0.1.
 
+In VS Code, the extension in [`vscode/`](../../vscode/README.md) lists every
+unit, sim and scenario test in the Testing panel and runs them through these
+same jobs, with Run and Cancel per test, file or folder.
+
 ### Emulator monitor, card images and what a system file may say
 
 These notes are for the current emulation backend, Renode 1.17. Its

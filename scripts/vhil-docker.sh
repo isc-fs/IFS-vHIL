@@ -13,7 +13,8 @@
 #   scripts/vhil-docker.sh sim [pytest args]     tests/sim in virtual time (or just the
 #                                                tests/... files the args name)
 #   scripts/vhil-docker.sh scenarios [pytest args]
-#                                                every committed scenario (tests/scenarios)
+#                                                every committed scenario (tests/scenarios, or
+#                                                just the tests/... the args name)
 #   scripts/vhil-docker.sh coverage [glob] [pytest args]
 #                                                firmware coverage of tests/sim/<glob>.py
 #                                                (default test_*) into results/coverage
@@ -177,7 +178,10 @@ in_container() {
     [ "$image" = "$editor_image" ] && ref=$editor_image:$editor_tag
     local tty=()
     [ -t 0 ] && [ -t 1 ] && tty=(-it)
+    # VHIL_DOCKER_NAME names the container, so a caller (the VS Code
+    # extension's Cancel) can stop it with `docker kill`.
     "${docker[@]}" run --rm ${tty[@]+"${tty[@]}"} ${run_args[@]+"${run_args[@]}"} \
+        ${VHIL_DOCKER_NAME:+--name "$VHIL_DOCKER_NAME"} \
         ${cpu_args[@]+"${cpu_args[@]}"} \
         -v "$repo:/work" -v vhil-data:/vhil \
         -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" \
@@ -237,8 +241,11 @@ sim)
 scenarios)
     in_container "$prelude"'
         need_elf ecu; need_elf ams
+        # tests/scenarios unless the arguments name tests themselves, as sim.
+        paths=tests/scenarios
+        for a in "$@"; do case "$a" in tests/*) paths=; break ;; esac; done
         VHIL_ECU_ELF=$(elf ecu) VHIL_AMS_ELF=$(elf ams) VHIL_CAN_BOOTLOADER_ELF=$(elf ecu.bootloader) \
-            python -m pytest tests/scenarios -v --sim-log-dir results/sim-logs \
+            python -m pytest $paths -v --sim-log-dir results/sim-logs \
                 -o junit_family=xunit1 --junitxml=results/scenarios.xml "$@"' "$@" ;;
 coverage)
     in_container "$prelude"'
