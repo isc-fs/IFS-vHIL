@@ -1,6 +1,9 @@
 # Docs index
 
-**Start here:** [`CONTRIBUTING.md`](../CONTRIBUTING.md) (setup, first PR),
+**Using the vHIL:** [`first-10-minutes.md`](first-10-minutes.md) (install,
+run a system, watch its CAN bus and state).
+
+**Working on it:** [`CONTRIBUTING.md`](../CONTRIBUTING.md) (setup, first PR),
 then [`vision.md`](vision.md) (where the project is going) and the hard
 invariants in [`CLAUDE.md`](../CLAUDE.md#hard-invariants).
 

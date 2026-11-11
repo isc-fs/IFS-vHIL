@@ -87,8 +87,9 @@ MAX_ATTEMPTS = 2
 # A `run` scenario's virtual time when the request names none, and what the
 # editor workspace offers: every run counts from power-on, and each
 # MainLite spends its CAN bootloader's 2 s auto-jump window before its app
-# starts (CLAUDE.md invariant 5), so less than 3 s shows little of the app.
-DEFAULT_VIRTUAL_MS = 3000
+# starts (CLAUDE.md invariant 5), so less than 3 s shows nothing of the app and
+# 3 s only 1 s of it (#390).
+DEFAULT_VIRTUAL_MS = 5000
 # A live session's slice (the trace is flushed, and its ops applied, at each
 # slice boundary; Limits.max_live_ms caps its virtual time).
 LIVE_SLICE_MS = 50

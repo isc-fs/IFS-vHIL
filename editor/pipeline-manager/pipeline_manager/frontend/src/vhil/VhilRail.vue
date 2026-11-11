@@ -173,7 +173,7 @@ the Scenario tab, ▶ runs it).
                         @click="openRun(r.id)"
                     >
                         <span class="mono num">#{{ r.id }}</span>
-                        <StateBadge :state="r.state" />
+                        <StateBadge :state="r.state" :warnings="r.summary?.warnings || []" />
                         <span class="vhil-list-sub muted mono">
                             {{ ws.id ? '' : `${r.system} · ` }}{{ when(r) }}
                         </span>

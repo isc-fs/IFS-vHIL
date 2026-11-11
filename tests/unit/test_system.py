@@ -179,16 +179,16 @@ def _system(tmp_path, body):
     ("bench:\n  power:\n    - {board: ecu, relay: {addr: 0x20, port: 0, pin: 3}, ina_addr: 0x45,"
      " current_A: 0.1}\n  gpio_routes:\n    - {tca: 0x20, port: 0, pin: 3, to: ecu.PB5}\n",
      "power relay"),
-    ("bench:\n  gpio_routes:\n    - {tca: 0x50, port: 1, pin: 0, to: ecu.PB5}\n", "not valid"),
-    ("bench:\n  gpio_routes:\n    - {tca: 0x22, port: 2, pin: 0, to: ecu.PB5}\n", "not valid"),
+    ("bench:\n  gpio_routes:\n    - {tca: 0x50, port: 1, pin: 0, to: ecu.PB5}\n", "tca: 80 is greater than"),
+    ("bench:\n  gpio_routes:\n    - {tca: 0x22, port: 2, pin: 0, to: ecu.PB5}\n", "port: 2 is greater than"),
     ("bench:\n  adc_routes:\n    - {adc: 0, channel: 0, from: ecu.FDCAN1}\n",
      "ADC route from 'ecu.FDCAN1': can, not a GPIO"),
     ("bench:\n  adc_routes:\n    - {adc: 0, channel: 0, from: ecu.PB4}\n"
      "    - {adc: 0, channel: 0, from: ecu.PB5}\n", "routed twice"),
-    ("bench:\n  adc_routes:\n    - {adc: 0, channel: 8, from: ecu.PB4}\n", "not valid"),
+    ("bench:\n  adc_routes:\n    - {adc: 0, channel: 8, from: ecu.PB4}\n", "channel: 8 is greater than"),
     ("bench:\n  cell_stimulus: {device: isospi, cell_mV: 3750, temp_dC: 250}\n",
      "not an isoSPI bridge"),
-    ("bench:\n  cell_stimulus: {device: isospi, cell_mV: 9000, temp_dC: 250}\n", "not valid"),
+    ("bench:\n  cell_stimulus: {device: isospi, cell_mV: 9000, temp_dC: 250}\n", "cell_mV: 9000 is greater than"),
 ])
 def test_bad_systems_are_rejected_with_a_reason(tmp_path, body, message):
     with pytest.raises(SystemError, match=message):
@@ -246,7 +246,7 @@ def test_render_can_hub_puts_renodes_hub_on_every_bus(tmp_path, path):
 def test_arbitration_is_a_boolean(tmp_path, value):
     body = "buses:\n  a: {kind: can, nodes: [ecu.FDCAN1], arbitration: %s}\n" % (
         "null" if value is None else repr(value) if isinstance(value, str) else value)
-    with pytest.raises(SystemError, match="arbitration must be true or false|not valid"):
+    with pytest.raises(SystemError, match=r"arbitration: .* is not of type 'boolean'"):
         System(_system(tmp_path, body))
 
 
@@ -258,7 +258,7 @@ def test_a_firmware_can_contract_must_name_a_can_connector_of_its_board(tmp_path
     with pytest.raises(SystemError, match="CAN contract rides FDCAN9, which mainlite lacks"):
         System(REPO / "systems" / "ecu.yaml", catalog)
     fw.write_text(fw.read_text().replace("contract: [FDCAN9]", "contract: []"))
-    with pytest.raises(SystemError, match="'contract': \\[\\]"):   # schema: minItems 1
+    with pytest.raises(SystemError, match=r"can.contract: \[\] should be non-empty"):   # schema: minItems 1
         System(REPO / "systems" / "ecu.yaml", catalog)
 
 
@@ -821,22 +821,22 @@ def test_a_sensor_side_voltage_reaches_the_pin_through_the_front_end():
     # The schema refuses a label, a firmware id or a page that isn't one
     # (test_injection checks System() refuses them without it); System()
     # what the schema can't see.
-    ("      PF8: APPS_1 ", "      PF8: 'APPS 1' ", "not valid under any"),
-    ("  SDMMC1: microSD", "  SDMMC1: 'micro\"SD'", "not valid under any"),
-    ("    firmware: udv\n", "    firmware: ../udv\n", "not valid under any"),
-    ("doc: docs/backplanes/udv.md", "doc: ../../etc/passwd", "not valid under any"),
+    ("      PF8: APPS_1 ", "      PF8: 'APPS 1' ", "roles.ecu.pins.PF8: 'APPS 1' must match"),
+    ("  SDMMC1: microSD", "  SDMMC1: 'micro\"SD'", "onboard.SDMMC1: .* must match"),
+    ("    firmware: udv\n", "    firmware: ../udv\n", "roles.udv.firmware: '../udv' must match"),
+    ("doc: docs/backplanes/udv.md", "doc: ../../etc/passwd", "backplane.doc: .* must match"),
     ("      PF8: APPS_1 ", "      PX9: APPS_1 ", "role ecu labels 'PX9', which its pin model "
                                                  "v1.0 lacks"),
     ("      PF9: {port: sysbus.gpioPortF, pin: 9}", "      PB4: {port: sysbus.gpioPortB, pin: 4}",
      "makes 'PB4' a GPIO, but the board models no analog input"),
     ("      PF7: {gain: 0.92, offset_codes: 6,", "      PF9: {gain: 0.92, offset_codes: 6,",
      "gives 'PF9' a differential ADC transfer, but it is not an analog input"),
-    ("      PF7: {gain: 0.92,", "      PF7: {gain: 0.2,", "not valid under any"),
-    ("noise_codes_rms: 1.07", "noise_codes_rms: -1", "not valid under any"),
+    ("      PF7: {gain: 0.92,", "      PF7: {gain: 0.2,", r"PF7.gain: 0.2 is less than"),
+    ("noise_codes_rms: 1.07", "noise_codes_rms: -1", "noise_codes_rms: -1 is less than"),
     ("      PC0: {noise_codes_rms: 0.42,", "      PC1: {noise_codes_rms: 0.42,",
      "gives 'PC1' a single-ended ADC transfer, but it is not an analog input"),
-    ("front_end_ratio: 0.6667", "front_end_ratio: 1.5", "not valid under any"),
-    ("      PF8: {noise_codes_rms: 0.42, front_end_ratio: 1}", "      PF8: {}", "not valid under any"),
+    ("front_end_ratio: 0.6667", "front_end_ratio: 1.5", "front_end_ratio: 1.5 is greater than"),
+    ("      PF8: {noise_codes_rms: 0.42, front_end_ratio: 1}", "      PF8: {}", "PF8: {} should be non-empty"),
 ])
 def test_the_roles_table_is_checked(tmp_path, old, new, message):
     with pytest.raises(SystemError, match=message):
@@ -944,7 +944,7 @@ def test_build_at_a_commit_fetches_it_into_its_commit_dir(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("entry, message", [
     ("{board: mainlite}", "needs a role \\(ecu, ams, udv\\)"),
-    ("{board: mainlite, role: dash}", "'role': 'dash'"),
+    ("{board: mainlite, role: dash}", r"boards.ecu.role: 'dash' is not one of \['ecu', 'ams', 'udv'\]"),
 ])
 def test_a_mainlite_needs_one_of_its_roles(tmp_path, entry, message):
     p = tmp_path / "r.yaml"
@@ -979,3 +979,85 @@ def test_an_empty_firmware_ref_is_a_schema_error(tmp_path):
                  "  ecu: {board: mainlite, role: ecu, firmware_ref: ''}\n")
     with pytest.raises(SystemError):
         System(p)
+
+
+# -- readable errors (#391) ----------------------------------------------------
+
+def _raw_system(tmp_path, text):
+    p = tmp_path / "s.yaml"
+    p.write_text(text)
+    return p
+
+
+ECU = "  ecu: {board: mainlite, role: ecu}\n"
+
+
+@pytest.mark.parametrize("text, message", [
+    # a mainlite without a role
+    ("kind: system\nid: t\nboards:\n  ecu: {board: mainlite}\n",
+     "board 'ecu': a mainlite needs a role (ecu, ams, udv)"),
+    # a connector the board lacks: closest names
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  b: {kind: can, nodes: [ecu.FDCAN9]}\n",
+     "no connector or pin 'FDCAN9'"),
+    # a board id that is a typo
+    ("kind: system\nid: t\nboards:\n  x: {board: mainlte, role: ecu}\n",
+     "no board 'mainlte' in the catalogue"),
+    # a bus name with a space
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  CAN bus: {kind: can, nodes: [ecu.FDCAN1]}\n",
+     "buses.'CAN bus': name must match ^[A-Za-z_][A-Za-z0-9_]*$ (letters, digits, underscore)"),
+    # an endpoint on an instance the system does not have
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  b: {kind: can, nodes: [ams.FDCAN1]}\n",
+     "no board instance 'ams'"),
+    # a gpio pin on a can bus
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  b: {kind: can, nodes: [ecu.PB0]}\n",
+     "bus 'b' is can but 'ecu.PB0' is gpio: a can bus takes can connectors (FDCAN1"),
+    # a bus without nodes
+    ("kind: system\nid: t\nboards:\n" + ECU + "buses:\n  can_1: {kind: can, nodes: []}\n",
+     "bus 'can_1' has no nodes: wire a board's CAN connector (e.g. FDCAN1) to it"),
+    # unterminated flow mapping
+    ("kind: system\nid: t\nboards: {ecu: {board: mainlite\n",
+     "s.yaml:"),
+])
+def test_errors_say_where_and_what_to_do(tmp_path, text, message):
+    with pytest.raises(SystemError) as e:
+        System(_raw_system(tmp_path, text))
+    assert message in str(e.value)
+    assert "\n" not in str(e.value) and "{'kind'" not in str(e.value)
+
+
+def test_suggestions_name_the_closest_candidates(tmp_path):
+    for text, hint in [
+        ("kind: system\nid: t\nboards:\n  x: {board: mainlte, role: ecu}\n", "did you mean 'mainlite'"),
+        ("kind: system\nid: t\nboards:\n" + ECU +
+         "buses:\n  b: {kind: can, nodes: [ecu.FDCAN9]}\n", "did you mean 'FDCAN"),
+        ("kind: system\nid: t\nboards:\n" + ECU +
+         "buses:\n  b: {kind: can, nodes: [eco.FDCAN1]}\n", "did you mean 'ecu'"),
+    ]:
+        with pytest.raises(SystemError, match=hint):
+            System(_raw_system(tmp_path, text))
+
+
+def test_yaml_errors_are_file_line_col(tmp_path):
+    p = _raw_system(tmp_path, "kind: system\nid: t\nboards: {ecu: {board: mainlite\n")
+    with pytest.raises(SystemError, match=r"s\.yaml:\d+:\d+: "):
+        System(p)
+
+
+def test_a_device_model_typo_is_suggested(tmp_path):
+    p = _raw_system(tmp_path, "kind: system\nid: t\nboards:\n" + ECU +
+                "devices:\n  r: {model: nrf24l01, pins: {}}\n")
+    with pytest.raises(SystemError, match="did you mean 'nrf24l01p'"):
+        System(p)
+
+
+def test_the_cli_help_has_an_example_per_subcommand(capsys):
+    from vhil.system import main
+    for cmd in ("validate", "render", "build", "bench"):
+        with pytest.raises(SystemExit):
+            main([cmd, "-h"])
+        out = capsys.readouterr().out
+        assert "Example:" in out and f"vhil.system {cmd}" in out

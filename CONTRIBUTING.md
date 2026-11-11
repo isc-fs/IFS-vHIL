@@ -36,6 +36,12 @@ time, so tests can run on every PR without the physical bench. Read:
 
 ## 2. Set up (once, ~15 minutes)
 
+~15 minutes when the published images fit this checkout; ~30 minutes more
+when they are built on your machine. Prefer no terminal? The desktop app does
+the same set-up ([`app/README.md`](app/README.md)). Either way,
+[`docs/first-10-minutes.md`](docs/first-10-minutes.md) then takes you from
+the app to CAN frames on screen.
+
 ```sh
 git clone https://github.com/isc-fs/IFS-vHIL && cd IFS-vHIL
 git switch dev

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import difflib
 import hashlib
 import json
 import math
@@ -251,11 +252,98 @@ def _validator():
     return Draft202012Validator(json.loads(SCHEMA.read_text()))
 
 
+def suggest(word, options, what: str = "") -> str:
+    """A hint for a name that is not among `options`: ` (did you mean 'x'?)`
+    for the closest, else the first few options (` (known: a, b, c)`)."""
+    options = sorted({str(o) for o in options})
+    close = difflib.get_close_matches(str(word), options, n=3, cutoff=0.6)
+    if close:
+        return f" (did you mean {' or '.join(repr(c) for c in close)}?)"
+    if options:
+        shown = ", ".join(options[:8]) + (", ..." if len(options) > 8 else "")
+        return f" ({what + ': ' if what else 'known: '}{shown})"
+    return ""
+
+
+_PATTERN_HINTS = {
+    "^[A-Za-z_][A-Za-z0-9_]*$": "letters, digits, underscore",
+    "^[a-z0-9][a-z0-9-]*$": "lowercase letters, digits, hyphen",
+}
+
+
+def _where(path) -> str:
+    out = ""
+    for part in path:
+        if isinstance(part, int):
+            out += f"[{part}]"
+        else:
+            text = str(part)
+            out += ("." if out else "") + (text if re.fullmatch(r"\w+", text) else repr(text))
+    return out or "(top)"
+
+
+def format_schema_error(e) -> str:
+    """One line for one jsonschema error: where it is, what is wrong and,
+    for the common slips, the fix. The CLI and the editor's Check share it."""
+    path = list(e.absolute_path)
+    where = _where(path)
+    if (e.validator == "minItems" and e.validator_value == 1 and len(path) == 3
+            and path[0] == "buses" and path[2] == "nodes"):
+        return (f"bus '{path[1]}' has no nodes: wire a board's CAN connector "
+                f"(e.g. FDCAN1) to it")
+    if e.validator == "pattern":
+        hint = _PATTERN_HINTS.get(e.validator_value)
+        hint = f" ({hint})" if hint else ""
+        # `(?![\s\S])` only stops `$` matching before a final newline: not for people.
+        shown = e.validator_value.removesuffix("(?![\\s\\S])")
+        if "propertyNames" in e.schema_path:
+            return f"{where}.{e.instance!r}: name must match {shown}{hint}"
+        return f"{where}: {e.instance!r} must match {shown}{hint}"
+    msg = e.message
+    if isinstance(e.instance, (dict, list)) and len(msg) > 120:
+        msg = f"does not fit the schema ({e.validator})"   # never dump the document
+    return f"{where}: {msg}"
+
+
+def schema_errors(doc, limit: int = 10) -> list[str]:
+    """The located one-line errors of `doc` against the schema's branch for
+    its `kind` (the top level is a oneOf over kinds, whose own error is
+    "not valid under any of the given schemas", with the whole document)."""
+    from jsonschema import Draft202012Validator
+    schema = json.loads(SCHEMA.read_text())
+    kinds = {}
+    for branch in schema["oneOf"]:
+        name = branch["$ref"].rsplit("/", 1)[-1]
+        const = schema["$defs"][name].get("properties", {}).get("kind", {}).get("const")
+        kinds[const] = name
+    kind = doc.get("kind") if isinstance(doc, dict) else None
+    if kind not in kinds:
+        known = ", ".join(map(str, kinds))
+        return [f"kind: {kind!r} is not one of {known}" if kind is not None
+                else f"kind: missing (a file's kind is one of {known})"]
+    branch = Draft202012Validator({"$ref": f"#/$defs/{kinds[kind]}", "$defs": schema["$defs"]})
+    errors = sorted(branch.iter_errors(doc), key=lambda e: [str(x) for x in e.absolute_path])
+    return [format_schema_error(e) for e in errors[:limit]]
+
+
+def yaml_error(path, e: yaml.YAMLError) -> str:
+    """`file:line:col: message` for a YAML syntax error."""
+    mark = getattr(e, "problem_mark", None) or getattr(e, "context_mark", None)
+    problem = getattr(e, "problem", None) or str(e).splitlines()[0]
+    context = getattr(e, "context", None)
+    text = f"{problem} ({context})" if context else str(problem)
+    at = f"{path}:{mark.line + 1}:{mark.column + 1}" if mark is not None else str(path)
+    return f"{at}: {text}"
+
+
 def _load(path: Path, kind: str) -> dict:
-    doc = yaml.safe_load(Path(path).read_text())
-    errors = sorted(_validator().iter_errors(doc), key=str)
+    try:
+        doc = yaml.safe_load(Path(path).read_text())
+    except yaml.YAMLError as e:
+        raise SystemError(yaml_error(path, e))
+    errors = schema_errors(doc, 3)
     if errors:
-        raise SystemError(f"{path}: " + "; ".join(e.message for e in errors[:3]))
+        raise SystemError(f"{path}: " + "; ".join(errors))
     if doc["kind"] != kind:
         raise SystemError(f"{path}: expected a {kind}, found a {doc['kind']}")
     return doc
@@ -268,7 +356,9 @@ def _entry(kind: str, ident: str, catalog: Path) -> dict:
         raise SystemError(f"{kind} id {ident!r} is not a catalogue id")
     path = catalog / folder / f"{ident}.yaml"
     if not path.is_file():
-        raise SystemError(f"no {kind} '{ident}' in the catalogue ({path})")
+        known = [p.stem for p in (catalog / folder).glob("*.yaml")]
+        raise SystemError(f"no {kind} '{ident}' in the catalogue ({path})"
+                          + suggest(ident, known))
     doc = _load(path, kind)
     if doc["id"] != ident:
         raise SystemError(f"{path}: id '{doc['id']}' does not match its file name")
@@ -323,8 +413,11 @@ class Board:
             raise SystemError(f"{where}: {connector} is not routed off the "
                               f"{model.board_name} ({model.label}: class {status.cls}"
                               f"{', ' + status.where if status.cls == 'onboard' else ''})")
+        known = [c for sec in ("can", "spi", "uart", "sdmmc", "i2c", "analog_in", "gpio")
+                 for c in self.board.get(sec, {})]
         raise SystemError(f"{where} has no connector or pin '{connector}'"
-                          + (f" (nor has its {model.label})" if model is not None else ""))
+                          + (f" (nor has its {model.label})" if model is not None else "")
+                          + suggest(connector, known, f"{self.board['id']} has"))
 
     def routed(self, connector: str) -> bool | None:
         """Whether the role's backplane connects a connector or pin: one of
@@ -437,7 +530,8 @@ class System:
     def resolve(self, endpoint: str) -> tuple[Board, str, object]:
         name, connector = endpoint.split(".", 1)
         if name not in self.boards:
-            raise SystemError(f"'{endpoint}': no board instance '{name}' in {self.path}")
+            raise SystemError(f"'{endpoint}': no board instance '{name}' in {self.path}"
+                              + suggest(name, self.boards, "boards in this system"))
         kind, target = self.boards[name].endpoint(connector)
         return self.boards[name], kind, target
 
@@ -744,7 +838,10 @@ class System:
             for node in spec["nodes"]:
                 _, kind, _ = self.resolve(node)
                 if kind != spec["kind"]:
-                    raise SystemError(f"bus '{bus}' is {spec['kind']} but '{node}' is {kind}")
+                    own = list(self.boards[node.split(".", 1)[0]].board.get(spec["kind"], {}))
+                    raise SystemError(f"bus '{bus}' is {spec['kind']} but '{node}' is {kind}: "
+                                      f"a {spec['kind']} bus takes {spec['kind']} connectors"
+                                      + (f" ({', '.join(own)})" if own else ""))
                 if node in seen:
                     raise SystemError(f"'{node}' is on both '{seen[node]}' and '{bus}'")
                 seen[node] = bus
@@ -1524,9 +1621,20 @@ def _pairs(items) -> dict[str, str]:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("validate", "render", "bench", "build"):
-        s = sub.add_parser(name)
-        s.add_argument("system", type=Path)
+    helps = {
+        "validate": ("check a system file against the schema and the catalogue",
+                     "python -m vhil.system validate systems/ecu.yaml"),
+        "render": ("print the Renode script for a system (-o FILE to write it)",
+                   "python -m vhil.system render systems/ecu.yaml --firmware ecu=build/ecu.elf"),
+        "build": ("build the firmware images a system runs (needs Docker and network)",
+                  "python -m vhil.system build systems/ecu.yaml --ref ecu=dev"),
+        "bench": ("print the system's bench configuration as JSON",
+                  "python -m vhil.system bench systems/ecu.yaml"),
+    }
+    for name, (summary, example) in helps.items():
+        s = sub.add_parser(name, help=summary, description=f"{summary}.\n\nExample:\n  {example}",
+                           formatter_class=argparse.RawDescriptionHelpFormatter)
+        s.add_argument("system", type=Path, help="path to a systems/<id>.yaml file")
         if name == "render":
             s.add_argument("--firmware", action="append", metavar="BOARD=ELF")
             s.add_argument("--socketcan", action="store_true")

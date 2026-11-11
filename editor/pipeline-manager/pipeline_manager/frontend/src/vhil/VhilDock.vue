@@ -55,6 +55,13 @@ Collapsed, it is its tab strip, which still shows the problem count.
             </div>
             <div class="vhil-dock-tools">
                 <button
+                    v-if="ws.layout.dock && ws.layout.dockTab === 'problems'"
+                    type="button" class="vhil-btn --small"
+                    :disabled="ws.busy || !ws.id"
+                    title="Validate the system now"
+                    @click="check"
+                >Check</button>
+                <button
                     v-if="ws.layout.dock && ws.layout.dockTab === 'log'"
                     type="button" class="vhil-btn --small" @click="clearLog"
                 >Clear log</button>
@@ -84,9 +91,14 @@ Collapsed, it is its tab strip, which still shows the problem count.
             <VhilSignals v-else-if="tab.id === 'signals'" />
             <VhilArtifacts v-else-if="tab.id === 'artifacts'" />
             <div v-else-if="tab.id === 'problems'" class="vhil-problems">
+                <p v-if="ws.checked && ws.stale" class="muted">Edited since the last Check</p>
                 <p v-if="!problems.length" class="muted">
-                    {{ ws.checked ? 'No problems: the system is valid.'
-                        : 'Check (in the inspector) lists them here.' }}
+                    <template v-if="!ws.id">Open a system to check it.</template>
+                    <template v-else-if="!ws.checked">
+                        Not checked yet: Check validates the system.
+                    </template>
+                    <template v-else-if="!ws.stale">No problems: the system is valid.</template>
+                    <template v-else>No problems found by the last Check.</template>
                 </p>
                 <ul v-else class="vhil-list">
                     <li v-for="(p, i) in problems" :key="i">
@@ -126,7 +138,7 @@ import VhilState from './VhilState.vue';
 import { scen } from './scenarios.js';
 import { terminalStore, MAIN_TERMINAL } from '../core/stores.js';
 import {
-    ws, DOCK_TABS, allProblems, problemCount, select,
+    ws, DOCK_TABS, allProblems, problemCount, select, check,
 } from './workspace.js';
 
 export default defineComponent({
@@ -203,6 +215,7 @@ export default defineComponent({
             step,
             logName,
             clearLog,
+            check,
             select,
             resizeBy,
             startResize,
