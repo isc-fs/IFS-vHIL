@@ -22,4 +22,7 @@ devices:
   # A ZED-F9P RTK receiver on J1's I2C2 (PB10 SCL J1.13 / PB11 SDA J1.14), at
   # its default address 0x42. The receiver is not on the board: it is an
   # external part on J1. On SPI it would be spi: sensorhub.SPI1, cs: sensorhub.PA4.
+  # Its UART2 is left open for Inés to wire once the car's correction link is
+  # decided: to a board UART with uarts: {uart2: sensorhub.<USART>}, or to a
+  # radio, which tests stand in for with `InjectUart2 "<hex>"`.
   gnss: {model: zed-f9p, i2c: sensorhub.I2C2}
