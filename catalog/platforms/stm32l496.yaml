@@ -1,0 +1,88 @@
+kind: platform
+id: stm32l496
+description: >-
+  STM32L496RG (Cortex-M4F, 1 MB flash, 320 KB SRAM), the SensorHub's MCU.
+  Renode ships no STM32L4, so this is a new platform: Renode's models of the
+  IP the L4 shares with other parts (GPIO, L5 SPI and ADC, F7 USART, L0/L1
+  DMA, timers, IWDG, CRC, RNG), the vHIL's I2C master, bxCAN CAN1/CAN2 on
+  the vHIL's arbitrated CAN bus, and new models of the L4's RCC (ready
+  flags, clock switch, clock tree that retimes the SysTick, timers, UARTs and LPTIMs, peripheral resets, reset
+  causes, ADC/RTC/WWDG kernel clocks), PWR, FLASH (erase, programming and
+  fast programming, error interrupts, write protection, PCROP, option
+  bytes), SYSCFG (SRAM2 erase and write protection), DMA request routing
+  through CSELR, DBGMCU, the ADC (calibration, conversion timing, timer
+  triggers, dual mode), DAC, OPAMP, COMP and VREFBUF; RTC, WWDG, LPTIM1/2,
+  SDMMC1 and QUADSPI (with memory-mapped mode) from Renode.
+  Addresses and IRQs from ST's stm32l496xx.h.
+backend: renode
+renode:
+  repl: platforms/cpus/stm32l496.repl
+  cpu: cpu
+  sources:
+    # I2C master that NACKs an unanswered address: the L4 has the same I2C IP
+    # as the H7. Device models for I2C targets build on it, so it loads first.
+    - models/renode/Stm32H7I2c.cs
+    # PWR before the RCC, which reads PWR_CR1.DBP for the backup domain.
+    - models/renode/Stm32L4Pwr.cs
+    # bxCAN (CAN1/CAN2) on the arbitrated bus; the RCC sets its PCLK1.
+    - models/renode/Stm32BxCan.cs
+    # The one owner of the CPU's memory-access hook (flash store checks,
+    # SRAM2 write protection), before the models that use it.
+    - models/renode/VhilMemoryHooks.cs
+    - models/renode/Stm32L4Syscfg.cs
+    # The DMA request router before the ADCs and DAC, which ask it for DMA;
+    # the analog block (DAC, timer TRGO) before the ADC, which uses its TRGO.
+    - models/renode/Stm32L4DmaCselr.cs
+    - models/renode/Stm32L4Analog.cs
+    - models/renode/Stm32L4Adc.cs
+    - models/renode/Stm32L4Rcc.cs
+    - models/renode/Stm32L4Flash.cs
+    - models/renode/Stm32L4Dbgmcu.cs
+    # One owner for the bus hooks (NVIC AIRCR, FLASH_CR, IWDG/WWDG), then the
+    # reset causes it feeds to the RCC's CSR.
+    - models/renode/VhilBusHooks.cs
+    - models/renode/Stm32L4ResetFlags.cs
+    - models/renode/Stm32L4QuadSpiMap.cs
+  # After each board's platform loads; {board} is its machine name. The
+  # reset causes (vhil_reset_<board>, the broker's PowerOn), then the
+  # engineering data the HAL reads.
+  # FLASHSIZE_BASE 0x1FFF75E0 holds the flash size in KB (FLASH_SIZE,
+  # stm32l496xx.h:1217-1220): 0x0400 for the 1 MB L496RG. PACKAGE_BASE
+  # 0x1FFF7500 PKG [4:0] 0 is LQFP64 (RM0351 "Package data register").
+  setup:
+    - emulation CreateVhilL4ResetFlags "vhil_reset_{board}" "{board}"
+    - emulation CreateVhilL4QuadSpiMap "{board}"
+    - emulation CreateVhilL4TimerTrgo "{board}"
+    - sysbus WriteWord 0x1FFF75E0 0x0400
+    - sysbus WriteWord 0x1FFF7500 0x0000
+  # A power cut on a board without VBAT wipes the backup domain. RCC_BDCR
+  # and the reset flags are the RCC model's (STM32L4_RCC RecordReset on
+  # `vhil_reset_<board> PowerOn`); the RTC backup registers are the RTC's,
+  # which a machine reset keeps: RTC_BASE 0x40002800 (stm32l496xx.h) +
+  # BKP0R at 0x50. Renode's STM32F4_RTC holds 20, BKP0R..BKP19R; the L496's
+  # BKP20R..BKP31R are unmodelled.
+  power_cut:
+    - sysbus WriteDoubleWord 0x40002850 0x0
+    - sysbus WriteDoubleWord 0x40002854 0x0
+    - sysbus WriteDoubleWord 0x40002858 0x0
+    - sysbus WriteDoubleWord 0x4000285c 0x0
+    - sysbus WriteDoubleWord 0x40002860 0x0
+    - sysbus WriteDoubleWord 0x40002864 0x0
+    - sysbus WriteDoubleWord 0x40002868 0x0
+    - sysbus WriteDoubleWord 0x4000286c 0x0
+    - sysbus WriteDoubleWord 0x40002870 0x0
+    - sysbus WriteDoubleWord 0x40002874 0x0
+    - sysbus WriteDoubleWord 0x40002878 0x0
+    - sysbus WriteDoubleWord 0x4000287c 0x0
+    - sysbus WriteDoubleWord 0x40002880 0x0
+    - sysbus WriteDoubleWord 0x40002884 0x0
+    - sysbus WriteDoubleWord 0x40002888 0x0
+    - sysbus WriteDoubleWord 0x4000288c 0x0
+    - sysbus WriteDoubleWord 0x40002890 0x0
+    - sysbus WriteDoubleWord 0x40002894 0x0
+    - sysbus WriteDoubleWord 0x40002898 0x0
+    - sysbus WriteDoubleWord 0x4000289c 0x0
+  # Every reset clears BASEPRI's masking, which Renode 1.17's CPU reset does
+  # not (renode/renode#1021; invariant 6, catalog/platforms/stm32h733.yaml).
+  reset:
+    - '{cpu} SetRegister "BasePri" 0x0'

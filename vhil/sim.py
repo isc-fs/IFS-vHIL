@@ -721,7 +721,7 @@ class Sim:
         b = self.system.boards[board]
         if b.bootloader is None:
             return True
-        base = b.firmware.get("load", {}).get("vector_table", APP_BASE)
+        base = (b.firmware or {}).get("load", {}).get("vector_table", APP_BASE)
         return int(self.monitor(f"{rn.ident(b.platform['renode'].get('cpu', 'cpu'))} PC",
                                 board=board).strip(), 16) >= base
 
@@ -774,8 +774,7 @@ class Sim:
         (vhil.broker.power_on_commands): a cold boot, the backup domain wiped
         when the board has no VBAT."""
         from vhil.broker import power_on_commands
-        vbat = self.system.boards[board].board.get("vbat", True)
-        for command in power_on_commands(board, vbat):
+        for command in power_on_commands(board, self.system.power_cut(board)):
             self.monitor(command, board=board)
 
     def read_symbol(self, board: str, symbol: str, size: int = 1) -> int:

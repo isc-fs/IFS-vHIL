@@ -230,7 +230,7 @@ def _registered():
 
 SUBSYSTEMS = {"can", "bootloader", "flash", "adc", "dma", "sd", "isospi", "i2c", "radio", "plant",
               "timers", "cpu_timing", "fast_forward", "fault_hooks", "reset", "live_session", "server",
-              "debugger", "broker", "probe"}
+              "debugger", "broker", "probe", "gnss"}
 BUILTIN = {"skipif", "xfail", "parametrize", "usefixtures", "filterwarnings", "skip"}
 
 
@@ -239,7 +239,9 @@ def test_every_native_test_file_is_tagged(path):
     marks = SEL.markers[path] - BUILTIN
     assert marks <= _registered(), marks - _registered()
     systems = {m.removeprefix("system_").replace("_", "-") for m in marks if m.startswith("system_")}
-    assert systems, f"{path}: no system_<id> marker"
+    # A platform tested on its own (no system, no firmware) names it instead.
+    platforms = {m for m in marks if m.startswith("platform_")}
+    assert systems or platforms, f"{path}: no system_<id> or platform_<id> marker"
     assert marks & SUBSYSTEMS, f"{path}: no subsystem marker"
     # A board marker for exactly the roles its systems place.
     roles = set().union(*(SEL.systems[s]["roles"] for s in systems))

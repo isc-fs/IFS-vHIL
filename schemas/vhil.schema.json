@@ -192,6 +192,13 @@
               },
               "description": "Monitor commands run on each machine after the platform loads."
             },
+            "power_cut": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Monitor commands a power-on runs first on a board without VBAT (board vbat: false), with the machine selected: what the platform's backup domain loses with its power that the platform's own models keep across a machine reset. Cite the reference manual."
+            },
             "reset": {
               "type": "array",
               "items": {
@@ -401,6 +408,12 @@
               "channel": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "front_end_ratio": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1,
+                "description": "Pin volts per volt at the connector: the board's own input divider, for a board without roles (a role's adc_single_ended front_end_ratio wins). Applied only to a sensor-side source (System.sensor_to_pin). Cite the schematic."
               }
             }
           }
@@ -935,6 +948,16 @@
                 "$ref": "#/$defs/endpoint",
                 "description": "The board's I2C connector the device's targets sit on."
               },
+              "uart": {
+                "$ref": "#/$defs/endpoint",
+                "description": "The board's UART connector the device is the far end of."
+              },
+              "uarts": {
+                "type": "object",
+                "description": "The model's further UART ports (interface.uarts) -> the board UART each is wired to; one left out is open.",
+                "propertyNames": {"$ref": "#/$defs/name"},
+                "additionalProperties": {"$ref": "#/$defs/endpoint"}
+              },
               "attach": {
                 "$ref": "#/$defs/name",
                 "description": "Device whose port this one attaches to."
@@ -1117,6 +1140,17 @@
               "type": "boolean",
               "description": "An I2C target (or several, renode.targets) on an I2C connector."
             },
+            "uart": {
+              "type": "boolean",
+              "description": "The far end of a board's UART (renode.uart): the MCU's TX is its input, its output the MCU's RX."
+            },
+            "uarts": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/name"},
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "Further UART ports, each optional (a ZED-F9P's UART2): a device wires each to a board UART on its own board (uarts), or leaves it open. renode.uarts names the constructor argument of each."
+            },
             "attach": {
               "type": "string",
               "description": "Kind of port on another device this model attaches to, e.g. isospi."
@@ -1145,6 +1179,20 @@
             "radio": {
               "type": "boolean",
               "description": "Transmits over the air: every payload sent is a `radio` trace record (the model's Payloads)."
+            },
+            "protocols": {
+              "type": "object",
+              "minProperties": 2,
+              "propertyNames": {"enum": ["spi", "i2c", "uart"]},
+              "description": "A part that speaks more than one bus (a BMI088: I2C or SPI, picked by its PS pin): the bus a device wires picks one, as the chip's pin does. Each protocol's value adds to the interface for that choice, e.g. spi: {gpio: [csb1, csb2]}. Leave the protocols themselves out of the plain keys.",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cs": {"type": "boolean"},
+                  "gpio": {"type": "array", "items": {"$ref": "#/$defs/name"}, "minItems": 1, "uniqueItems": true}
+                }
+              }
             }
           }
         },
@@ -1196,6 +1244,7 @@
             "targets": {
               "type": "object",
               "minProperties": 1,
+              "$comment": "With interface.protocols, targets serve the i2c choice and type the other.",
               "propertyNames": {
                 "$ref": "#/$defs/name"
               },
@@ -1219,6 +1268,22 @@
                     "description": "7-bit I2C address."
                   }
                 }
+              }
+            },
+            "uarts": {
+              "type": "object",
+              "description": "For interface.uarts: port -> the constructor argument the MCU's UART is passed as.",
+              "propertyNames": {"$ref": "#/$defs/name"},
+              "additionalProperties": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}
+            },
+            "uart": {
+              "type": "object",
+              "required": ["type", "argument"],
+              "additionalProperties": false,
+              "description": "For a uart model (or its uart protocol): one peripheral on the system bus at no address (sysbus.<device>) whose constructor takes the MCU's UART.",
+              "properties": {
+                "type": {"type": "string", "description": "Type as used in a platform description."},
+                "argument": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "description": "The constructor argument the MCU's UART is passed as."}
               }
             },
             "params": {
@@ -1266,7 +1331,7 @@
               }
             }
           },
-          "oneOf": [
+          "anyOf": [
             {
               "required": [
                 "type"
@@ -1275,6 +1340,11 @@
             {
               "required": [
                 "targets"
+              ]
+            },
+            {
+              "required": [
+                "uart"
               ]
             }
           ]
