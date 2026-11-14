@@ -9,7 +9,9 @@
 #        host's), through VHIL_DOCKER_CPUS.
 # full:  every suite once with every core: firmware build, unit, sim,
 #        scenarios, the IFS_HIL smoke suite against the ECU.
-# all:   both (the default).
+# files: tests/sim one file per container: each file's own peak and time
+#        (a run of the whole suite peaks at its heaviest file).
+# all:   full and sweep (the default).
 #
 # Each job appends a line to results/profile/$VHIL_PROFILE_HOST.jsonl
 # (scripts/cgroup-profile.py); scripts/hw-profile-report.py turns the
@@ -26,7 +28,7 @@ cores=("$@"); [ ${#cores[@]} -gt 0 ] || cores=(1 2 4 8)
 job() {  # job <label> <vhil-docker.sh args...>
     local label=$1; shift
     echo "== $label" >&2
-    VHIL_PROFILE=$label "$repo/scripts/vhil-docker.sh" "$@" >/dev/null 2>"$repo/results/profile/$host.$label.log" \
+    VHIL_PROFILE=$label "$repo/scripts/vhil-docker.sh" "$@" >"$repo/results/profile/$host.$label.log" 2>&1 \
         || echo "   failed (rc $?), see results/profile/$host.$label.log" >&2
 }
 mkdir -p "$repo/results/profile"
@@ -38,6 +40,14 @@ if [ "$mode" = full ] || [ "$mode" = all ]; then
     job "scenarios@$max" scenarios
     job "sim@$max" sim
     VHIL_DUT=ecu job "ifs-hil-ecu-smoke@$max" ifs-hil smoke
+fi
+
+if [ "$mode" = files ]; then
+    unset VHIL_DOCKER_CPUS
+    for f in "$repo"/tests/sim/test_*.py; do
+        f=${f#"$repo/"}
+        job "sim-file:$(basename "$f" .py)@$max" sim "$f"
+    done
 fi
 
 if [ "$mode" = sweep ] || [ "$mode" = all ]; then
