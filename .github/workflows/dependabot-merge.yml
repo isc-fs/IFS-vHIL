@@ -20,6 +20,12 @@ name: Dependabot merge
 # rebased pull request would never turn green. Without the secret, the run
 # still merges pull requests that are already ready and lists the ones that
 # need a rebase in its summary.
+#
+# The same rule hides the merge from dev's push workflows: a merge made with
+# the workflow's own token fires no `push`, so image.yml would never publish
+# the merged commit's images and scripts/vhil-docker.sh would fall back to a
+# source build. Without the secret, the run dispatches image.yml on dev after
+# merging (workflow_dispatch is the one event that token may start).
 on:
   schedule:
     - cron: '17,47 * * * *'
@@ -40,6 +46,7 @@ concurrency:
 permissions:
   contents: write        # merge
   pull-requests: write   # merge, label
+  actions: write         # dispatch image.yml after a merge without the token
 
 jobs:
   merge:
@@ -107,6 +114,11 @@ jobs:
             sha=$(gh pr view "$n" -R "$REPO" --json headRefOid -q .headRefOid)
             gh pr merge "$n" -R "$REPO" --merge --match-head-commit "$sha"
             say "#$n: merged ($sha)."
+            # A merge by the workflow's token starts no push workflows on dev.
+            if [ "$HAS_PAT" != true ]; then
+              gh workflow run image.yml -R "$REPO" --ref dev
+              say "Dispatched image.yml on dev."
+            fi
           elif [ "$busy" = 0 ] && [ ${#behind[@]} -gt 0 ]; then
             n=${behind[0]}
             if [ "$HAS_PAT" = true ]; then
