@@ -1,0 +1,80 @@
+kind: training
+title: "The AIRs drop out a few seconds into Run"
+summary: "The car arms, precharges and goes to Run, then the tractive system dies on its own. Find the part that did it."
+level: 2
+fault: hardware
+topics: [shutdown circuit, AMS, cell temperatures, precharge]
+system: ecu-ams
+# Pinned: the boards run these commits (IFS08-CE-ECU and IFS08-CE-AMS dev
+# when the puzzle was written), so the puzzle stays the same as dev moves.
+firmware:
+  ecu: 44610a5366ad5c785751a6eccb1cf4a8616890ca
+  ams: 94b59a9e5bc5a5fe90705018ebcd8e6a23e851d0
+brief: |
+  **From the test-day log:** "Pressed reset, TSMS on, DASH_CHG. Precharge was fine and
+  we got to Run. About 6 s later the AIRs opened with nobody touching anything. The AMS
+  LED went to error. Power-cycled the LV, same again."
+
+  Your car is the one in the diagram. Run it, then use the instruments to find **which
+  part** failed. You can probe every board pin, scope signals over time and read every
+  CAN frame. When you know where the fault is, name it (part and position): only then
+  can you repair it.
+
+  Out of scope here: analog and physical effects (EMI, noise, soldering). The vHIL
+  models logic, timing, CAN and the measurement chain, not those.
+drive:
+  # As systems/ecu-ams.scenarios/car-arms-through-the-ecu.yaml: RST_EXT, TSMS,
+  # one DASH_CHG press, then the car in Run.
+  virtual_ms: 14000
+  stimuli:
+    - {kind: plant, name: sdc-reset, at_ms: 5400, plant: sdc, set: {reset: true}}
+    - {kind: plant, name: sdc-reset-release, at_ms: 5450, plant: sdc, set: {reset: false}}
+    - {kind: plant, name: tsms-on, at_ms: 5500, plant: sdc, set: {tsms: true}}
+    - {kind: gpio, name: dash-press, at_ms: 5600, board: ams, pin: PF10, level: true}
+    - {kind: gpio, name: dash-release, at_ms: 5650, board: ams, pin: PF10, level: false}
+  watch:
+    - {kind: symbol, board: ams, name: g_state_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_reason_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_detail_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ecu, name: g_last_ctrl_state, size: 1, period_ms: 10}
+    - {kind: pin, board: ams, pin: PB4}
+    - {kind: pin, board: ams, pin: PB5}
+    - {kind: pin, board: ams, pin: PB6}
+    - {kind: pin, board: ams, pin: PB7}
+    - {kind: pin, board: ams, pin: PF9}
+  # A healthy car: what the repaired one must do (test_solved).
+  expect:
+    - {check: never, name: no-ams-error, at_ms: 0, signal: "symbol:ams.g_state_telemetry", value: 5}
+    - {check: eventually, name: ams-run, at_ms: 5600, until_ms: 10600, signal: "symbol:ams.g_state_telemetry", value: 3}
+    - {check: always, name: ams-ok, at_ms: 4500, signal: "pin:ams.PB4", value: high}
+    - {check: always, name: sdc-closed-in-run, at_ms: 10800, signal: "plant:sdc.sdc_closed", value: 1}
+    - {check: always, name: air-plus-closed, at_ms: 10800, signal: "pin:ams.PB5", value: high}
+    - {check: always, name: air-minus-closed, at_ms: 10800, signal: "pin:ams.PB6", value: high}
+# The seeded fault: module 3's NTC in slot 7 goes open (a broken sensor wire)
+# in Run. The pack plant rails its mux input to 3.0 V (vhil/plant_pack.py).
+faults:
+  - {kind: plant, name: ntc-breaks, at_ms: 11500, plant: ts, set: {open_ntc_module: 3, open_ntc_slot: 7}}
+hints:
+  - "Start with the shutdown circuit: which element opened first? The AIRs only open when their coil supply (AIR+_VCC) goes away."
+  - "The AMS latch (K5) dropped because AMS_OK (AMS PB4) went low. The AMS opened the circuit on purpose. Why? Look at its state and fault reason (on CAN 0x6C0, or the AMS's fault_reason)."
+  - "Fault reason 13 is TempSensorDisconnected; its detail byte is a bit mask of modules. Then find the slot: arm pit-diag (0x7F0 DE AD BE EF) and read the per-slot temperatures on 0x6A0..0x6B8. An open NTC has no reading."
+answer:
+  part: ams.ntc
+  module: 3
+  slot: 7
+  explain: |
+    Module 3's NTC in slot 7 went open. Its divider rails the LTC6811's GPIO1 to VREF2
+    (3.0 V), above NtcOpenMv (2800 mV), so the AMS reads no temperature there. Every
+    slot is required, so one lost sensor is TempSensorDisconnected (reason 13, detail =
+    1 << module) on the first sweep. The AMS latches Error, drops AMS_OK, and K5 opens
+    the shutdown circuit: AIR+_VCC goes and the AIRs open. FS rule: within 500 ms. The
+    latch holds until an LV power cycle, and so does the fault, so a power cycle
+    doesn't help. Fix: the sensor or its connector on module 3, then power-cycle.
+fix_note: "On the car: AMS #469, #473, #476 (open NTCs opening the SDC)."
+sources:
+  - isc-fs/IFS08-CE-AMS#469
+  - isc-fs/IFS08-CE-AMS#473
+  - isc-fs/IFS08-CE-AMS#476
+  - tests/sim/test_ams_temps.py
+solved:
+  - "training/tests/test_puzzles.py::test_solved[open-ntc-opens-the-sdc]"

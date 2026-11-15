@@ -1,0 +1,67 @@
+kind: training
+title: "Precharge never finishes"
+summary: "The car starts precharging, then gives up after a few seconds with an error. Find the part that failed."
+level: 1
+fault: hardware
+topics: [precharge, tractive system, AIRs]
+system: ecu-ams
+firmware:
+  ecu: 44610a5366ad5c785751a6eccb1cf4a8616890ca
+  ams: 94b59a9e5bc5a5fe90705018ebcd8e6a23e851d0
+brief: |
+  **From the test-day log:** "Armed as usual, heard the precharge relay click. Waited.
+  About five seconds later everything clicked open and the AMS went to error. Same every
+  time."
+
+  Run the car. Watch the tractive system on the right of the diagram: the AIRs, the
+  precharge relay, the discharge circuit and the DC-link bar. Find **which part**
+  failed and name it.
+
+  Out of scope: analog and physical effects (EMI, noise, soldering).
+drive:
+  # RST_EXT, TSMS on, one DASH_CHG press: how the car is armed.
+  virtual_ms: 12000
+  stimuli:
+    - {kind: plant, name: sdc-reset, at_ms: 5400, plant: sdc, set: {reset: true}}
+    - {kind: plant, name: sdc-reset-release, at_ms: 5450, plant: sdc, set: {reset: false}}
+    - {kind: plant, name: tsms-on, at_ms: 5500, plant: sdc, set: {tsms: true}}
+    - {kind: gpio, name: dash-press, at_ms: 5600, board: ams, pin: PF10, level: true}
+    - {kind: gpio, name: dash-release, at_ms: 5650, board: ams, pin: PF10, level: false}
+  watch:
+    - {kind: symbol, board: ams, name: g_state_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_reason_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ecu, name: g_last_ctrl_state, size: 1, period_ms: 10}
+  # A healthy car: what the repaired one must do (test_solved).
+  expect:
+    - {check: never, name: no-ams-error, at_ms: 0, signal: "symbol:ams.g_state_telemetry", value: 5}
+    - {check: eventually, name: ams-run, at_ms: 5600, until_ms: 10600, signal: "symbol:ams.g_state_telemetry", value: 3}
+    - {check: always, name: sdc-closed-in-run, at_ms: 10800, signal: "plant:sdc.sdc_closed", value: 1}
+    - {check: always, name: air-plus-closed, at_ms: 10800, signal: "pin:ams.PB5", value: high}
+    - {check: always, name: air-minus-closed, at_ms: 10800, signal: "pin:ams.PB6", value: high}
+# The seeded fault: the discharge relay never opens (its NC contact is stuck
+# closed), so the discharge resistor stays across the DC link while it
+# precharges: a divider, r_dis / (r_pre + r_dis) = 6500 / 7190 = 90 % of the
+# pack (catalog/plants/tractive-system.yaml), under the AMS's 95 %.
+faults:
+  - {kind: plant, name: discharge-stuck, at_ms: 0, plant: ts, set: {discharge_stuck_closed: true}}
+hints:
+  - "Precharge charges the inverter's DC-link capacitor through a resistor before AIR+ closes. Scope the DC-link voltage (plant ts.v_link): what does it do, and where does it stop?"
+  - "The link rises, then flattens out short of 95 % of the pack and stays there. A capacitor charged through a resistor ends at the source voltage, unless something else draws current from it. What else is connected across the link?"
+  - "Work out the ratio: the link stops at about 90 % of the pack. With 690 ohm of precharge resistor, what resistor across the link gives that divider?"
+answer:
+  part: ts.discharge
+  explain: |
+    The discharge relay never opened. It is normally closed and should open as soon
+    as AIR+_VCC comes on, taking the discharge resistor off the DC link. Stuck closed,
+    the resistor stayed across the link while it precharged, and the two resistors
+    made a voltage divider: the link settled at v_pack x R_dis / (R_pre + R_dis) =
+    6500 / (690 + 6500), about 90 % of the pack. The AMS needs 95 % to close AIR+, so
+    after PrechargeMaxMs (5 s) it latched Error (reason 12, FsmError) and opened
+    everything. AIR+ never closed onto a link short of the pack: precharge did its job of
+    protecting the car. On the car: with LV on and TS off, check that the discharge
+    relay clicks open when the SDC closes, and measure across its contacts.
+sources:
+  - catalog/plants/tractive-system.yaml
+  - systems/ecu-ams.scenarios/precharge-never-conducts.yaml
+solved:
+  - "training/tests/test_puzzles.py::test_solved[precharge-never-finishes]"

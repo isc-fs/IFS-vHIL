@@ -99,6 +99,25 @@ def test_the_sdc_opening_drops_every_contact():
     assert not ts.outputs["air_pos_closed"] and not ts.outputs["air_neg_closed"]
 
 
+def test_a_stuck_discharge_relay_holds_precharge_at_the_divider():
+    """The bleed stays across the link while it precharges: the link settles
+    at v_pack * r_dis / (r_pre + r_dis), under the AMS's 95 %."""
+    ts = _ts()
+    ts.fault("discharge_stuck_closed", True)
+    for name in ("sdc_closed", "air_neg_cmd", "pre_cmd"):
+        ts.set(name, True, 0)
+    ts.advance(10_000_000)
+    r_pre, r_dis = _p("r_precharge"), _p("r_discharge")
+    assert ts.v_link == pytest.approx(V_PACK * r_dis / (r_pre + r_dis), rel=1e-6)
+    assert ts.v_link < 0.95 * V_PACK
+
+    ts = _ts()                                  # without the fault: the pack
+    for name in ("sdc_closed", "air_neg_cmd", "pre_cmd"):
+        ts.set(name, True, 0)
+    ts.advance(10_000_000)
+    assert ts.v_link == pytest.approx(V_PACK, rel=1e-6)
+
+
 def test_faults():
     ts = _ts()
     ts.fault("pre_open_circuit", True)

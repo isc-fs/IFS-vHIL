@@ -47,7 +47,8 @@ NTC_CHANNELS = tuple(range(10)) + tuple(range(16, 26))
 MUX_CHANNELS = 32
 INPUTS_PER_CHIP = 12
 LTC_LSB_V = 100e-6          # LTC6811 cell register LSB (datasheet: 100 uV), the model's
-UNUSED_RAW = 37000          # inputs no cell drives keep the model's default 3.7 V
+UNUSED_RAW = 37000
+OPEN_NTC_RAW = 30000        # an open NTC's GPIO1: VREF2, 3.0 V (tests/sim/test_ams_temps.py)          # inputs no cell drives keep the model's default 3.7 V
 K0 = 273.15
 
 
@@ -74,7 +75,7 @@ class Pack:
     integrates at the held current; `set_current`, `bleed` change it."""
 
     FAULTS = ("weak_cell", "weak_cell_capacity", "weak_cell_r0", "hot_cell", "hot_cell_dt",
-              "imbalance_cell", "imbalance_soc")
+              "imbalance_cell", "imbalance_soc", "open_ntc_module", "open_ntc_slot")
 
     def __init__(self, params: dict, t_us: int = 0):
         self.params = params
@@ -111,6 +112,8 @@ class Pack:
         self.bleed_i = [0.0] * self.n           # mean bleed current over the coming interval
         self.t_us = int(t_us)
         self.weak = -1
+        # An open NTC (its wire or connector broken): (chip, slot 0-19) or None.
+        self.open_ntc: Optional[tuple[int, int]] = None
 
     def p(self, name):
         return self.params[name].value
@@ -235,6 +238,13 @@ class Pack:
                 # One-shot: the element's charge moves by d at this instant.
                 self.soc[int(c)] = min(1.0, max(0.0, self.soc[int(c)] + float(d)))
                 faults["imbalance_soc"] = None
+        if name in ("open_ntc_module", "open_ntc_slot"):
+            # The firmware's naming (bms_service.cpp:357-385): module m's slot
+            # s is chip 2m + s // 20 (upper LTC_1, then lower LTC_2), NTC s % 20.
+            m, s = faults.get("open_ntc_module"), faults.get("open_ntc_slot")
+            self.open_ntc = None
+            if m is not None and s is not None and int(m) >= 0 and 0 <= int(s) < 2 * NTC_PER_CHIP:
+                self.open_ntc = (2 * int(m) + int(s) // NTC_PER_CHIP, int(s) % NTC_PER_CHIP)
 
 
 class ChainDriver:
@@ -251,6 +261,8 @@ class ChainDriver:
         self.cpc = tuple(int(c) for c in cells_per_chip)
         self.last_cells: Optional[list] = None
         self.last_temps: Optional[list] = None
+        self.last_open: Optional[tuple[int, int]] = None
+        self.chip_name = next(n for n, d in system.devices.items() if d.get("attach") == device)
         self.pushes = 0
         self.armed = False
 
@@ -275,16 +287,26 @@ class ChainDriver:
             self.call("SetPlantCells", ",".join(map(str, raw)))
             self.last_cells = raw
             self.pushes += 1
+        # An FMU's cell source (vhil/fmi.py) has no open-NTC fault.
+        open_ntc = getattr(pack, "open_ntc", None)
         temps = [""] * (self.chips * MUX_CHANNELS)
         for chip in range(self.chips):
             for slot, ch in enumerate(NTC_CHANNELS):
                 t = pack.t_ntc(chip, slot, self.cpc)
-                if t is not None:
+                if t is not None and open_ntc != (chip, slot):
                     temps[chip * MUX_CHANNELS + ch] = str(int(round((t - K0) * 10)))
         if temps != self.last_temps:
             self.call("SetPlantTemperatures", ",".join(temps))
             self.last_temps = temps
             self.pushes += 1
+        if open_ntc != getattr(self, "last_open", None) and open_ntc is not None:
+            # An open NTC: its divider rails to VREF2 (3.0 V), above NtcOpenMv.
+            chip, slot = open_ntc
+            if chip < self.chips:
+                self.sim.call(f"{self.path}.{self.chip_name}{chip}", "SetAuxRaw",
+                              NTC_CHANNELS[slot], OPEN_NTC_RAW, board=self.board)
+                self.pushes += 1
+        self.last_open = open_ntc
 
     def take_bleed(self) -> tuple[int, list[int], list[int]]:
         """(now us, on-time us per element since the last take, DCC bit per
