@@ -16,7 +16,8 @@
     "Testing"
   ],
   "activationEvents": [
-    "workspaceContains:scripts/vhil-docker.sh"
+    "workspaceContains:scripts/vhil-docker.sh",
+    "workspaceContains:.git"
   ],
   "main": "./out/src/extension.js",
   "contributes": {
@@ -149,6 +150,11 @@
         "command": "vhil.tool",
         "title": "Run a tool",
         "category": "vHIL"
+      },
+      {
+        "command": "vhil.updateVhil",
+        "title": "Update the vHIL checkout",
+        "category": "vHIL"
       }
     ],
     "configuration": {
@@ -181,6 +187,16 @@
           },
           "default": [],
           "markdownDescription": "Extra pytest arguments for every run, e.g. `--vhil-trace`."
+        },
+        "vhil.repository": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The vHIL repository the extension checks out when a firmware repository is open (it tests that firmware with it). Empty: `https://github.com/isc-fs/IFS-vHIL`."
+        },
+        "vhil.ref": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The branch or tag of that checkout, updated once a day (**Update the vHIL checkout** now). Empty: `dev`."
         }
       }
     },
@@ -197,19 +213,23 @@
       "vhil": [
         {
           "id": "vhil.status",
-          "name": "Status"
+          "name": "Status",
+          "when": "vhil.active"
         },
         {
           "id": "vhil.systems",
-          "name": "Systems"
+          "name": "Systems",
+          "when": "vhil.active"
         },
         {
           "id": "vhil.runs",
-          "name": "Runs"
+          "name": "Runs",
+          "when": "vhil.active"
         },
         {
           "id": "vhil.tools",
-          "name": "Tools"
+          "name": "Tools",
+          "when": "vhil.active"
         }
       ]
     },

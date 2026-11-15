@@ -1061,3 +1061,52 @@ def test_the_cli_help_has_an_example_per_subcommand(capsys):
             main([cmd, "-h"])
         out = capsys.readouterr().out
         assert "Example:" in out and f"vhil.system {cmd}" in out
+
+
+# -- local working-tree builds (--source) --------------------------------------
+def test_sync_tree_copies_changes_and_keeps_our_build_dir(tmp_path):
+    import os
+    from vhil.system import sync_tree
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "app").mkdir(parents=True)
+    (src / "app" / "main.c").write_text("int main;")
+    (src / "gone.c").write_text("x")
+    (src / "build").mkdir()
+    (src / "build" / "host.elf").write_text("the developer's own build")
+    os.symlink("app/main.c", src / "link.c")
+    assert sync_tree(src, dst, "build") == 3
+    assert (dst / "app" / "main.c").read_text() == "int main;"
+    assert os.readlink(dst / "link.c") == "app/main.c"
+    assert not (dst / "build").exists()
+    (dst / "build").mkdir()
+    (dst / "build" / "ours.o").write_text("incremental")
+    # Unchanged: nothing copied, mtimes kept.
+    assert sync_tree(src, dst, "build") == 0
+    (src / "app" / "main.c").write_text("int main(void);")
+    (src / "gone.c").unlink()
+    assert sync_tree(src, dst, "build") == 1
+    assert (dst / "app" / "main.c").read_text() == "int main(void);"
+    assert not (dst / "gone.c").exists()
+    assert (dst / "build" / "ours.o").read_text() == "incremental"
+
+
+def test_a_source_builds_the_working_tree_and_only_local_skips_the_rest(tmp_path, monkeypatch):
+    import vhil.system as vs
+    tree = tmp_path / "IFS08-CE-ECU"
+    tree.mkdir()
+    (tree / "main.c").write_text("dirty edit")
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("cwd")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(vs.subprocess, "run", run)
+    s = System(REPO / "systems" / "ecu.yaml")
+    fw = yaml.safe_load((REPO / "catalog" / "firmware" / "ecu.yaml").read_text())
+    out = s.build_firmware(tmp_path / "fw", log=lambda m: None,
+                           sources={"ecu": tree}, only_local=True)
+    src = vs.local_source_dir(tmp_path / "fw", fw)
+    assert out == {"ecu": src / "build" / "ECU08.elf"}
+    assert (src / "main.c").read_text() == "dirty edit"
+    assert not any(isinstance(c, list) and c[:2] == ["git", "clone"] for c, _ in calls)
+    assert [c for c, cwd in calls if cwd == src] == [fw["build"]["configure"], fw["build"]["build"]]
