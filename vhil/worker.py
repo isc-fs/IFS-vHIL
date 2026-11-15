@@ -1030,6 +1030,33 @@ def symbol_size(sim, board: str, name: str) -> int:
     return size if size in (1, 2, 4) else 1
 
 
+# A MainLite's CAN bootloader jumps to the app 2 s after power-on (CLAUDE.md
+# invariant 5); the run's warning names it.
+BOOT_WINDOW_S = 2
+
+
+def run_warnings(scenario: dict, summary: dict, in_app: dict, end_us: int) -> list:
+    """Why a run that ended without a verdict may still have shown nothing.
+
+    A `run` scenario without expects ends "passed" when its time is up, which
+    says nothing about the firmware: a run that stopped inside the bootloader's
+    auto-jump window never ran an app, and one whose bus stayed silent saw no
+    frame. `in_app` maps each board to whether it ran its application at the
+    end (empty when unknown). Runs with expects are judged by them, so they
+    get none (#390)."""
+    if scenario.get("expect"):
+        return []
+    out = []
+    waiting = sorted(b for b, up in in_app.items() if not up)
+    if waiting:
+        at = f"run ended at {end_us / 1e6:.1f} s, auto-jump at {BOOT_WINDOW_S} s"
+        out.append(f"the app never started ({at})" if len(waiting) == len(in_app)
+                   else f"the app never started on {', '.join(waiting)} ({at})")
+    elif not sum((summary.get("frames") or {}).values()):
+        out.append("no CAN frames: the bus saw none")
+    return out
+
+
 def evaluate_expects(run_dir: Path, scenario: dict, system: System, firmware: dict,
                      end_us: int, trace: TraceWriter) -> dict:
     """The scenario's expects (vhil/expect.py) over the run's trace: the
@@ -1509,6 +1536,12 @@ class Worker:
                         summary = execute_run(sim, scenario, trace, cancelled=cancelled,
                                               progress=on_progress, state_view=True,
                                               session=session, logs=logs)
+                        in_app = {}
+                        if not scenario.get("expect"):
+                            try:
+                                in_app = {b: bool(sim.in_app(b)) for b in system.boards}
+                            except Exception:  # noqa: BLE001 - a warning is not worth the run
+                                pass
                 finally:
                     # What Renode and the UARTs said last (an abort, a quit).
                     try:
@@ -1522,6 +1555,10 @@ class Worker:
                                                     virtual_us, trace))
                     if summary["expects_failed"]:
                         state = "failed"
+                warnings = run_warnings(scenario, summary, in_app, virtual_us)
+                if warnings:
+                    summary["warnings"] = warnings
+                    trace.log(virtual_us, "warning: " + "; ".join(warnings))
             elif scenario["kind"] == "pytest":
                 state, summary = execute_pytest(scenario, run_dir, Path(self.settings.workspace),
                                                 image_env(system, firmware), trace, cancelled,

@@ -1,22 +1,36 @@
 kind: model
 id: bmi088
 description: >-
-  Bosch BMI088 6-axis IMU on I2C: an accelerometer die and a gyroscope die,
-  each its own I2C target (models/renode/Bmi088.cs, register maps from the
-  Bosch datasheet BST-BMI088-DS001). Chip IDs, the accelerometer's
+  Bosch BMI088 6-axis IMU: an accelerometer die and a gyroscope die
+  (models/renode/Bmi088.cs, register maps from the Bosch datasheet
+  BST-BMI088-DS001). The bus a device wires picks the protocol, as the chip's
+  PS pin does: `i2c:` (the MainLite's) puts each die at its address; `spi:`
+  (the SensorHub's) makes the package one SPI slave, with CSB1 (accelerometer)
+  and CSB2 (gyroscope) wired as `pins`. Chip IDs, the accelerometer's
   power-up (suspended and off until ACC_PWR_CONF/ACC_PWR_CTRL), ranges,
   bandwidth/ODR and data registers; a read returns the value set, converted
-  at the range in force, with no noise or settling. Defaults: lying flat at
-  rest (+1 g on Z, no rotation). Test API per die (monitor): SetAcceleration
-  (mg) on <device>_acc, SetAngularRate (dps) on <device>_gyr; on both,
-  Respond (false: NACKs, as an unpowered or missing chip), ReadCount,
-  NackCount, RegisterValue.
-interface: {i2c: true}
+  at the range in force, with no noise or settling. On SPI, the
+  accelerometer's dummy byte and its switch from I2C mode on CSB1's first
+  rising edge. Defaults: lying flat at rest (+1 g on Z, no rotation). Test
+  API (monitor): on I2C, SetAcceleration (mg) on <device>_acc, SetAngularRate
+  (dps) on <device>_gyr, and on both Respond, ReadCount, NackCount,
+  RegisterValue; on SPI, all on <device>: SetAcceleration, SetAngularRate,
+  AccelerometerResponds / GyroscopeResponds, AccelerometerSpiMode,
+  AccelerometerReadCount / GyroscopeReadCount, AccelerometerRegister /
+  GyroscopeRegister.
+interface:
+  protocols:
+    i2c: {}
+    # CSB1, CSB2: active-low chip selects, the MCU drives them.
+    spi: {gpio: [csb1, csb2]}
 backend: renode
 renode:
   source: models/renode/Bmi088.cs
-  # SDO1 and SDO2 low select the lower address of each pair (datasheet I2C
-  # interface: accelerometer 0x18/0x19, gyroscope 0x68/0x69).
+  # I2C: SDO1 and SDO2 low select the lower address of each pair (datasheet
+  # I2C interface: accelerometer 0x18/0x19, gyroscope 0x68/0x69).
   targets:
     acc: {type: Sensors.Bmi088Accelerometer, address: 0x18}
     gyr: {type: Sensors.Bmi088Gyroscope, address: 0x68}
+  # SPI: one slave; GPIO input 0 = CSB1, 1 = CSB2.
+  type: Sensors.Bmi088Spi
+  gpio_in: {csb1: 0, csb2: 1}

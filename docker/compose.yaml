@@ -2,8 +2,9 @@
 #
 #   docker compose -f docker/compose.yaml up        # then http://localhost:8080
 #
-# (`scripts/vhil-docker.sh server` and `editor` start parts of it.) Images
-# come from `scripts/vhil-docker.sh image` (ifs-vhil, ifs-vhil-editor). The
+# (`scripts/vhil-docker.sh server` and `editor` start parts of it, with
+# VHIL_TAG and VHIL_EDITOR_TAG set to the checkout's image keys,
+# scripts/image-key.sh; by hand they default to `latest`.) The
 # repository checkout is the workspace: its systems/ and catalog/ are what
 # the app shows and edits; `worker` executes the runs the api queues.
 #
@@ -20,7 +21,7 @@
 name: ifs-vhil
 services:
   api:
-    image: ${VHIL_IMAGE:-ifs-vhil}
+    image: ${VHIL_IMAGE:-ifs-vhil}:${VHIL_TAG:-latest}
     command: python -m vhil.server --host 0.0.0.0 --port 8080
     working_dir: /work
     volumes:
@@ -55,7 +56,7 @@ services:
     # `scripts/vhil-docker.sh fw`. Unprivileged, on the default network:
     # run scenarios and tests/sim use Renode's in-process CAN hubs, not vcan
     # (the IFS_HIL suites over vcan are `scripts/vhil-docker.sh ifs-hil`).
-    image: ${VHIL_IMAGE:-ifs-vhil}
+    image: ${VHIL_IMAGE:-ifs-vhil}:${VHIL_TAG:-latest}
     command: python -m vhil.worker
     working_dir: /work
     volumes:
@@ -67,7 +68,7 @@ services:
       VHIL_AUTH: dev
       VHIL_FW_DIR: /vhil/fw
   editor:
-    image: ${VHIL_IMAGE:-ifs-vhil}-editor
+    image: ${VHIL_IMAGE:-ifs-vhil}-editor:${VHIL_EDITOR_TAG:-latest}
     command: scripts/editor.sh
     working_dir: /work
     volumes:

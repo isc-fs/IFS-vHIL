@@ -11,6 +11,30 @@ parallel, with no hardware attached, on a `full-ci` label, every night and on
 release ([`docs/ci.md`](docs/ci.md)). Work that needs real physics stays on the physical bench: analog
 accuracy, real power, flash wear and bus electrics.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/vhil-overview-dark.svg">
+  <img src="docs/img/vhil-overview-light.svg" alt="The firmware repos build one .elf per board. The same image runs on emulated boards in the vHIL (Docker, every PR), on real boards on the HIL bench (before a release) and on the car (ground truth).">
+</picture>
+
+*One image, three targets.* The same firmware image runs on emulated boards in
+the vHIL, on real boards on the HIL bench and on the car. In the vHIL the boards
+sit on a virtual CAN bus with models of the chips around them (LTC6811 chain,
+BMI088).
+
+**Where it fits.** Each layer catches what the one before can't:
+
+```mermaid
+flowchart TB
+    FW["Firmware repo: ECU, AMS, uDV"] -->|production build| ELF(["Same .elf image"])
+    ELF --> V["<b>vHIL</b><br/>emulated boards, virtual time<br/>every PR, minutes"]
+    ELF --> H["<b>HIL bench</b><br/>real boards and electronics<br/>before a release"]
+    ELF --> C["<b>Car</b><br/>ground truth"]
+    V -->|logic, timing, fault paths| DEV{{"Merge to dev"}}
+    H -->|silicon, analog, flashing| MAIN{{"Release to main"}}
+    C -->|logs, datasheets| FIX["Model fixes"]
+    FIX -.-> V
+```
+
 **What it does today**
 
 - **Systems as data.** A system file places boards, gives each its role and
@@ -27,13 +51,20 @@ modelled, not by a PCB. See [`docs/vision.md`](docs/vision.md) for the roadmap.
 
 **Contributing:** `dev` is the trunk and `main` is release-only. Branch
 `feat/` `fix/` `docs/` `chore/` `test/` off `dev` and open a PR back into it.
-See [`docs/development/setup.md`](docs/development/setup.md), and
-[`CLAUDE.md`](CLAUDE.md) for the operating model.
+New contributors start at [`CONTRIBUTING.md`](CONTRIBUTING.md); every doc is
+indexed in [`docs/README.md`](docs/README.md). Adding a board:
+[`docs/development/adding-a-board.md`](docs/development/adding-a-board.md).
+[`CLAUDE.md`](CLAUDE.md) is the operating model.
 
 ## Try it
 
+New here? [`docs/first-10-minutes.md`](docs/first-10-minutes.md) goes from
+install to CAN frames on screen, with the desktop app
+([`app/`](app/README.md)) or `bin/vhil` (`bin/vhil setup`, then `bin/vhil ui`).
+
 Everything runs in Docker; nothing is installed on the host. On macOS the
-wrapper starts a small VM for it.
+wrapper starts a small VM for it. Underneath, `bin/vhil` and the app run
+`scripts/vhil-docker.sh`, whose jobs are the same as CI's:
 
 ```sh
 scripts/vhil-docker.sh vm            # once, on macOS: the VM
@@ -43,7 +74,7 @@ scripts/vhil-docker.sh unit          # host-only checks; validates every system
 scripts/vhil-docker.sh smoke ecu     # boot a board and check what it says on CAN
 scripts/vhil-docker.sh sim           # the native test suites, in virtual time
 scripts/vhil-docker.sh ifs-hil       # IFS_HIL's own suite against the virtual boards
-scripts/vhil-docker.sh server        # the web app on http://localhost:8080
+scripts/vhil-docker.sh editor        # the app on http://localhost:8080/editor/, with its run worker
 ```
 
 Every job the wrapper runs (the full list is the header of

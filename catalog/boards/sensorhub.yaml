@@ -1,0 +1,64 @@
+kind: board
+id: sensorhub
+description: >-
+  SensorHub: the car's sensor concentrator, one per car, on an STM32L496RGT6.
+  Two CAN buses, an on-board BMI088 IMU, and on its connector an external
+  SPI, an I2C and four 0-5 V analog inputs.
+  Connector and pin names follow the MCU (CANn, SPIn, port pins).
+platform: stm32l496
+# Traced from isc-fs/IFS09-CE-SENSORHUB's schematic (KiCad netlist; U4 is the
+# STM32L496RGT6, J1 the 23-pin car connector). The board has no published pin
+# model, no CAN bootloader and no roles: one SensorHub, one firmware, which
+# is not in the catalogue yet (a system gives its image at render).
+#
+# VBAT (U4.1) is tied to 3V3, with no coin cell or supercap: a power cut
+# wipes the backup domain. PC14/PC15 are unconnected (no LSE); Y1 on PH0/PH1
+# is the HSE (platforms/cpus/stm32l496.repl hseFrequency).
+vbat: false
+# On the board itself, not on J1.
+onboard:
+  # IC1 BMI088: PC10 SCK / PC11 MISO / PC12 MOSI (SPI3), CS_ACCEL PC4,
+  # CS_GYRO PC5, INT1-INT3 PC6-PC8 (below).
+  SPI3: BMI088
+can:
+  # PB8 RX / PB9 TX through U5 TCAN330 to CAN1_H/L, J1.9/J1.10.
+  CAN1: sysbus.can1
+  # PB5 RX / PB6 TX through U6 TCAN330 to CAN2_H/L, J1.11/J1.12.
+  CAN2: sysbus.can2
+spi:
+  # External SPI on J1: PA5 SPI_SCK J1.15, PA7 SPI_MOSI J1.16, PA6 SPI_MISO
+  # J1.17; its chip select is PA4, SPI_CS_EXT J1.18 (below).
+  SPI1: sysbus.spi1
+  # The BMI088's bus (onboard).
+  SPI3: sysbus.spi3
+i2c:
+  # PB10 I2C_SCL J1.13 / PB11 I2C_SDA J1.14: I2C2 (AF4) on these pins.
+  I2C2: sysbus.i2c2
+uart:
+  # PA2 TX / PA3 RX: the debug UART.
+  USART2: sysbus.usart2
+gpio:
+  # SPI_CS_EXT, J1.18: software chip select of the external SPI.
+  PA4: {port: sysbus.gpioPortA, pin: 4}
+  # The BMI088's chip selects (accelerometer, gyroscope) and interrupts
+  # (INT1, INT2: accelerometer; INT3: gyroscope).
+  PC4: {port: sysbus.gpioPortC, pin: 4}
+  PC5: {port: sysbus.gpioPortC, pin: 5}
+  PC6: {port: sysbus.gpioPortC, pin: 6}
+  PC7: {port: sysbus.gpioPortC, pin: 7}
+  PC8: {port: sysbus.gpioPortC, pin: 8}
+  # Heartbeat LED.
+  PB13: {port: sysbus.gpioPortB, pin: 13}
+analog_in:
+  # ADC_IN1-ADC_IN4, J1.19-J1.22, 0-5 V: each through a 5k11 series / 10k to
+  # GND divider (R15/R16 on IN1, the same on IN2-IN4), 10 nF and a BAT54S
+  # clamp to 3V3, to PC0-PC3 (ADC123_IN1-IN4). Ratio 10 / (10 + 5.11) =
+  # 0.6618: 5 V at the connector is 3.31 V at the pin. Applied only to a
+  # sensor-side source (System.sensor_to_pin). As drawn, the dividers' nets
+  # are labelled ADC1_IN/ADC1_MCU (...ADC4), not J1's ADC_IN1 or the MCU's
+  # ADC_IN1_MCU, so they join neither: modelled as intended, flagged in
+  # docs/boards/sensorhub.md.
+  PC0: {adc: sysbus.adc1, channel: 1, front_end_ratio: 0.6618}
+  PC1: {adc: sysbus.adc1, channel: 2, front_end_ratio: 0.6618}
+  PC2: {adc: sysbus.adc1, channel: 3, front_end_ratio: 0.6618}
+  PC3: {adc: sysbus.adc1, channel: 4, front_end_ratio: 0.6618}

@@ -54,7 +54,7 @@ and all. By hand, any YAML that parses to the same data is fine.
 | `kind` | `scenario` |
 | `system` | the system's id: the file's directory |
 | `description` | optional text, at most 2000 characters |
-| `virtual_ms` | the run's virtual time from power-on (default 3000; each MainLite spends its bootloader's 2 s first) |
+| `virtual_ms` | the run's virtual time from power-on (default 5000; each MainLite spends its bootloader's 2 s first) |
 | `slice_ms` | how often the trace is flushed and a cancel seen (default 100) |
 | `tags` | labels; `beyond-bench` marks a scenario that needs what the physical bench lacks (a plant), so it never gates a parity run (pytest marker `beyond_bench`) |
 | `stimuli`, `watch`, `expect` | the rows below |

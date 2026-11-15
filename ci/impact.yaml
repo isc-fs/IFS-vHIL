@@ -104,13 +104,20 @@ rules:
     select: {}
   - name: unit-tested only (tests/unit runs on every PR)
     paths: [tests/unit/**, tests/js/**, deploy/**, docker/compose.yaml,
-            vhil/coverage.py, vhil/fwprune.py, vhil/trace.py,
+            vhil/coverage.py, vhil/fwprune.py, vhil/trace.py, vhil/pytest_vscode.py,
             models/renode/VhilTrace.cs, tests/sim/durations.json]
     select: {importers: true}
+  - name: desktop app (app/README.md; app.yml builds it)
+    paths: [app/**]
+    select: {}
+  - name: VS Code extension (vscode/README.md; vscode.yml builds it)
+    paths: [vscode/**]
+    select: {}
   - name: developer scripts
-    paths: [scripts/explore.sh, scripts/probe.sh, scripts/vhil-docker.sh, scripts/wsl-vcan.sh,
+    paths: [bin/vhil, scripts/explore.sh, scripts/probe.sh, scripts/vhil-docker.sh, scripts/image-key.sh, scripts/wsl-vcan.sh,
             scripts/update-pin-model.sh, scripts/shims/**,
-            scripts/fit_pack.py, scripts/plots/**]
+            scripts/fit_pack.py, scripts/plots/**,
+            scripts/hw-profile.sh, scripts/hw-profile-report.py, scripts/cgroup-profile.py]
     select: {}
 
   # -- editor ----------------------------------------------------------------
@@ -169,9 +176,15 @@ rules:
     paths: [models/renode/IsoSpi.cs, models/renode/Stm32H7Spi.cs, catalog/models/ltc6811.yaml,
             catalog/models/ltc6820.yaml]
     select: {markers: [isospi], devices: [ltc6820]}
-  - name: I2C and the BMI088
+  - name: I2C and the BMI088 (Stm32H7I2c.cs is the STM32L496's I2C too)
     paths: [models/renode/Stm32H7I2c.cs, models/renode/Bmi088.cs, catalog/models/bmi088.yaml]
-    select: {markers: [i2c], devices: [bmi088]}
+    select: {markers: [i2c, platform_stm32l496], devices: [bmi088]}
+  - name: the STM32L496's own models (RCC, PWR, FLASH, SYSCFG, DMA routing, ADC, analog, QUADSPI map; the SensorHub's MCU)
+    paths: ['models/renode/Stm32L4*.cs', models/renode/Stm32BxCan.cs, models/renode/VhilMemoryHooks.cs]
+    select: {markers: [platform_stm32l496, system_sensorhub]}
+  - name: the ZED-F9P GNSS receiver
+    paths: [models/renode/ZedF9p.cs, catalog/models/zed-f9p.yaml]
+    select: {markers: [gnss], devices: [zed-f9p]}
   - name: the nRF24 radio
     paths: [models/renode/Nrf24l01p.cs, catalog/models/nrf24l01p.yaml]
     select: {markers: [radio], devices: [nrf24l01p]}

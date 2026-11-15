@@ -256,7 +256,12 @@ editor its Pipeline Manager build), so they change when `docker/Dockerfile`,
 `docker/Dockerfile` installs since M5.5: an image built before that can't
 start with `VHIL_GITHUB_APP_ID` set.
 
-Tag with the date and the commit of `docker/` (and `latest`):
+CI publishes them ([`image.yml`](../.github/workflows/image.yml), [`docs/ci.md`](ci.md#the-docker-images)):
+each image under its content key, and both under the same moving tags,
+`dev` (the `dev` branch) and, for a release tag `vX.Y.Z`, `vX.Y.Z` and
+`latest`. For a host, set `VHIL_TAG` to a release tag and pin the digests
+below. To build and push by hand instead, tag with the date and the commit of
+`docker/` (and `latest`):
 
 ```sh
 tag=$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)

@@ -169,7 +169,7 @@ def test_a_healthy_boot_logs_nothing(caplog):
 
 ROUTES = {
     "power": [{"machine": "ams", "relay": {"addr": 0x20, "port": 0, "pin": 1},
-               "ina_addr": 0x41, "current_A": 0.12, "can": {}, "vbat": False}],
+               "ina_addr": 0x41, "current_A": 0.12, "can": {}, "power_cut": []}],
     "gpio_routes": [
         {"tca": 0x21, "port": 1, "pin": 0, "machine": "ams",
          "gpio_port": "sysbus.gpioPortF", "gpio_pin": 9},

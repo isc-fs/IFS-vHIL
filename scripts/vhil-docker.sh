@@ -5,14 +5,16 @@
 # VHIL_DOCKER_CONTEXT=default and load vcan on the host.
 #
 #   scripts/vhil-docker.sh vm                    create/start the VM, with vcan
-#   scripts/vhil-docker.sh image                 (re)build the images (docker/)
+#   scripts/vhil-docker.sh pull                  pull the published images of this checkout
+#   scripts/vhil-docker.sh image                 (re)build the images (docker/) locally
 #   scripts/vhil-docker.sh fw [ecu ams udv ...]  build firmware from systems/<s>.yaml
 #   scripts/vhil-docker.sh unit                  tests/unit + validate every system
 #   scripts/vhil-docker.sh smoke <ecu|ams>       tests/<s>_smoke.robot
 #   scripts/vhil-docker.sh sim [pytest args]     tests/sim in virtual time (or just the
 #                                                tests/... files the args name)
 #   scripts/vhil-docker.sh scenarios [pytest args]
-#                                                every committed scenario (tests/scenarios)
+#                                                every committed scenario (tests/scenarios, or
+#                                                just the tests/... the args name)
 #   scripts/vhil-docker.sh coverage [glob] [pytest args]
 #                                                firmware coverage of tests/sim/<glob>.py
 #                                                (default test_*) into results/coverage
@@ -21,7 +23,7 @@
 #   scripts/vhil-docker.sh ifs-hil [suite] [pytest args]
 #                                                IFS_HIL's ECU suite over vcan (VHIL_DUT=ams: AMS suite)
 #                                                (VHIL_SYSTEM=systems/ecu-ams.yaml: with the AMS)
-#   scripts/vhil-docker.sh editor                system editor on http://localhost:8080/editor/
+#   scripts/vhil-docker.sh editor                system editor on http://localhost:8080/editor/ (and the run worker)
 #                                                (with the app's api and proxy)
 #   scripts/vhil-docker.sh server                web app API + shell on http://localhost:8080
 #                                                (M5; full stack: docker/compose.yaml)
@@ -29,18 +31,36 @@
 #   scripts/vhil-docker.sh prune [--dry-run]     prune old commit builds in /vhil/fw (vhil/fwprune.py)
 #   scripts/vhil-docker.sh editor-check [systems...]
 #                                                Pipeline Manager loads every system's graph
+#   scripts/vhil-docker.sh export-run <id> [-o file|dir]
+#                                                a finished run of the app as a .vhilrun file
+#   scripts/vhil-docker.sh import-run <file>     a .vhilrun file as a new run of the app
+#                                                (vhil/server/bundle.py, docs/sharing-runs.md)
 #   scripts/vhil-docker.sh shell                 a shell in the container
 #   scripts/vhil-docker.sh run <cmd...>          any command in the container
 #
 # Firmware, the IFS_HIL checkout and their build trees live in the Docker
 # volume `vhil-data` (/vhil in the container). IFS_HIL_REF picks IFS_HIL's
 # ref (default dev); FW_REFS passes --ref pairs to the firmware build
-# (e.g. FW_REFS="ecu=feat/x"). VHIL_DOCKER_CPUS=N limits the container to N
+# (e.g. FW_REFS="ecu=feat/x"). FW_LOCAL builds a catalogue firmware from a
+# local working tree instead, uncommitted edits included, with the same
+# recipe: FW_LOCAL="ecu=$HOME/src/IFS08-CE-ECU" (firmware id = absolute
+# path, no spaces; mounted read-only, copied to /vhil/fw/<id>@local and
+# built there, incrementally). FW_LOCAL_ONLY=1 builds just those images.
+# VHIL_DOCKER_CPUS=N limits the container to N
 # cores (--cpus, --cpuset-cpus), as a CI-class host: GitHub's runners have 4.
 # VHIL_FAST_FORWARD=0 passes through, to run Renode without the busy-wait
 # fast-forward (docs/performance.md). The models' assembly (vhil/models.py)
 # is cached in the volume (/vhil/renode-models): compiled on the first start
 # after a model changes; VHIL_MODELS=prebuilt passes through.
+# VHIL_PROFILE=<label> records the job's wall time, CPU and peak memory as
+# a line of results/profile/profile.jsonl (VHIL_PROFILE_OUT names another
+# file; scripts/cgroup-profile.py, docs/development/hardware.md).
+#
+# Images: every job uses the images of this checkout, named by content key
+# (scripts/image-key.sh). When they aren't local, it pulls them from
+# $VHIL_REGISTRY (default ghcr.io/isc-fs, published by
+# .github/workflows/image.yml) and builds them only when none is published
+# or docker/ has uncommitted changes.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 profile=${VHIL_COLIMA_PROFILE:-vhil}
@@ -48,7 +68,13 @@ context=${VHIL_DOCKER_CONTEXT:-colima-$profile}
 base_image=${VHIL_IMAGE:-ifs-vhil}
 editor_image=$base_image-editor
 image=$base_image
+# The tags every job runs: this checkout's keys once ensure_images has run
+# (`latest` for a checkout with uncommitted docker/ changes). Jobs and the
+# compose stack run by key, never by `latest`, so two checkouts on different
+# images can't pick up each other's.
+base_tag=latest editor_tag=latest
 docker=(docker --context "$context")
+registry=${VHIL_REGISTRY:-ghcr.io/isc-fs}
 # The web app's services, behind one proxy on one origin (docker/compose.yaml).
 compose=("${docker[@]}" compose -f "$repo/docker/compose.yaml")
 # Unprivileged on Docker's default network unless a job needs vcan: only
@@ -57,6 +83,15 @@ compose=("${docker[@]}" compose -f "$repo/docker/compose.yaml")
 run_args=()
 vcan_args=(--privileged --network host)
 [ "${VHIL_DOCKER_VCAN:-0}" = 1 ] && run_args=("${vcan_args[@]}")
+# A local firmware tree per FW_LOCAL entry, read-only at /src/<id>.
+src_args=() fw_sources=
+for pair in ${FW_LOCAL:-}; do
+    id=${pair%%=*} dir=${pair#*=}
+    case $dir in /*) ;; *) echo "error: FW_LOCAL $pair: the path must be absolute" >&2; exit 2;; esac
+    [ -d "$dir" ] || { echo "error: FW_LOCAL $pair: no such directory" >&2; exit 2; }
+    src_args+=(-v "$dir:/src/$id:ro")
+    fw_sources+="${fw_sources:+ }$id=/src/$id"
+done
 cpu_args=()
 if [ -n "${VHIL_DOCKER_CPUS:-}" ]; then
     cpu_args=(--cpus "$VHIL_DOCKER_CPUS" --cpuset-cpus "0-$((VHIL_DOCKER_CPUS - 1))")
@@ -84,31 +119,97 @@ vm() {
     fi
 }
 
+# base, editor and clean of this checkout (scripts/image-key.sh).
+base='' editor='' clean=''
+image_keys() {
+    local out
+    out=$("$repo/scripts/image-key.sh")
+    base=$(sed -n 's/^base=//p' <<<"$out")
+    editor=$(sed -n 's/^editor=//p' <<<"$out")
+    clean=$(sed -n 's/^clean=//p' <<<"$out")
+}
+have() { "${docker[@]}" image inspect "$1" >/dev/null 2>&1; }
+
 build_images() {
+    image_keys
     "${docker[@]}" build -t "$base_image" "$repo/docker"
     "${docker[@]}" build -t "$editor_image" --build-arg BASE="$base_image" \
         -f "$repo/docker/editor.Dockerfile" "$repo"
+    if [ "$clean" = true ]; then
+        "${docker[@]}" tag "$base_image" "$base_image:$base"
+        "${docker[@]}" tag "$editor_image" "$editor_image:$editor"
+    fi
 }
 
-ensure_image() {
-    "${docker[@]}" image inspect "$image" >/dev/null 2>&1 || build_images
+# The published images of this checkout, tagged locally as the images and as
+# their keys. Fails when docker/ has uncommitted changes or none is published.
+pull_images() {
+    image_keys
+    if [ "$clean" != true ]; then
+        echo "docker/ or the editor's sources have uncommitted changes: build them (\`image\`)" >&2
+        return 1
+    fi
+    local name key
+    for name in ifs-vhil ifs-vhil-editor; do
+        key=$base; [ "$name" = ifs-vhil-editor ] && key=$editor
+        "${docker[@]}" pull "$registry/$name:$key" || return 1
+    done
+    "${docker[@]}" tag "$registry/ifs-vhil:$base" "$base_image:$base"
+    "${docker[@]}" tag "$registry/ifs-vhil-editor:$editor" "$editor_image:$editor"
+    "${docker[@]}" tag "$base_image:$base" "$base_image"
+    "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
+}
+
+# The images of this checkout: local by key, else pulled, else built.
+ensure_images() {
+    image_keys
+    if [ "$clean" != true ]; then
+        echo "docker/ or the editor's sources have uncommitted changes: using the local \`latest\` images" >&2
+        if ! have "$base_image" || ! have "$editor_image"; then build_images; fi
+        base_tag=latest editor_tag=latest
+        return
+    fi
+    if ! have "$base_image:$base" || ! have "$editor_image:$editor"; then
+        echo "pulling the images of this checkout ($registry, ifs-vhil:$base)" >&2
+        pull_images || {
+            echo "no published image for this checkout: building it (Renode from source, ~30 min)" >&2
+            build_images
+        }
+    fi
+    if ! have "$base_image:$base" || ! have "$editor_image:$editor"; then
+        echo "error: no ifs-vhil:$base / ifs-vhil-editor:$editor after pulling or building" >&2
+        exit 1
+    fi
+    # `latest` follows the last checkout used, for docker compose run by hand.
+    "${docker[@]}" tag "$base_image:$base" "$base_image"
+    "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
+    base_tag=$base editor_tag=$editor
 }
 
 # Run a script in the container. For vcan jobs, host networking puts
 # can0..can2 in the VM's namespace, where they outlive the container, and
 # --privileged lets the container create them.
 in_container() {
-    ensure_image
+    ensure_images
+    local ref=$base_image:$base_tag
+    [ "$image" = "$editor_image" ] && ref=$editor_image:$editor_tag
     local tty=()
     [ -t 0 ] && [ -t 1 ] && tty=(-it)
+    # VHIL_DOCKER_NAME names the container, so a caller (the VS Code
+    # extension's Cancel) can stop it with `docker kill`.
     "${docker[@]}" run --rm ${tty[@]+"${tty[@]}"} ${run_args[@]+"${run_args[@]}"} \
-        ${cpu_args[@]+"${cpu_args[@]}"} \
+        ${VHIL_DOCKER_NAME:+--name "$VHIL_DOCKER_NAME"} \
+        ${cpu_args[@]+"${cpu_args[@]}"} ${src_args[@]+"${src_args[@]}"} \
         -v "$repo:/work" -v vhil-data:/vhil \
+        -e FW_SOURCES="$fw_sources" -e FW_LOCAL_ONLY="${FW_LOCAL_ONLY:-0}" \
         -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" \
         -e VHIL_SYSTEM="${VHIL_SYSTEM:-}" -e VHIL_DUT="${VHIL_DUT:-ecu}" \
         ${VHIL_FAST_FORWARD:+-e VHIL_FAST_FORWARD="$VHIL_FAST_FORWARD"} \
+        ${VHIL_PROFILE_HOST:+-e VHIL_PROFILE_HOST="$VHIL_PROFILE_HOST"} \
         -e VHIL_MODELS_CACHE=/vhil/renode-models ${VHIL_MODELS:+-e VHIL_MODELS="$VHIL_MODELS"} \
-        "$image" bash -c "$1" vhil "${@:2}"
+        "$ref" ${VHIL_PROFILE:+python /work/scripts/cgroup-profile.py --label "$VHIL_PROFILE" \
+            --out "/work/results/profile/${VHIL_PROFILE_OUT:-profile.jsonl}" --} \
+        bash -c "$1" vhil "${@:2}"
 }
 
 # ELF paths of the last firmware build, as board=elf lines.
@@ -120,11 +221,14 @@ need_elf() { [ -n "$(elf "$1")" ] || { echo "no $1 firmware: run \`scripts/vhil-
 cmd=${1:-help}; shift || true
 case "$cmd" in
 vm) vm ;;
+pull) pull_images ;;
 image) build_images ;;
 fw)
     [ $# -gt 0 ] || set -- ecu ams
     in_container "$prelude"'
         refs=(); for r in $FW_REFS; do refs+=(--ref "$r"); done
+        for r in $FW_SOURCES; do refs+=(--source "$r"); done
+        [ "$FW_LOCAL_ONLY" = 1 ] && refs+=(--only-local)
         mkdir -p /vhil/fw
         for s in "$@"; do
             python -m vhil.system build "systems/$s.yaml" --workdir /vhil/fw "${refs[@]}" \
@@ -160,8 +264,11 @@ sim)
 scenarios)
     in_container "$prelude"'
         need_elf ecu; need_elf ams
+        # tests/scenarios unless the arguments name tests themselves, as sim.
+        paths=tests/scenarios
+        for a in "$@"; do case "$a" in tests/*) paths=; break ;; esac; done
         VHIL_ECU_ELF=$(elf ecu) VHIL_AMS_ELF=$(elf ams) VHIL_CAN_BOOTLOADER_ELF=$(elf ecu.bootloader) \
-            python -m pytest tests/scenarios -v --sim-log-dir results/sim-logs \
+            python -m pytest $paths -v --sim-log-dir results/sim-logs \
                 -o junit_family=xunit1 --junitxml=results/scenarios.xml "$@"' "$@" ;;
 coverage)
     in_container "$prelude"'
@@ -214,10 +321,28 @@ ifs-hil)
 editor)
     # Pipeline Manager on the web app's origin, under /editor/, behind the
     # proxy (docker/compose.yaml; the api comes up with it, for the login
-    # check). It publishes no port of its own and runs nothing: Run is the
-    # web app's (`worker` executes it).
-    "${docker[@]}" image inspect "$editor_image" >/dev/null 2>&1 || build_images
-    VHIL_IMAGE=$base_image exec "${compose[@]}" up editor proxy ;;
+    # check). It publishes no port of its own. Run is the web app's, which
+    # the worker executes: it comes up too, or a run here stays queued (#393).
+    ensure_images
+    VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy worker ;;
+export-run|import-run)
+    # The app's runs (the vhil-data volume, as the api sees it) to and from
+    # a file on the host: its directory is mounted at /xfer.
+    if [ "$cmd" = export-run ]; then
+        [ -n "${1:-}" ] || { echo "usage: $0 export-run <run id> [-o file|dir]" >&2; exit 2; }
+        id=$1 out=.
+        [ "${2:-}" = -o ] && out=${3:?-o needs a file or directory}
+        if [ -d "$out" ]; then dir=$(cd "$out" && pwd) name=
+        else dir=$(cd "$(dirname "$out")" && pwd) name=$(basename "$out"); fi
+        args=(export "$id" -o "/xfer/$name")
+    else
+        f=${1:?usage: $0 import-run <file.vhilrun>}
+        [ -f "$f" ] || { echo "no file $f" >&2; exit 1; }
+        dir=$(cd "$(dirname "$f")" && pwd)
+        args=(import "/xfer/$(basename "$f")")
+    fi
+    run_args+=(-v "$dir:/xfer" -e VHIL_DATA=/vhil/server -e "USER=${USER:-}")
+    in_container 'exec python -c "import sys; from vhil.server.bundle import main; sys.exit(main())" "$@"' "${args[@]}" ;;
 editor-check)
     # Pipeline Manager's ./validate (its frontend's load) on each system's
     # dataflow, in the editor image where the patched checkout lives.
@@ -228,13 +353,13 @@ server)
     # the auth settings pass through when set (docs/development/web-app.md).
     # The api listens on 0.0.0.0 in its container, reached only through the
     # proxy, whose port is on the host's 127.0.0.1 only (docker/compose.yaml).
-    ensure_image
-    VHIL_IMAGE=$base_image exec "${compose[@]}" up api proxy ;;
+    ensure_images
+    VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up api proxy ;;
 worker)
     in_container 'export VHIL_DATA=/vhil/server VHIL_FW_DIR=/vhil/fw; exec python -m vhil.worker "$@"' "$@" ;;
 prune)
     in_container 'export VHIL_DATA=/vhil/server VHIL_FW_DIR=/vhil/fw; exec python -m vhil.worker prune "$@"' "$@" ;;
 shell) in_container 'exec bash' ;;
 run) in_container 'exec "$@"' "$@" ;;
-*) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; [ "$cmd" = help ] ;;
+*) sed -n '2,/^set -euo/{/^#/p;}' "$0" | sed 's/^# \{0,1\}//'; [ "$cmd" = help ] ;;
 esac

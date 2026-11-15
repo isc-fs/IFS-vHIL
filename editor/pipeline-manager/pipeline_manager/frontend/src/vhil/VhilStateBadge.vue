@@ -4,8 +4,8 @@ vHIL: a run's state as text with a glyph, never colour alone
 -->
 
 <template>
-    <span class="vhil-badge" :class="`--${state}`">
-        <span aria-hidden="true">{{ glyph }}</span> {{ state }}
+    <span class="vhil-badge" :class="`--${shown}`" :title="warnings.join('; ') || undefined">
+        <span aria-hidden="true">{{ glyph }}</span> {{ shown }}
     </span>
 </template>
 
@@ -13,13 +13,20 @@ vHIL: a run's state as text with a glyph, never colour alone
 import { computed, defineComponent } from 'vue';
 
 const GLYPHS = {
-    queued: '○', building: '◌', running: '●', passed: '✓', failed: '✕', error: '▲', cancelled: '⊘',
+    queued: '○', completed: '!', building: '◌', running: '●', passed: '✓', failed: '✕', error: '▲', cancelled: '⊘',
 };
 
 export default defineComponent({
-    props: { state: { type: String, required: true } },
+    props: {
+        state: { type: String, required: true },
+        // The run's summary.warnings (#390): a passed run that showed nothing
+        // (no app started, no frame) reads "completed", amber, reason on hover.
+        warnings: { type: Array, default: () => [] },
+    },
     setup(props) {
-        return { glyph: computed(() => GLYPHS[props.state] ?? '?') };
+        const shown = computed(() => (props.state === 'passed' && props.warnings.length
+            ? 'completed' : props.state));
+        return { shown, glyph: computed(() => GLYPHS[shown.value] ?? '?') };
     },
 });
 </script>

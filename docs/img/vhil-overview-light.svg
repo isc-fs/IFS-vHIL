@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 372" width="800" height="372" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+<rect width="800" height="372" rx="12" fill="#ffffff"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#59636e"/></marker></defs>
+<rect x="150" y="26" width="200" height="58" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+<text x="250" y="51" text-anchor="middle" font-size="15" font-weight="600" fill="#1f2328">Firmware repos</text>
+<text x="250" y="70" text-anchor="middle" font-size="12" fill="#59636e">ECU · AMS · uDV, production recipe</text>
+<line x1="352" y1="55" x2="438" y2="55" stroke="#59636e" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="395" y="47" text-anchor="middle" font-size="11" fill="#59636e">build</text>
+<rect x="442" y="26" width="208" height="58" rx="8" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+<text x="546" y="51" text-anchor="middle" font-size="15" font-weight="700" fill="#0969da">one .elf per board</text>
+<text x="546" y="70" text-anchor="middle" font-size="12" fill="#59636e">the same bytes everywhere</text>
+<path d="M546,86 V112 H142.0 V146 M546,112 H658.0 V146 M400.0,112 V146" fill="none" stroke="#59636e" stroke-width="1.5"/>
+<line x1="142.0" y1="136" x2="142.0" y2="148" stroke="#59636e" stroke-width="1.5" marker-end="url(#a)"/>
+<line x1="400.0" y1="136" x2="400.0" y2="148" stroke="#59636e" stroke-width="1.5" marker-end="url(#a)"/>
+<line x1="658.0" y1="136" x2="658.0" y2="148" stroke="#59636e" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="24.0" y="150" width="236" height="196" rx="10" fill="#f6f8fa" stroke="#8250df" stroke-width="1.5"/>
+<text x="40.0" y="178" font-size="16" font-weight="700" fill="#1f2328">vHIL</text>
+<rect x="132.0" y="163" width="112" height="22" rx="11" fill="#fbefff"/>
+<text x="188.0" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#8250df">emulated boards</text>
+<rect x="39.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#8250df" stroke-width="1.3" stroke-dasharray="4 3"/>
+<text x="70.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">ECU</text>
+<rect x="111.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#8250df" stroke-width="1.3" stroke-dasharray="4 3"/>
+<text x="142.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">AMS</text>
+<rect x="183.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#8250df" stroke-width="1.3" stroke-dasharray="4 3"/>
+<text x="214.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">uDV</text>
+<line x1="39.0" y1="250" x2="245.0" y2="250" stroke="#8250df" stroke-width="2" stroke-dasharray="4 3"/>
+<line x1="70.0" y1="238" x2="70.0" y2="250" stroke="#8250df" stroke-width="1.3"/>
+<line x1="142.0" y1="238" x2="142.0" y2="250" stroke="#8250df" stroke-width="1.3"/>
+<line x1="214.0" y1="238" x2="214.0" y2="250" stroke="#8250df" stroke-width="1.3"/>
+<text x="245.0" y="264" text-anchor="end" font-size="10.5" fill="#59636e">CAN</text>
+<text x="40.0" y="288" font-size="12.5" fill="#59636e">Docker on a laptop or CI</text>
+<text x="40.0" y="306" font-size="12.5" fill="#59636e">virtual time, deterministic</text>
+<text x="40.0" y="324" font-size="12.5" fill="#1f2328" font-weight="600">runs on every PR</text>
+<rect x="282.0" y="150" width="236" height="196" rx="10" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1.5"/>
+<text x="298.0" y="178" font-size="16" font-weight="700" fill="#1f2328">HIL bench</text>
+<rect x="390.0" y="163" width="112" height="22" rx="11" fill="#dafbe1"/>
+<text x="446.0" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1a7f37">real boards</text>
+<rect x="297.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="328.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">ECU</text>
+<rect x="369.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="400.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">AMS</text>
+<rect x="441.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="472.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">uDV</text>
+<line x1="297.0" y1="250" x2="503.0" y2="250" stroke="#1a7f37" stroke-width="2"/>
+<line x1="328.0" y1="238" x2="328.0" y2="250" stroke="#1a7f37" stroke-width="1.3"/>
+<line x1="400.0" y1="238" x2="400.0" y2="250" stroke="#1a7f37" stroke-width="1.3"/>
+<line x1="472.0" y1="238" x2="472.0" y2="250" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="503.0" y="264" text-anchor="end" font-size="10.5" fill="#59636e">CAN</text>
+<text x="298.0" y="288" font-size="12.5" fill="#59636e">MainLites on the bench</text>
+<text x="298.0" y="306" font-size="12.5" fill="#59636e">Pi + fixtures fake the car</text>
+<text x="298.0" y="324" font-size="12.5" fill="#1f2328" font-weight="600">before a release</text>
+<rect x="540.0" y="150" width="236" height="196" rx="10" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1.5"/>
+<text x="556.0" y="178" font-size="16" font-weight="700" fill="#1f2328">Car</text>
+<rect x="648.0" y="163" width="112" height="22" rx="11" fill="#dafbe1"/>
+<text x="704.0" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1a7f37">real boards</text>
+<rect x="555.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="586.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">ECU</text>
+<rect x="627.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="658.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">AMS</text>
+<rect x="699.0" y="198" width="62" height="40" rx="6" fill="#ffffff" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="730.0" y="223" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">uDV</text>
+<line x1="555.0" y1="250" x2="761.0" y2="250" stroke="#1a7f37" stroke-width="2"/>
+<line x1="586.0" y1="238" x2="586.0" y2="250" stroke="#1a7f37" stroke-width="1.3"/>
+<line x1="658.0" y1="238" x2="658.0" y2="250" stroke="#1a7f37" stroke-width="1.3"/>
+<line x1="730.0" y1="238" x2="730.0" y2="250" stroke="#1a7f37" stroke-width="1.3"/>
+<text x="761.0" y="264" text-anchor="end" font-size="10.5" fill="#59636e">CAN</text>
+<text x="556.0" y="288" font-size="12.5" fill="#59636e">backplanes + harness</text>
+<text x="556.0" y="306" font-size="12.5" fill="#59636e">the real sensors and inverter</text>
+<text x="556.0" y="324" font-size="12.5" fill="#1f2328" font-weight="600">ground truth</text>
+</svg>

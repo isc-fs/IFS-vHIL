@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The bundled set-up page: core events and the app's own commands. The vHIL web app (localhost:8080) gets no Tauri access.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

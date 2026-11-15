@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ISC vHIL</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>vHIL</h1>
+        <p class="sub">The car's firmware on emulated boards, on your machine.</p>
+      </div>
+      <span id="version" class="pill"></span>
+    </header>
+
+    <div id="update" class="banner" hidden></div>
+
+    <ol class="steps">
+      <li id="step-tools">
+        <span class="mark"></span>
+        <div class="body">
+          <h2>Tools</h2>
+          <p class="detail"></p>
+        </div>
+        <div class="actions"></div>
+      </li>
+      <li id="step-workspace">
+        <span class="mark"></span>
+        <div class="body">
+          <h2>vHIL files</h2>
+          <p class="detail"></p>
+        </div>
+        <div class="actions"></div>
+      </li>
+      <li id="step-vm">
+        <span class="mark"></span>
+        <div class="body">
+          <h2>Docker VM</h2>
+          <p class="detail"></p>
+        </div>
+        <div class="actions"></div>
+      </li>
+      <li id="step-setup">
+        <span class="mark"></span>
+        <div class="body">
+          <h2>Images and firmware</h2>
+          <p class="detail"></p>
+          <ul class="checks"></ul>
+        </div>
+        <div class="actions"></div>
+      </li>
+    </ol>
+
+    <section class="open">
+      <button id="open" class="primary" disabled>Open the vHIL</button>
+      <span id="open-status" class="muted"></span>
+    </section>
+
+    <details id="log-box">
+      <summary>Output <span id="log-task" class="muted"></span></summary>
+      <pre id="log"></pre>
+    </details>
+
+    <details>
+      <summary>Settings</summary>
+      <div class="settings">
+        <label id="ws-label" for="ws">Use your own clone of the repository (empty: the app's own copy)</label>
+        <div class="row">
+          <input id="ws" type="text" spellcheck="false" placeholder="/Users/you/Documents/Github/IFS-vHIL">
+          <button id="ws-save">Use</button>
+        </div>
+        <div class="row">
+          <button id="cli">Install the <code>vhil</code> command</button>
+          <span id="cli-status" class="muted"></span>
+        </div>
+      </div>
+    </details>
+  </main>
+</body>
+</html>

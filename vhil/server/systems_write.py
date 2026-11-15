@@ -45,6 +45,7 @@ from vhil.server.gitstore import (OWNER_TRAILER, TAKEOVER_TRAILER, BadBranch, Co
 from vhil.server.runs import DEFAULT_VIRTUAL_MS
 from vhil.server.workspace import SYSTEM_ID
 from vhil.system import (ID, REF, SCHEMA, System, SystemError, built_images, find_build,
+                         format_schema_error, yaml_error,
                          image_path, newest_build)
 
 router = APIRouter()
@@ -261,7 +262,7 @@ def check_with_warnings(store: GitStore, commit: str, system_id: str,
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        return [f"not YAML: {e}"], []
+        return [yaml_error(f"{system_id}.yaml", e)], []
     if not isinstance(doc, dict):
         return ["a system file is a YAML mapping (kind: system, id, boards, ...)"], []
     if doc.get("id") != system_id:
@@ -270,8 +271,7 @@ def check_with_warnings(store: GitStore, commit: str, system_id: str,
     # system, each error names its place instead of "not valid under any".
     errors = sorted(_system_validator().iter_errors(doc), key=lambda e: list(e.absolute_path))
     if errors:
-        return [f"{'.'.join(str(p) for p in e.absolute_path) or '(top)'}: {e.message}"
-                for e in errors[:10]], []
+        return [format_schema_error(e) for e in errors[:10]], []
     with tempfile.TemporaryDirectory(prefix="vhil-check-") as tmp:
         root = Path(tmp)
         store.extract(commit, ["catalog"], root)

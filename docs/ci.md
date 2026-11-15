@@ -120,7 +120,10 @@ Examples (`full-ci`):
 | `vhil/sim.py`, a workflow, an unmapped path | everything |
 
 Every tests/sim file carries a module-level `pytestmark` with its boards, its
-systems and at least one subsystem; `tests/unit/test_ci_select.py` checks
+systems and at least one subsystem. A file that tests a platform on its own,
+with no system or firmware (`test_stm32l496_platform.py`, for a board whose
+firmware does not exist yet), names `platform_<id>` instead of a system, and
+no board. `tests/unit/test_ci_select.py` checks
 it, the board markers against the systems' roles, every rule's targets, and
 the selection's fail-safes. Scenarios are grouped by system already
 (`systems/<system>.scenarios/`); the scenario job runs the selected systems'
@@ -169,6 +172,17 @@ fails:
 Platform models (ADC3, DMA, SPI, ...) are loaded by every board, so "loaded"
 says little about what a test exercises; the map leaves them to the subsystem
 markers and the guard.
+
+## The Docker images
+
+[`image.yml`](../.github/workflows/image.yml) publishes the vHIL's images to
+`ghcr.io/isc-fs/` so teammates pull them instead of building Renode
+(#373). Each image is tagged by a content key of its build's inputs
+([`scripts/image-key.sh`](../scripts/image-key.sh)): a push to `dev` or a
+release tag builds a key only if it isn't published yet, natively on an
+amd64 and an arm64 runner, and joins the two into one tag. `dev` and `vX.Y.Z`
+are moving tags on top. CI's own jobs don't use these images: they install
+the toolchain on the runner and take Renode from the Actions cache.
 
 ## The firmware image cache
 
