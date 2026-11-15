@@ -47,16 +47,18 @@ Then open <http://localhost:8080/training/>. The page has three columns:
 2. **Repair or fix.**
    - Hardware fault: "Replace the part" runs the car again with the fault
      removed.
-   - Firmware fault: fix the code in the board's firmware repository, push
-     a branch, and give its name. The check builds that ref and runs it.
+   - Firmware fault: "Open the source" shows the board's file your car was
+     built from. Fix it there and press "Build and check my fix": the check
+     builds your version with the team's recipe and powers the car on with
+     it. Building takes a minute or two.
 3. **The check is a pytest run** of the puzzle's grading tests
    (`training/tests/`). Green means solved, and the page shows what the
    fault was, the team's own fix, and the issues where it happened on the
    car.
 
-v1 is on the honour system: a firmware puzzle pins the real commit from
-before the team's fix, so you could diff it against upstream. Don't. You
-learn nothing that way.
+v1 is on the honour system: a firmware puzzle's bug is a small patch in
+`training/patches/`, and you could read it there. Don't. You learn nothing
+that way.
 
 ## What the vHIL models, and what it doesn't
 
@@ -107,6 +109,7 @@ A puzzle is `training/scenarios/<id>.yaml`:
 | `brief` | What the trainee is told, in the team's words |
 | `drive` | The drive cycle: a scenario's `stimuli`, `watch` and `expect` (`docs/scenarios.md`). `expect` is what a healthy car does. |
 | `faults` | Hardware faults, as scenario stimulus rows (for example `{kind: plant, plant: ts, set: {open_ntc_module: 3, open_ntc_slot: 7}}`). Removed by the repair. |
+| `seed` | A firmware fault: `{image: ams, patch: patches/<name>.patch}`, a patch on the pinned commit of that image. The trainee can edit only the files it touches. |
 | `hints` | Staged, most general first |
 | `answer` | The location: a part from `vhil/training.py` `PARTS` and its fields, and the explanation shown once solved |
 | `fix`, `fix_note`, `sources` | The team's fix and the issues, shown once solved |
@@ -121,6 +124,19 @@ Run both before you publish a puzzle:
 python -m pytest training/tests --ecu-elf ECU08.elf --ams-elf AMS.elf --can-bootloader-elf CAN_BL.elf
 ```
 
+A firmware puzzle's symptom shows only on its seeded build. Build it, then
+pass it with `--seeded`:
+
+```bash
+python -m vhil.training_fw build <id> --fw-dir /vhil/training-fw   # prints ams=<elf>
+python -m pytest training/tests -k "fault_shows and <id>" --seeded --ams-elf <elf> ...
+```
+
+Write a seed's patch against the pinned commit (`git diff` in a checkout of
+it). Keep it to one cause: a wrong limit, a swapped pin, a wrong period.
+
 Training tests live outside `pytest.ini`'s `testpaths`, so the vHIL's own
-suite and CI never run them. A seeded fault never touches real CI or the
-"never patch firmware" rule.
+suite and CI never run them. Seeded firmware is built only for training
+runs, by `vhil/training_fw.py`, into its own directory (`<fw-dir>/training/`):
+the gate, CI and every other run build the team's commits only, so a seeded
+bug never touches real CI or the "never patch firmware" rule.

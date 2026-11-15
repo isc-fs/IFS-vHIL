@@ -8,7 +8,8 @@ path, runs.submit); the Training page (/training/) replays them with
     POST /api/training/puzzles/{id}/start      run my car (the faults seeded) -> {run_id}
     POST /api/training/puzzles/{id}/hint       show the next hint
     POST /api/training/puzzles/{id}/diagnose   {location} -> {correct, attempts}
-    POST /api/training/puzzles/{id}/check      {fix_ref?} -> {run_ids}: only once located
+    POST /api/training/puzzles/{id}/check      {fix_ref?, edits?} -> {run_ids}: only once
+                                               located (edits: a seeded puzzle's files)
     GET  /api/training/parts                   what a location can name
     GET  /api/training/systems/{id}/signals    each board pin's car signal, pin and backplane
 """
@@ -25,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from vhil import training as tr
+from vhil import training_fw
 from vhil.server.runs import Limits, RunRequest, RunStore, _login, submit
 from vhil.system import REPO, System
 
@@ -38,6 +40,8 @@ class Diagnosis(BaseModel):
 
 class Check(BaseModel):
     fix_ref: Optional[str] = None
+    # A seeded firmware puzzle's fix: path -> the file as the trainee edited it.
+    edits: Optional[dict[str, str]] = None
 
 
 def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
@@ -103,7 +107,8 @@ def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
     def start(pid: str, request: Request):
         p = puzzle(pid)
         req = RunRequest.model_validate(p.car_run())
-        run_id = submit(req, request, settings, workspace, store, limits)
+        run_id = submit(req, request, settings, workspace, store, limits,
+                        seed=p.seed_run(root=root))
 
         def add(e):
             e["car_runs"].append(run_id)
@@ -133,6 +138,8 @@ def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
         if ok:
             out["next"] = ("Repair it: the check runs the car with the fault removed."
                            if p.fault == "hardware" else
+                           "Fix it in the source on this page: the check builds your version."
+                           if p.seed is not None else
                            "Fix it in the firmware, push a branch, and check it on that ref.")
         return out
 
@@ -143,13 +150,23 @@ def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
         if not progress.get(who, p.id)["located"]:
             raise HTTPException(409, "name the fault's location first (diagnose): a repair is "
                                      "only accepted where the fault is")
+        seed = None
+        if p.seed is not None:
+            if not body.edits:
+                raise HTTPException(422, "a seeded puzzle is fixed by editing its files: "
+                                         "send them as edits")
+            errors = training_fw.check_edits(p.seed.text(root), body.edits)
+            if errors:
+                raise HTTPException(422, errors)
+            seed = p.seed_run(body.edits, root=root)
         try:
             reqs = [RunRequest.model_validate(x) for x in p.check_run(body.fix_ref)]
         except ValueError as e:
             raise HTTPException(422, str(e))
-        ids = [submit(q, request, settings, workspace, store, limits) for q in reqs]
+        ids = [submit(q, request, settings, workspace, store, limits, seed=seed) for q in reqs]
         progress.update(who, p.id, lambda e: e["check_runs"].append(
-            {"run_ids": ids, "fix_ref": body.fix_ref, "at_s": round(time.time())}))
+            {"run_ids": ids, "fix_ref": body.fix_ref, "edited": sorted(body.edits or {}),
+             "at_s": round(time.time())}))
         return {"run_ids": ids}
 
     @r.get("/parts")

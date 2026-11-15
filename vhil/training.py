@@ -2,8 +2,9 @@
 find and fix (training/README.md).
 
 A puzzle is `training/scenarios/<id>.yaml`. It names a system and the
-firmware its boards run (real commits, never patched: a firmware puzzle pins
-the commit before the team's fix), the drive cycle that shows the symptom
+firmware its boards run (real commits; a firmware puzzle seeds its bug as a
+patch on one of them, `seed:`, built by vhil/training_fw.py for training
+runs only), the drive cycle that shows the symptom
 (a scenario's rows, vhil/server/runs.py RunScenario), the hardware faults
 seeded into that car, the brief the trainee reads, staged hints, where the
 fault is, and the pytest node ids (under training/tests/) that count as
@@ -19,11 +20,13 @@ The flow, per trainee:
                unlocks the repair, so toggling parts until the car works
                does not solve it; every attempt is counted.
     check      the grading tests run (a pytest run): a hardware fault with
-               the fault removed (the repair), a firmware fault on the
-               firmware ref the trainee gives (their fix). Green = solved.
+               the fault removed (the repair), a seeded firmware fault on
+               the seeded files as the trainee edited them (their fix), a
+               firmware fault without a seed on the ref the trainee gives.
+               Green = solved.
 
 v1 is on the honour system: the pinned commits can be diffed against their
-fix upstream. Analog and physical effects (EMI, noise, soldering) are not
+fix upstream, and a seed's patch is in training/patches/. Analog and physical effects (EMI, noise, soldering) are not
 modelled, so no puzzle is about them.
 """
 from __future__ import annotations
@@ -85,7 +88,7 @@ PARTS: dict[str, dict] = {
 # The firmware modules a firmware fault is named by (the trainee picks one).
 FIRMWARE_MODULES = {
     "ecu": ["can_tx_heartbeat", "precharge_sequence", "pedals", "inverter_control", "state_machine"],
-    "ams": ["sd_logger", "bms_poll", "safety_task", "current_sensor", "can_tx"],
+    "ams": ["config", "sd_logger", "bms_poll", "safety_task", "current_sensor", "can_tx"],
     "udv": ["can", "state_machine"],
 }
 
@@ -116,6 +119,23 @@ class Answer(_Model):
                 if k not in ("part", "explain") and v is not None}
 
 
+class Seed(_Model):
+    """A firmware puzzle's bug: a patch (under training/) on the pinned
+    commit of one image, built by vhil/training_fw.py."""
+    image: str
+    patch: str
+
+    @field_validator("patch")
+    @classmethod
+    def _patch(cls, v: str) -> str:
+        if not re.fullmatch(r"patches/[\w.-]+\.patch", v):
+            raise ValueError("a seed's patch is patches/<name>.patch under training/")
+        return v
+
+    def text(self, root: Path = TRAINING) -> str:
+        return (Path(root) / self.patch).read_text()
+
+
 class Drive(_Model):
     """The drive cycle: a run scenario's rows (stimuli, watch, expect)."""
     virtual_ms: int = Field(ge=1, le=600_000)
@@ -143,6 +163,8 @@ class Puzzle(_Model):
     car_test: Optional[str] = None
     # Hardware faults, as scenario stimulus rows; removed by the repair.
     faults: list[dict] = []
+    # A firmware fault seeded as a patch; fixed by editing its files.
+    seed: Optional[Seed] = None
     hints: list[str] = Field(min_length=1)
     answer: Answer
     # The team's fix: image -> ref (the honour system; shown once solved).
@@ -173,6 +195,13 @@ class Puzzle(_Model):
             errors.append("a firmware puzzle's answer is part: firmware")
         if self.answer.part == "firmware" and self.answer.board not in FIRMWARE_MODULES:
             errors.append("a firmware answer names its board")
+        if self.seed is not None:
+            if self.fault != "firmware":
+                errors.append("a seed is a firmware fault (fault: firmware)")
+            if self.seed.image not in self.firmware:
+                errors.append(f"seed image '{self.seed.image}' is not pinned under firmware:")
+            if self.seed.image.split(".")[0] != self.answer.board:
+                errors.append("the seed's board is the answer's board")
         for k, ref in {**self.firmware, **self.fix}.items():
             if not GIT_REF.match(ref):
                 errors.append(f"firmware ref for '{k}' is not a plain git ref: {ref!r}")
@@ -180,8 +209,18 @@ class Puzzle(_Model):
 
     # -- what the trainee's runs are ------------------------------------------------
 
+    def seed_run(self, edits: Optional[dict] = None,
+                 root: Path = TRAINING) -> Optional[dict]:
+        """What a run's worker builds the seeded image from (runs.submit's
+        `seed`): None without a seed."""
+        if self.seed is None:
+            return None
+        return {"puzzle": self.id, "image": self.seed.image, "patch": self.seed.text(root),
+                "edits": dict(edits or {})}
+
     def car_run(self) -> dict:
-        """The RunRequest (as data) of the trainee's car: the faults seeded."""
+        """The RunRequest (as data) of the trainee's car: the faults seeded
+        (a seeded firmware bug is the run's seed_run, apart)."""
         if self.mode == "pytest":
             scenario = {"kind": "pytest", "select": self.car_test, "timeout_s": 1800}
         else:
@@ -193,9 +232,10 @@ class Puzzle(_Model):
     def check_run(self, fix_ref: Optional[str] = None) -> list[dict]:
         """The grading runs: each solved test as a pytest run, on the pinned
         firmware with the trainee's fix over the answer's board (a firmware
-        fault). A hardware fault's tests run without it: the repair."""
+        fault without a seed; a seeded one is fixed by its edits, seed_run).
+        A hardware fault's tests run without it: the repair."""
         firmware = dict(self.firmware)
-        if self.fault == "firmware":
+        if self.fault == "firmware" and self.seed is None:
             if not fix_ref or not GIT_REF.match(fix_ref):
                 raise ValueError("a firmware fix is checked on a firmware ref: the branch or "
                                  "commit with your fix")
@@ -211,7 +251,8 @@ class Puzzle(_Model):
                "fault": self.fault, "topics": self.topics, "system": self.system,
                "brief": self.brief, "mode": self.mode, "hints_total": len(self.hints),
                "hints": self.hints[:hints_shown], "firmware": self.firmware,
-               "virtual_ms": self.drive.virtual_ms if self.drive else None}
+               "virtual_ms": self.drive.virtual_ms if self.drive else None,
+               "seeded": self.seed.image if self.seed is not None else None}
         if solved:
             out["answer"] = {"part": self.answer.part, **self.answer.fields(),
                              "explain": self.answer.explain}

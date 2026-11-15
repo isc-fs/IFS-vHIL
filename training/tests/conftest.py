@@ -29,6 +29,8 @@ def pytest_addoption(parser):
             g.addoption(f"--{image}-elf", default=os.environ.get(env))
         except ValueError:
             pass                        # tests/conftest.py's, when run together
+    g.addoption("--seeded", action="store_true",
+                help="the images given are a firmware puzzle's seeded build (test_fault_shows)")
     try:
         g.addoption("--sim-log-dir", default=None,
                     help="where a run's logs and records go (the worker's run directory)")
