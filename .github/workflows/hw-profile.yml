@@ -1,0 +1,56 @@
+name: Hardware profile
+
+# What a host needs to run the vHIL's tests, measured on a GitHub-hosted
+# runner (x86, 4 cores, 16 GB): each job of scripts/vhil-docker.sh in its
+# container, through scripts/hw-profile.sh, as a teammate runs them
+# (docs/development/hardware.md). Heavy, so only by hand (docs/ci.md).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'sweep, full or all (scripts/hw-profile.sh)'
+        default: all
+      cores:
+        description: 'core counts of the sweep'
+        default: '1 2 4'
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create vcan can0 / can1 / can2 (the IFS_HIL suite)
+        run: scripts/ci-vcan.sh
+      - name: Host
+        run: nproc; free -g; df -h /; docker info --format '{{.CgroupVersion}}'
+      - name: Profile
+        env:
+          VHIL_DOCKER_CONTEXT: default
+          VHIL_PROFILE_HOST: gha-ubuntu-latest
+          MODE: ${{ inputs.mode }}
+          CORES: ${{ inputs.cores }}
+        run: |
+          # CORES unquoted on purpose: one argument per core count.
+          # shellcheck disable=SC2086
+          scripts/hw-profile.sh "$MODE" $CORES
+      - name: Summary
+        if: always()
+        run: python3 scripts/hw-profile-report.py >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the measurements and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hw-profile
+          path: results/profile/

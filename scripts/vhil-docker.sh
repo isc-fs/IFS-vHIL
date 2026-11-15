@@ -47,6 +47,9 @@
 # fast-forward (docs/performance.md). The models' assembly (vhil/models.py)
 # is cached in the volume (/vhil/renode-models): compiled on the first start
 # after a model changes; VHIL_MODELS=prebuilt passes through.
+# VHIL_PROFILE=<label> records the job's wall time, CPU and peak memory as
+# a line of results/profile/profile.jsonl (VHIL_PROFILE_OUT names another
+# file; scripts/cgroup-profile.py, docs/development/hardware.md).
 #
 # Images: every job uses the images of this checkout, named by content key
 # (scripts/image-key.sh). When they aren't local, it pulls them from
@@ -187,8 +190,11 @@ in_container() {
         -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" \
         -e VHIL_SYSTEM="${VHIL_SYSTEM:-}" -e VHIL_DUT="${VHIL_DUT:-ecu}" \
         ${VHIL_FAST_FORWARD:+-e VHIL_FAST_FORWARD="$VHIL_FAST_FORWARD"} \
+        ${VHIL_PROFILE_HOST:+-e VHIL_PROFILE_HOST="$VHIL_PROFILE_HOST"} \
         -e VHIL_MODELS_CACHE=/vhil/renode-models ${VHIL_MODELS:+-e VHIL_MODELS="$VHIL_MODELS"} \
-        "$ref" bash -c "$1" vhil "${@:2}"
+        "$ref" ${VHIL_PROFILE:+python /work/scripts/cgroup-profile.py --label "$VHIL_PROFILE" \
+            --out "/work/results/profile/${VHIL_PROFILE_OUT:-profile.jsonl}" --} \
+        bash -c "$1" vhil "${@:2}"
 }
 
 # ELF paths of the last firmware build, as board=elf lines.
