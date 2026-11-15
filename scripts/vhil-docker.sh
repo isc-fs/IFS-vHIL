@@ -41,7 +41,12 @@
 # Firmware, the IFS_HIL checkout and their build trees live in the Docker
 # volume `vhil-data` (/vhil in the container). IFS_HIL_REF picks IFS_HIL's
 # ref (default dev); FW_REFS passes --ref pairs to the firmware build
-# (e.g. FW_REFS="ecu=feat/x"). VHIL_DOCKER_CPUS=N limits the container to N
+# (e.g. FW_REFS="ecu=feat/x"). FW_LOCAL builds a catalogue firmware from a
+# local working tree instead, uncommitted edits included, with the same
+# recipe: FW_LOCAL="ecu=$HOME/src/IFS08-CE-ECU" (firmware id = absolute
+# path, no spaces; mounted read-only, copied to /vhil/fw/<id>@local and
+# built there, incrementally). FW_LOCAL_ONLY=1 builds just those images.
+# VHIL_DOCKER_CPUS=N limits the container to N
 # cores (--cpus, --cpuset-cpus), as a CI-class host: GitHub's runners have 4.
 # VHIL_FAST_FORWARD=0 passes through, to run Renode without the busy-wait
 # fast-forward (docs/performance.md). The models' assembly (vhil/models.py)
@@ -78,6 +83,15 @@ compose=("${docker[@]}" compose -f "$repo/docker/compose.yaml")
 run_args=()
 vcan_args=(--privileged --network host)
 [ "${VHIL_DOCKER_VCAN:-0}" = 1 ] && run_args=("${vcan_args[@]}")
+# A local firmware tree per FW_LOCAL entry, read-only at /src/<id>.
+src_args=() fw_sources=
+for pair in ${FW_LOCAL:-}; do
+    id=${pair%%=*} dir=${pair#*=}
+    case $dir in /*) ;; *) echo "error: FW_LOCAL $pair: the path must be absolute" >&2; exit 2;; esac
+    [ -d "$dir" ] || { echo "error: FW_LOCAL $pair: no such directory" >&2; exit 2; }
+    src_args+=(-v "$dir:/src/$id:ro")
+    fw_sources+="${fw_sources:+ }$id=/src/$id"
+done
 cpu_args=()
 if [ -n "${VHIL_DOCKER_CPUS:-}" ]; then
     cpu_args=(--cpus "$VHIL_DOCKER_CPUS" --cpuset-cpus "0-$((VHIL_DOCKER_CPUS - 1))")
@@ -185,8 +199,9 @@ in_container() {
     # extension's Cancel) can stop it with `docker kill`.
     "${docker[@]}" run --rm ${tty[@]+"${tty[@]}"} ${run_args[@]+"${run_args[@]}"} \
         ${VHIL_DOCKER_NAME:+--name "$VHIL_DOCKER_NAME"} \
-        ${cpu_args[@]+"${cpu_args[@]}"} \
+        ${cpu_args[@]+"${cpu_args[@]}"} ${src_args[@]+"${src_args[@]}"} \
         -v "$repo:/work" -v vhil-data:/vhil \
+        -e FW_SOURCES="$fw_sources" -e FW_LOCAL_ONLY="${FW_LOCAL_ONLY:-0}" \
         -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" \
         -e VHIL_SYSTEM="${VHIL_SYSTEM:-}" -e VHIL_DUT="${VHIL_DUT:-ecu}" \
         ${VHIL_FAST_FORWARD:+-e VHIL_FAST_FORWARD="$VHIL_FAST_FORWARD"} \
@@ -212,6 +227,8 @@ fw)
     [ $# -gt 0 ] || set -- ecu ams
     in_container "$prelude"'
         refs=(); for r in $FW_REFS; do refs+=(--ref "$r"); done
+        for r in $FW_SOURCES; do refs+=(--source "$r"); done
+        [ "$FW_LOCAL_ONLY" = 1 ] && refs+=(--only-local)
         mkdir -p /vhil/fw
         for s in "$@"; do
             python -m vhil.system build "systems/$s.yaml" --workdir /vhil/fw "${refs[@]}" \
