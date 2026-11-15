@@ -2,6 +2,12 @@
 // tests/scenarios in the Testing panel, and a vHIL sidebar (Status, Systems,
 // Runs, Tools), all run in the vHIL's Docker image through
 // scripts/vhil-docker.sh, as CI runs them (vscode/README.md).
+//
+// Two ways in: the IFS-vHIL checkout open as a folder, or a firmware
+// repository the catalogue builds (IFS08-CE-ECU, ...). In a firmware
+// repository the extension keeps its own checkout of the vHIL, builds the
+// open working tree into the tests (FW_LOCAL) and lists only the tests that
+// run that firmware.
 import * as cp from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -12,6 +18,9 @@ import {
   builtFirmware, collectArgs, dockerContext, fileOf, Item, Job, labelOf, parseLines, plan,
   Record, runArgs, SUITES,
 } from "./plan";
+import {
+  buildSystem, Firmware, firmwareForRepo, firmwareOf, repoSlug, systemsOf, testRuns,
+} from "./firmware";
 import {
   boardsOf, descriptionOf, ifsHilArgs, keepRuns, RunRecord, runDescription, runOk, SystemInfo,
   systemTests, ToolId, TOOLS,
@@ -28,14 +37,92 @@ const RUNS_KEY = "vhil.runs";
 // A test run's output kept for Show output, per run.
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
-export function activate(context: vscode.ExtensionContext) {
-  const folder = vscode.workspace.workspaceFolders?.find((f) =>
-    fs.existsSync(path.join(f.uri.fsPath, SCRIPT)));
-  if (!folder) return;
-  const vhil = new Vhil(folder, context);
+export async function activate(context: vscode.ExtensionContext) {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const own = folders.find((f) => fs.existsSync(path.join(f.uri.fsPath, SCRIPT)));
+  if (own) {
+    start(context, new Vhil(own.uri.fsPath, own, context));
+    return;
+  }
+  for (const f of folders) {
+    const local = await firmwareRepo(context, f);
+    if (local) {
+      start(context, new Vhil(local.checkout, f, context, local));
+      return;
+    }
+  }
+}
+
+function start(context: vscode.ExtensionContext, vhil: Vhil) {
+  // The sidebar's views show only where the extension found something to test.
+  void vscode.commands.executeCommand("setContext", "vhil.active", true);
   context.subscriptions.push(vhil);
   void vhil.refresh();
   void vhil.checkStatus();
+}
+
+/** A firmware repository open in VS Code, and the vHIL checkout that tests it. */
+interface Local {
+  firmware: Firmware;
+  dir: string; // the working tree
+  checkout: string; // the extension's own IFS-vHIL checkout
+}
+
+function git(dir: string, args: string[], timeout = 15000): Promise<{ ok: boolean; out: string }> {
+  return new Promise((resolve) => cp.execFile("git", ["-C", dir, ...args], { timeout },
+    (err, stdout, stderr) => resolve({ ok: !err, out: err ? `${stderr || err}` : stdout })));
+}
+
+function vhilRepo(): { url: string; ref: string } {
+  const c = vscode.workspace.getConfiguration("vhil");
+  return { url: c.get<string>("repository", "") || "https://github.com/isc-fs/IFS-vHIL",
+           ref: c.get<string>("ref", "") || "dev" };
+}
+
+/**
+ * Whether `folder` is a firmware repository the catalogue builds. Its origin
+ * must be on the vHIL's GitHub owner before anything is fetched; then the
+ * extension's checkout is cloned (once) and its catalogue decides.
+ */
+async function firmwareRepo(context: vscode.ExtensionContext, folder: vscode.WorkspaceFolder): Promise<Local | undefined> {
+  const dir = folder.uri.fsPath;
+  const origin = await git(dir, ["remote", "get-url", "origin"]);
+  const slug = origin.ok ? repoSlug(origin.out) : undefined;
+  const owner = repoSlug(vhilRepo().url)?.split("/")[0];
+  if (!slug || !owner || slug.split("/")[0].toLowerCase() !== owner.toLowerCase()) return undefined;
+  const checkout = path.join(context.globalStorageUri.fsPath, "IFS-vHIL");
+  if (!fs.existsSync(path.join(checkout, SCRIPT)) && !(await updateCheckout(context, checkout))) return undefined;
+  const dirFw = path.join(checkout, "catalog", "firmware");
+  const catalogue = fs.readdirSync(dirFw).filter((f) => f.endsWith(".yaml"))
+    .map((f) => firmwareOf(fs.readFileSync(path.join(dirFw, f), "utf8")))
+    .filter((f): f is Firmware => !!f);
+  const firmware = firmwareForRepo(catalogue, slug);
+  return firmware ? { firmware, dir, checkout } : undefined;
+}
+
+const UPDATED_KEY = "vhil.checkoutUpdated";
+
+/** Clone the extension's vHIL checkout, or bring it to the configured ref. */
+async function updateCheckout(context: vscode.ExtensionContext, checkout: string): Promise<boolean> {
+  const { url, ref } = vhilRepo();
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `vHIL: fetching ${repoSlug(url) ?? url}@${ref}` },
+    async () => {
+      let r;
+      if (!fs.existsSync(path.join(checkout, ".git"))) {
+        fs.mkdirSync(path.dirname(checkout), { recursive: true });
+        r = await git(path.dirname(checkout), ["clone", "-q", "--depth", "1", "-b", ref, url, checkout], 300000);
+      } else {
+        r = await git(checkout, ["fetch", "-q", "--depth", "1", url, ref], 300000);
+        if (r.ok) r = await git(checkout, ["reset", "-q", "--hard", "FETCH_HEAD"]);
+      }
+      if (!r.ok) {
+        void vscode.window.showErrorMessage(`vHIL: couldn't fetch ${url}@${ref}: ${r.out.trim()}`);
+        return false;
+      }
+      await context.globalState.update(UPDATED_KEY, Date.now());
+      return true;
+    });
 }
 
 export function deactivate() {}
@@ -66,6 +153,8 @@ class Vhil implements vscode.Disposable {
   private readonly runsTree = new Tree(() => this.runNodes());
   private readonly toolsTree = new Tree(() => this.toolNodes());
   private vmUp: boolean | undefined;
+  private branch = "";
+  private dirty = false;
   private built = new Map<string, string>();
   private editorUp = false;
   private editorTask: vscode.TaskExecution | undefined;
@@ -75,8 +164,9 @@ class Vhil implements vscode.Disposable {
   private runs: RunRecord[];
   private readonly outputs = new Map<string, string>();
 
-  constructor(private readonly folder: vscode.WorkspaceFolder, private readonly context: vscode.ExtensionContext) {
-    this.repo = folder.uri.fsPath;
+  constructor(repo: string, private readonly folder: vscode.WorkspaceFolder,
+              private readonly context: vscode.ExtensionContext, private readonly local?: Local) {
+    this.repo = repo;
     this.runs = context.workspaceState.get<RunRecord[]>(RUNS_KEY, []);
     this.controller = vscode.tests.createTestController("vhil", "vHIL");
     this.controller.refreshHandler = () => this.refresh();
@@ -98,10 +188,11 @@ class Vhil implements vscode.Disposable {
     ];
     this.readSystems();
 
-    const tests = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(this.repo, "tests/{unit,sim,scenarios}/**/*.py"));
-    const systems = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(this.repo, "systems/**"));
+    // The extension's own checkout changes only when it updates it.
+    const watch = (glob: string) => vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(local ? path.join(this.repo, ".none") : this.repo, glob));
+    const tests = watch("tests/{unit,sim,scenarios}/**/*.py");
+    const systems = watch("systems/**");
     const later = () => this.refreshSoon();
     const reread = () => this.readSystems();
     const command = (id: string, f: (...a: any[]) => unknown) => vscode.commands.registerCommand(id, f);
@@ -156,7 +247,15 @@ class Vhil implements vscode.Disposable {
         if (item) return vscode.commands.executeCommand("vscode.revealTestInExplorer", item);
       }),
       command("vhil.tool", (id: ToolId) => this.tool(id)),
+      command("vhil.updateVhil", () => this.updateVhil()),
     );
+    if (local) {
+      this.log.appendLine(`${local.dir}: ${local.firmware.id} (${local.firmware.repo}), ` +
+                          `tested by the vHIL checkout ${this.repo}`);
+      // Once a day, bring the checkout to the configured ref.
+      const updated = context.globalState.get<number>(UPDATED_KEY, 0);
+      if (Date.now() - updated > 24 * 3600 * 1000) void this.updateVhil();
+    }
   }
 
   dispose() {
@@ -183,6 +282,7 @@ class Vhil implements vscode.Disposable {
     if (c.ifsHilRef) env.IFS_HIL_REF = c.ifsHilRef;
     if (c.firmwareRefs) env.FW_REFS = c.firmwareRefs;
     if (c.cpus > 0) env.VHIL_DOCKER_CPUS = String(c.cpus);
+    if (this.local) env.FW_LOCAL = `${this.local.firmware.id}=${this.local.dir}`;
     return env;
   }
 
@@ -238,7 +338,8 @@ class Vhil implements vscode.Disposable {
   }
 
   private outFile(name: string): { rel: string; abs: string } {
-    const rel = `${OUT_DIR}/${name}.jsonl`;
+    // Per window: two windows may share the extension's checkout.
+    const rel = `${OUT_DIR}/${name}-${process.pid}.jsonl`;
     const abs = path.join(this.repo, rel);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.rmSync(abs, { force: true });
@@ -259,12 +360,15 @@ class Vhil implements vscode.Disposable {
 
   private async collect() {
     const out = this.outFile("collect");
-    const job = this.script(collectArgs(out.rel), this.env(), (t) => this.log.append(t));
+    const roots = SUITES.map((s) => s.root).filter((r) => !this.local || r !== "tests/unit");
+    const job = this.script(collectArgs(out.rel, roots), this.env(), (t) => this.log.append(t));
     const code = await vscode.window.withProgress(
       { location: { viewId: "workbench.view.testing" }, title: "vHIL: listing tests" },
       () => job.done);
     const records = fs.existsSync(out.abs) ? parseLines(fs.readFileSync(out.abs, "utf8")).records : [];
-    const items = records.filter((r): r is Item => r.kind === "item");
+    const systems = this.mySystems().map((s) => s.id);
+    const items = records.filter((r): r is Item => r.kind === "item")
+      .filter((r) => !this.local || testRuns(r, this.local.firmware.id, systems));
     if (!items.length) {
       this.log.show(true);
       void vscode.window.showErrorMessage(
@@ -286,6 +390,7 @@ class Vhil implements vscode.Disposable {
     this.byId.clear();
     const roots: vscode.TestItem[] = [];
     for (const suite of SUITES) {
+      if (this.local && suite.root === "tests/unit") continue;
       const root = this.controller.createTestItem(suite.root, suite.root,
         vscode.Uri.file(path.join(this.repo, suite.root)));
       this.byId.set(suite.root, root);
@@ -349,6 +454,8 @@ class Vhil implements vscode.Disposable {
     const groups = plan(included.map((i) => i.id));
     const c = this.config();
     try {
+      if (this.local && [...groups.keys()].some((j) => j !== "unit") &&
+          !(await this.buildLocal(run, tally, all, token))) return;
       for (const [job, ids] of groups) {
         if (token.isCancellationRequested) break;
         const mine = all.filter((t) => ids.some((id) => t.id === id || t.id.startsWith(id + "/") || t.id.startsWith(id + "::")));
@@ -435,6 +542,49 @@ class Vhil implements vscode.Disposable {
     }
   }
 
+  /**
+   * Build the open working tree (FW_LOCAL, FW_LOCAL_ONLY) before a run, into
+   * the run's output. On failure every test of the run errors with the
+   * build's last lines.
+   */
+  private async buildLocal(run: vscode.TestRun, tally: Tally, tests: vscode.TestItem[],
+                           token: vscode.CancellationToken): Promise<boolean> {
+    const fw = this.local!.firmware.id;
+    const system = buildSystem(this.systems, fw);
+    if (!system) return true;
+    // First run: what the sim and scenario jobs need besides this firmware,
+    // from its refs, in the same build.
+    await this.checkStatus();
+    const missing = this.missingFirmware().length > 0;
+    const args = missing ? ["fw", ...new Set(["ecu", "ams", system])] : ["fw", system];
+    let text = "";
+    const write = (t: string) => {
+      text += t;
+      run.appendOutput(t.replace(/\r?\n/g, "\r\n"));
+      if (tally.size < MAX_OUTPUT) { tally.output.push(t); tally.size += t.length; }
+    };
+    const only = missing ? "0" : "1";
+    write(`$ FW_LOCAL=${fw}=${this.local!.dir} FW_LOCAL_ONLY=${only} ${SCRIPT} ${args.join(" ")}\n`);
+    const name = `vhil-vscode-${crypto.randomBytes(4).toString("hex")}`;
+    const proc = this.script(args, this.env({ FW_LOCAL_ONLY: only, VHIL_DOCKER_NAME: name }), write);
+    const cancel = token.onCancellationRequested(() => {
+      cp.execFile("docker", ["--context", this.config().context, "kill", name], () => proc.proc.kill());
+    });
+    const code = await proc.done;
+    cancel.dispose();
+    void this.checkStatus();
+    if (code === 0) return true;
+    const tail = text.trim().split("\n").slice(-20).join("\n");
+    for (const t of tests) {
+      if (token.isCancellationRequested) run.skipped(t);
+      else {
+        run.errored(t, new vscode.TestMessage(`Building ${fw} from ${this.local!.dir} failed (exit ${code}):\n\n${tail}`));
+        tally.failed.add(t.id);
+      }
+    }
+    return false;
+  }
+
   private report(run: vscode.TestRun, tally: Tally, r: Record, reported: Set<string>) {
     if (r.kind === "start") {
       const t = this.byId.get(r.id);
@@ -494,6 +644,12 @@ class Vhil implements vscode.Disposable {
     ]);
     this.vmUp = up;
     this.editorUp = editor;
+    if (this.local) {
+      const [branch, status] = await Promise.all([
+        git(this.local.dir, ["branch", "--show-current"]), git(this.local.dir, ["status", "--porcelain"])]);
+      this.branch = branch.ok ? branch.out.trim() : "";
+      this.dirty = status.ok && !!status.out.trim();
+    }
     if (up) {
       let text = "";
       const code = await this.script(["run", "sh", "-c", "cat /vhil/fw/built.txt 2>/dev/null || true"],
@@ -519,10 +675,14 @@ class Vhil implements vscode.Disposable {
     const missing = this.missingFirmware();
     this.status.backgroundColor = missing.length
       ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
-    this.status.text = missing.length ? "$(beaker) vHIL: no firmware" : "$(beaker) vHIL";
+    const mine = this.local ? ` · ${this.local.firmware.id}: local${this.dirty ? " (uncommitted)" : ""}` : "";
+    this.status.text = missing.length ? `$(beaker) vHIL: no firmware${mine}` : `$(beaker) vHIL${mine}`;
     this.status.tooltip = new vscode.MarkdownString(
       `**vHIL** on Docker context \`${context}\`\n\n` +
-      (this.built.size ? [...this.built].map(([b, elf]) => `- ${b}: \`${path.basename(elf)}\``).join("\n")
+      (this.local ? `Testing **${this.local.firmware.id}** from \`${this.local.dir}\`` +
+                    `${this.branch ? ` (${this.branch}${this.dirty ? ", uncommitted changes" : ""})` : ""}: ` +
+                    "built before each run.\n\n" : "") +
+      (this.built.size ? [...this.built].map(([b, elf]) => `- ${b}: \`${sourceOf(elf)}\``).join("\n")
                        : "No firmware built: sim and scenario tests need ecu, ams and the bootloader.") +
       "\n\nClick for actions.");
   }
@@ -545,7 +705,7 @@ class Vhil implements vscode.Disposable {
     const boards = names.map((b) => {
       const elf = this.built.get(b);
       return node(b, {
-        description: elf ? path.basename(elf) : "not built",
+        description: elf ? sourceOf(elf) : "not built",
         tooltip: elf ?? `No ${b} firmware: build it.`,
         icon: elf ? "pass" : "warning",
         color: elf ? "testing.iconPassed" : "problemsWarningIcon.foreground",
@@ -613,13 +773,29 @@ class Vhil implements vscode.Disposable {
     this.systemsTree.refresh();
   }
 
+  /** The systems shown: in a firmware repository, those that run its firmware. */
+  private mySystems(): SystemInfo[] {
+    return this.local ? systemsOf(this.systems, this.local.firmware.id) : this.systems;
+  }
+
+  private async updateVhil() {
+    if (!this.local) {
+      void vscode.window.showInformationMessage("vHIL: this is your own checkout: update it with git.");
+      return;
+    }
+    if (await updateCheckout(this.context, this.repo)) {
+      this.readSystems();
+      await this.refresh();
+    }
+  }
+
   private systemOf(n: Node): SystemInfo {
     return n.data as SystemInfo;
   }
 
   private systemNodes(): Node[] {
     const listed = this.byId.size ? this.listed() : undefined;
-    return this.systems.map((s) => {
+    return this.mySystems().map((s) => {
       const counts = listed ? systemTests(listed, s.id) : undefined;
       const parts = [s.boards.map((b) => b.name).join(", ")];
       if (counts) {
@@ -766,6 +942,7 @@ class Vhil implements vscode.Disposable {
       { label: "$(tools) Build firmware…", run: () => this.buildFirmware() },
       { label: "$(type-hierarchy) Open the system editor", run: () => this.openEditor() },
       { label: "$(pulse) Check VM and firmware", run: () => this.checkStatus() },
+      ...(this.local ? [{ label: "$(cloud-download) Update the vHIL", run: () => this.updateVhil() }] : []),
       { label: "$(gear) Settings", run: () => vscode.commands.executeCommand("workbench.action.openSettings", "vhil.") },
     ];
     const pick = await vscode.window.showQuickPick(actions, { title: "vHIL" });
@@ -776,6 +953,11 @@ class Vhil implements vscode.Disposable {
 /** Whether the system editor answers on its proxy. */
 function editorAnswers(): Promise<boolean> {
   return fetch(EDITOR_URL, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
+}
+
+/** Which build an image is: its directory under /vhil/fw (ecu@local, ams@dev, ...). */
+function sourceOf(elf: string): string {
+  return /\/vhil\/fw\/([^/]+)/.exec(elf)?.[1] ?? path.basename(elf);
 }
 
 function shellQuote(s: string): string {

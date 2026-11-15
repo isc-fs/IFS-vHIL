@@ -24,9 +24,9 @@ function pluginArgs(out: string): string[] {
 }
 
 /** vhil-docker.sh's arguments to list every test into `out`. */
-export function collectArgs(out: string): string[] {
+export function collectArgs(out: string, roots: string[] = SUITES.map((s) => s.root)): string[] {
   return ["run", "python", "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-          ...pluginArgs(out), ...SUITES.map((s) => s.root)];
+          ...pluginArgs(out), ...roots];
 }
 
 /**
