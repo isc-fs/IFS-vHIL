@@ -268,7 +268,7 @@ dev requires pull requests to be up to date, so the queue drains one pull reques
 - a single-package major-version bump, which gets the label `dependabot-major` and waits for review;
 - a pull request whose required checks failed.
 
-**Token:** the rebase needs `DEPENDABOT_MERGE_TOKEN`, a fine-grained token for this repository only, with Contents and Pull requests set to read and write. A push made with the workflow's own token starts no CI. Without the secret, the workflow still merges pull requests that are already ready, and it lists those that need a rebase in its run summary.
+**Token:** the rebase needs `DEPENDABOT_MERGE_TOKEN`, a fine-grained token for this repository only, with Contents and Pull requests set to read and write. A push made with the workflow's own token starts no CI. Without the secret, the workflow still merges pull requests that are already ready, and it lists those that need a rebase in its run summary. Its merges then start no push workflows on dev either, so after each merge it dispatches `image.yml` on dev itself; otherwise the merged commit's images are never published and `scripts/vhil-docker.sh` builds them from source.
 
 ## Measuring
 
