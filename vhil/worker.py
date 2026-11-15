@@ -1508,6 +1508,20 @@ class Worker:
             try:
                 firmware = self.resolver.resolve(system, run["firmware"], commits,
                                                  on_line=build_line)
+                seed = run.get("seed") or {}
+                if seed:
+                    # A training puzzle's seeded bug (vhil/training_fw.py):
+                    # only the training API sets a run's seed.
+                    from vhil import training_fw
+                    image = seed["image"]
+                    firmware[image] = training_fw.seeded_image(
+                        self.resolver.fw_dir, system, image,
+                        (commits.get(image) or {}).get("commit") or "", seed["patch"],
+                        seed.get("edits") or {}, log=build_line,
+                        source_out=run_dir / "firmware-source")
+                    trace.log(0, f"training: {image} is the pinned commit with puzzle "
+                                 f"{seed.get('puzzle')}'s seeded bug"
+                                 + (" and your edits" if seed.get("edits") else ""))
             finally:
                 if build_log["f"] is not None:
                     build_log["f"].close()
