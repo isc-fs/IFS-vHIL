@@ -240,3 +240,52 @@ def test_a_row_selects_a_parameter_set_and_rebuilds_the_pack():
     plant.apply({"parameter_set": None}, 1_000)
     assert plant.ts.params["cell_ocv_offset"].value is None
     assert plant.pack.v_cell(57) == pytest.approx(plant.pack.ocv(0.584)), "back to the listed pack"
+
+
+class _CallSim:
+    def __init__(self):
+        self.calls = []
+
+    def call(self, path, method, *args, board=None):
+        self.calls.append((path, method, args, board))
+        return ""
+
+
+class _ChainSystem:
+    devices = {"isospi": {"spi": "ams.SPI1"}, "cells": {"attach": "isospi", "count": 10}}
+
+    def resolve(self, spec):
+        class Board:
+            name = "ams"
+        return Board(), "spi", "spi1"
+
+
+@pytest.mark.parametrize("module, slot, chip, channel", [
+    (3, 7, 6, 7),       # module 3's upper LTC_1, NTC_8 (S8)
+    (3, 27, 7, 7),      # its lower LTC_2, NTC_8 of that chip (S8)
+    (0, 19, 0, 25),     # the upper chip's last swept channel (S26)
+])
+def test_an_open_ntc_rails_its_mux_channel_and_the_plant_leaves_it(module, slot, chip, channel):
+    """open_ntc_module/open_ntc_slot name a sensor as the AMS does
+    (bms_service.cpp:357-385): its GPIO1 goes to 3.0 V (>= NtcOpenMv) once,
+    and the plant's temperatures no longer overwrite that channel."""
+    from vhil.plant_pack import MUX_CHANNELS, ChainDriver
+    sim = _CallSim()
+    driver = ChainDriver(sim, _ChainSystem(), "isospi")
+    pack, faults = _pack(), {}
+    driver.push(pack)
+    temps = sim.calls[-1][2][0].split(",")
+    assert temps[chip * MUX_CHANNELS + channel] != ""
+    pack.fault("open_ntc_module", module, faults)
+    pack.fault("open_ntc_slot", slot, faults)
+    assert pack.open_ntc == (chip, slot % 20)
+    sim.calls.clear()
+    driver.push(pack)
+    assert ("spi1.isospi.cells%d" % chip, "SetAuxRaw", (channel, 30000), "ams") in sim.calls
+    pushed = [c for c in sim.calls if c[1] == "SetPlantTemperatures"][0][2][0].split(",")
+    assert pushed[chip * MUX_CHANNELS + channel] == ""
+    sim.calls.clear()
+    driver.push(pack)
+    assert not [c for c in sim.calls if c[1] == "SetAuxRaw"], "railed once, not every push"
+    pack.fault("open_ntc_slot", None, faults)
+    assert pack.open_ntc is None
