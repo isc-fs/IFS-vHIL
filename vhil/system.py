@@ -146,6 +146,69 @@ def commit_image_path(workdir: Path, fw: dict, commit: str) -> Path:
     return commit_source_dir(workdir, fw, commit) / fw["build"]["elf"]
 
 
+def local_source_dir(workdir: Path, fw: dict) -> Path:
+    """Where a build of `fw` from a local working tree (--source) goes: one
+    directory per firmware, kept between builds so they are incremental."""
+    return Path(workdir) / f"{fw['id']}@local"
+
+
+def sync_tree(src: Path, dst: Path, keep: str) -> int:
+    """Make `dst` a copy of working tree `src`, uncommitted edits included,
+    copying only what changed (size or mtime), with mtimes kept so the
+    recipe's build stays incremental. The top-level `keep` (the recipe's
+    output directory) is neither copied from `src`, where it is the
+    developer's own build, nor removed from `dst`, where it is ours.
+    Returns the number of files copied."""
+    src, dst = Path(src), Path(dst)
+    if not src.is_dir():
+        raise SystemError(f"local firmware source {src} is not a directory")
+    copied, seen = 0, set()
+    for root, dirs, files in os.walk(src):
+        rel = Path(root).relative_to(src)
+        if rel == Path("."):
+            dirs[:] = [d for d in dirs if d != keep]
+        (dst / rel).mkdir(parents=True, exist_ok=True)
+        seen.add(rel)
+        for name in files + [d for d in dirs if (Path(root) / d).is_symlink()]:
+            a, b = Path(root) / name, dst / rel / name
+            seen.add(rel / name)
+            if a.is_symlink():
+                if not b.is_symlink() or os.readlink(a) != os.readlink(b):
+                    if b.is_symlink() or b.is_file():
+                        b.unlink()
+                    elif b.is_dir():
+                        shutil.rmtree(b)
+                    os.symlink(os.readlink(a), b)
+                    copied += 1
+                continue
+            sa = a.stat()
+            if b.is_file() and not b.is_symlink():
+                sb = b.stat()
+                if sb.st_size == sa.st_size and int(sb.st_mtime) == int(sa.st_mtime):
+                    continue
+            elif b.is_dir() and not b.is_symlink():
+                shutil.rmtree(b)
+            elif b.is_symlink():
+                b.unlink()
+            shutil.copy2(a, b)
+            copied += 1
+        dirs[:] = [d for d in dirs if not (Path(root) / d).is_symlink()]
+    # What the working tree no longer has.
+    for root, dirs, files in os.walk(dst, topdown=True):
+        rel = Path(root).relative_to(dst)
+        if rel == Path("."):
+            dirs[:] = [d for d in dirs if d != keep]
+        for name in list(dirs):
+            if rel / name not in seen:
+                p = Path(root) / name
+                p.unlink() if p.is_symlink() else shutil.rmtree(p)
+                dirs.remove(name)
+        for name in files:
+            if rel / name not in seen:
+                (Path(root) / name).unlink()
+    return copied
+
+
 def built_images(workdir: Path) -> dict[Path, str]:
     """ELF (resolved) -> image key, for each line of <workdir>/built.txt."""
     listing = Path(workdir) / "built.txt"
@@ -1514,7 +1577,9 @@ class System:
 
     def build_firmware(self, workdir: Path, refs: dict[str, str] | None = None,
                        log=print, commits: dict[str, str] | None = None,
-                       only: Iterable[str] | None = None) -> dict[str, Path]:
+                       only: Iterable[str] | None = None,
+                       sources: dict[str, Path] | None = None,
+                       only_local: bool = False) -> dict[str, Path]:
         """Clone each firmware source at its ref and build it with its recipe.
         The ref is `refs[image]` if given, else the board's firmware_ref /
         bootloader_ref in the system file, else the catalogue entry's. An
@@ -1522,9 +1587,14 @@ class System:
         was resolved to) is fetched at that commit instead and built in its
         commit directory (commit_source_dir), which then gets a stamp naming
         the ref. With `only`, just those images are built (the others a
-        caller already has). Returns image key (System.images: "<board>",
+        caller already has). An image whose catalogue firmware id is in
+        `sources` (firmware id -> a local working tree, uncommitted edits
+        included) is built from a copy of that tree with the same recipe
+        (local_source_dir; never cached); with `only_local`, only those
+        images are built. Returns image key (System.images: "<board>",
         "<board>.bootloader") -> ELF; a flat .bin is written next to it."""
         refs, commits, built, workdir = refs or {}, commits or {}, {}, Path(workdir)
+        trees = {k: Path(v) for k, v in (sources or {}).items()}
         only = None if only is None else set(only)
         by_source: dict[tuple, Path] = {}
         # A board with no catalogue firmware has nothing to build: asked for
@@ -1535,6 +1605,25 @@ class System:
                     for b in self.boards.values() if b.bootloader is not None]
         for name, fw, default_ref in sources:
             if only is not None and name not in only:
+                continue
+            local = fw is not None and fw["id"] in trees
+            if only_local and not local:
+                continue
+            if local:
+                key = (fw["id"], "local")
+                if key not in by_source:
+                    src = local_source_dir(workdir, fw)
+                    keep = Path(fw["build"]["elf"]).parts[0]
+                    n = sync_tree(trees[fw["id"]], src, keep)
+                    log(f"[{name}] local working tree {trees[fw['id']]}: {n} file(s) changed")
+                    elf = src / fw["build"]["elf"]
+                    for step in ("configure", "build"):
+                        log(f"[{name}] {fw['build'][step]}")
+                        subprocess.run(fw["build"][step], shell=True, cwd=src, check=True,
+                                       stdout=sys.stderr)
+                    _objcopy(elf)
+                    by_source[key] = elf
+                built[name] = by_source[key]
                 continue
             ref, commit = refs.get(name, default_ref), commits.get(name)
             if commit is not None and not COMMIT.fullmatch(commit):
@@ -1655,6 +1744,12 @@ def main(argv=None) -> int:
                                 "resolved to), in a directory keyed by commit and recipe")
             s.add_argument("--only", action="append", metavar="IMAGE",
                            help="build just this image (repeatable; default: every image)")
+            s.add_argument("--source", action="append", metavar="FIRMWARE=DIR",
+                           help="build this catalogue firmware (its id: ecu, ams, udv, "
+                                "can-bootloader) from a local working tree, uncommitted "
+                                "edits included, with its recipe")
+            s.add_argument("--only-local", action="store_true",
+                           help="build just the images a --source gives")
     args = p.parse_args(argv)
     try:
         system = System(args.system)
@@ -1682,7 +1777,9 @@ def main(argv=None) -> int:
             for board, elf in system.build_firmware(args.workdir, _pairs(args.ref),
                                                     log=lambda m: print(m, file=sys.stderr),
                                                     commits=_pairs(args.commit),
-                                                    only=args.only).items():
+                                                    only=args.only,
+                                                    sources=_pairs(args.source),
+                                                    only_local=args.only_local).items():
                 print(f"{board}={elf}")
     except SystemError as e:
         print(f"error: {e}", file=sys.stderr)

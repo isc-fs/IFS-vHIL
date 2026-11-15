@@ -17,8 +17,36 @@ cd vscode && npm ci && npm run package
 code --install-extension vhil-tests-*.vsix
 ```
 
-Open the IFS-vHIL checkout: the extension starts when the folder has
-`scripts/vhil-docker.sh`.
+Then open either:
+
+- **A firmware repository** the catalogue builds (`IFS08-CE-ECU`,
+  `IFS08-CE-AMS`, `IFS09-DV-uDV`, `stm32-can-bootloader`): you test your
+  working tree, below. Nothing else to open.
+- **The IFS-vHIL checkout**, to work on the vHIL itself: every test, the
+  firmware from its refs.
+
+## In a firmware repository
+
+The extension recognises the repository by its `origin` (the catalogue's
+`repo:` in `catalog/firmware/`) and keeps its own checkout of the vHIL in
+VS Code's extension storage: cloned the first time, brought to `vhil.ref`
+(`dev`) once a day or with **vHIL: Update the vHIL checkout**. It only
+fetches anything for a repository on the vHIL's GitHub owner.
+
+- **What you test is your working tree.** Before each run of sim or
+  scenario tests, it builds the open folder, uncommitted edits included,
+  with the catalogue's recipe in the vHIL's image (`FW_LOCAL`,
+  `vhil.system build --source`): a copy of the tree under `/vhil/fw/<id>@local`,
+  incremental, your own `build/` left alone. A build error fails the run's
+  tests with its last lines. The first run also builds what the tests need
+  besides (the ECU, the AMS, the bootloader) from their refs.
+- **The Testing panel lists the tests that run your firmware:** the sim
+  tests with its marker (`ecu`, `ams`, `udv`; `bootloader` for the CAN
+  bootloader) and the scenarios of the systems it is in. The unit tests,
+  which test the vHIL itself, are left out. The Systems view shows those
+  systems only.
+- **The status bar** shows `vHIL · ecu: local (uncommitted)`, and the
+  Firmware list which build each image is (`ecu@local`, `ams@dev`).
 
 ## Use
 
@@ -67,6 +95,8 @@ watched and stopped.
 | `vhil.firmwareRefs` | firmware refs for **Build firmware**, e.g. `ecu=feat/x` | `FW_REFS` |
 | `vhil.cpus` | cores per run, 4 as CI's runners (0: no limit) | `VHIL_DOCKER_CPUS` |
 | `vhil.pytestArgs` | extra pytest arguments, e.g. `--vhil-trace` | |
+| `vhil.repository` | the vHIL a firmware repository is tested with (empty: `https://github.com/isc-fs/IFS-vHIL`) | |
+| `vhil.ref` | its branch or tag (empty: `dev`) | |
 
 ## How it works
 
@@ -75,7 +105,8 @@ writes JSON lines, one per collected test (node id, file, line, markers) or
 one when a test starts and ends (outcome, duration, failure and where). The
 extension reads the file under `results/vscode/` while the run goes on.
 `src/plan.ts` holds what a run executes and how its lines parse,
-`src/sidebar.ts` what the sidebar shows (both tested by `npm test`);
+`src/sidebar.ts` what the sidebar shows, `src/firmware.ts` which firmware a
+repository is and which tests and systems run it (all tested by `npm test`);
 `src/extension.ts` and `src/views.ts` are the VS Code side.
 
 Not yet: debugging a test, the Robot smoke suites, Windows hosts (the script
