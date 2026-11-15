@@ -22,15 +22,18 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 mode=${1:-all}; shift || true
 host=${VHIL_PROFILE_HOST:-$(uname -s)-$(uname -m)}
 export VHIL_PROFILE_HOST=$host VHIL_PROFILE_OUT=$host.jsonl
-max=$("$repo/scripts/vhil-docker.sh" run nproc | tr -d '\r')
+# The last line: a first run prints the image pull on stdout before it.
+max=$("$repo/scripts/vhil-docker.sh" run nproc | tr -d '\r' | tail -n1)
+case $max in ''|*[!0-9]*) echo "hw-profile: no core count from the container ($max)" >&2; exit 1;; esac
 cores=("$@"); [ ${#cores[@]} -gt 0 ] || cores=(1 2 4 8)
 
 job() {  # job <label> <vhil-docker.sh args...>
     local label=$1; shift
     echo "== $label" >&2
     VHIL_PROFILE=$label "$repo/scripts/vhil-docker.sh" "$@" >"$repo/results/profile/$host.$label.log" 2>&1 \
-        || echo "   failed (rc $?), see results/profile/$host.$label.log" >&2
+        || { echo "   failed (rc $?), see results/profile/$host.$label.log" >&2; failed+=("$label"); }
 }
+failed=()
 mkdir -p "$repo/results/profile"
 
 if [ "$mode" = full ] || [ "$mode" = all ]; then
@@ -61,4 +64,9 @@ if [ "$mode" = sweep ] || [ "$mode" = all ]; then
         job "sim-ecu-ams@$n" sim tests/sim/test_sys_ecu_ams.py
         job "sim-ecu-ams-udv@$n" sim tests/sim/test_sys_ecu_ams_udv.py
     done
+fi
+
+if [ ${#failed[@]} -gt 0 ]; then
+    echo "hw-profile: ${#failed[@]} job(s) failed: ${failed[*]}" >&2
+    exit 1
 fi
