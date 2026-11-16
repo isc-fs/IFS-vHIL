@@ -12,6 +12,7 @@ invariants in [`CLAUDE.md`](../CLAUDE.md#hard-invariants).
 | Doc | What it covers |
 |---|---|
 | [development/setup.md](development/setup.md) | Docker jobs, native setup, debugging failing tests, branching, PRs, releases |
+| [development/hardware.md](development/hardware.md) | What a laptop needs to run the tests: spec and measurements |
 | [development/adding-a-board.md](development/adding-a-board.md) | How to add a new board or MCU, step by step, with a definition of done |
 | [ci.md](ci.md) | CI policy, labels (`full-ci`), impact selection, fingerprints |
 | [test-coverage.md](test-coverage.md) | What the vHIL's own test suite covers |
