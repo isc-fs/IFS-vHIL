@@ -73,7 +73,7 @@ def _where(loc: tuple) -> str:
         if isinstance(part, int):
             out += f"[{part}]"
         elif part in ("can_send", "can_periodic", "stop_periodic", "gpio", "analog", "watch",
-                      "symbol", "pin") and out.endswith("]"):
+                      "can_wire", "symbol", "pin") and out.endswith("]"):
             continue                        # the union's tag, not a field
         else:
             out += f".{part}" if out else str(part)
@@ -135,6 +135,7 @@ def load_text(text: str, system_id: str, name: str):
 # Keys of a row, in the order a file writes them.
 _ORDER = ("kind", "check", "name", "at_ms", "until_ms", "bus", "board", "symbol", "id", "ext",
           "data", "period_ms", "periodic", "pin", "level", "volts", "size", "plant", "set",
+          "node", "connected",
           "signal", "op",
           "value", "min_ms", "max_ms", "min", "max")
 _PLAIN = re.compile(r"[A-Za-z_][A-Za-z0-9_./-]*\Z")

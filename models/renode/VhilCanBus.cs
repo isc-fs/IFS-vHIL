@@ -44,6 +44,12 @@
 //               transmitter waits 8 more bits (suspend transmission) after each
 //               frame. Bit, stuff, CRC and form errors, REC and bus-off from
 //               errors are not modelled (ForceBusOff forces bus-off).
+//   Open wire   A node disconnected from the bus (SetConnected false: its
+//               stub open at the connector, a training fault) is alone on a
+//               wire of its own: it receives nothing, and every frame it
+//               sends gets an ACK error there (the rules above), so it goes
+//               error-passive and keeps retrying. The bus never sees those
+//               frames: they are not in the timeline or the load.
 //   Bit rate    A controller whose NBTP rate differs from the frame's neither
 //               receives nor acknowledges it (logged once). Nodes with no bit
 //               timing (the probe, the bridge) follow the bus: the rate of its
@@ -71,7 +77,8 @@
 // sync phase.
 //
 // Test API (monitor): Timeline sinceUs, Load fromUs toUs, Nodes, Stats,
-// SetAck "<node>" true|false, Tec "<node>", DefaultBitRate. Times in the
+// SetAck "<node>" true|false, SetConnected "<node>" true|false, Tec "<node>",
+// DefaultBitRate. Times in the
 // timeline are ns of virtual time.
 //
 using System;
@@ -315,6 +322,21 @@ namespace Antmicro.Renode.Tools.Network
             }
         }
 
+        // Whether a node is on the bus (default) or cut off from it (Open wire
+        // above). Node names as Nodes prints them.
+        public void SetConnected(string node, bool connected)
+        {
+            lock(sync)
+            {
+                var n = Find(node);
+                if(n.Connected != connected)
+                {
+                    this.Log(LogLevel.Info, "{0} {1} the bus", n.Name, connected ? "reconnected to" : "disconnected from");
+                }
+                n.Connected = connected;
+            }
+        }
+
         public int Tec(string node)
         {
             lock(sync)
@@ -351,26 +373,35 @@ namespace Antmicro.Renode.Tools.Network
             {
                 while(true)
                 {
+                    // The bus's next frame, or a disconnected node's on its own
+                    // wire, whichever starts first.
                     ulong? first = null;
+                    Node alone = null;
                     foreach(var n in nodes)
                     {
                         var e = Earliest(n);
-                        if(e != null && (first == null || e.Value < first.Value))
+                        if(e == null)
                         {
-                            first = e;
+                            continue;
+                        }
+                        var s = Math.Max(n.Connected ? busFreeNs : n.WireFreeNs, e.Value);
+                        if(first == null || s < first.Value)
+                        {
+                            first = s;
+                            alone = n.Connected ? null : n;
                         }
                     }
                     if(first == null)
                     {
                         break;
                     }
-                    var start = Math.Max(busFreeNs, first.Value);
+                    var start = first.Value;
                     if(start > until)
                     {
                         ScheduleWake(start);
                         break;
                     }
-                    if(!Decide(start))
+                    if(!(alone != null ? DecideAlone(alone, start) : Decide(start)))
                     {
                         break;
                     }
@@ -383,6 +414,10 @@ namespace Antmicro.Renode.Tools.Network
             var contenders = new List<Tuple<Node, Offer>>();
             foreach(var n in nodes)
             {
+                if(!n.Connected)
+                {
+                    continue;
+                }
                 var offer = OfferAt(n, start);
                 if(offer != null)
                 {
@@ -429,7 +464,7 @@ namespace Antmicro.Renode.Tools.Network
             var ack = false;
             foreach(var n in nodes)
             {
-                if(n == winner)
+                if(n == winner || !n.Connected)
                 {
                     continue;
                 }
@@ -536,6 +571,43 @@ namespace Antmicro.Renode.Tools.Network
             return true;
         }
 
+        // A disconnected node's frame on its own wire: nobody acknowledges it
+        // (Decide's ACK-error branch, without the bus).
+        private bool DecideAlone(Node n, ulong start)
+        {
+            var offer = OfferAt(n, start);
+            if(offer == null)
+            {
+                return false;
+            }
+            var rate = n.Ctrl != null ? n.Ctrl.BitRate : DefaultBitRate;
+            var ackSlot = start + BitsNs(VhilCanFrameBits.StuffedThroughCrc(offer.Frame) + 2, rate);
+            if(n.Tec < 128)
+            {
+                n.Tec = Math.Min(255, n.Tec + 8);                               // rule 3
+            }                                                                   // else exception 1
+            var errorEnd = ackSlot + BitsNs(6 + 8, rate);
+            n.WireFreeNs = errorEnd + BitsNs(3, rate);
+            n.NotBeforeNs = n.WireFreeNs + (n.Tec >= 128 ? BitsNs(8, rate) : 0);
+            n.AckErrors++;
+            if(n.Ctrl != null)
+            {
+                var request = offer.Request;
+                var tec = n.Tec;
+                var giveUp = n.Ctrl.AutoRetransmissionDisabled;
+                if(giveUp)
+                {
+                    n.Ctrl.Commit(request);
+                }
+                At(n, ackSlot, () => n.Ctrl.SetErrorState(tec, true));
+                if(giveUp)
+                {
+                    At(n, errorEnd, () => n.Ctrl.Complete(request, false));
+                }
+            }
+            return true;        // a probe retries, as on the bus (Decide)
+        }
+
         // When a node next offers (ns), or null.
         private ulong? Earliest(Node n)
         {
@@ -586,7 +658,7 @@ namespace Antmicro.Renode.Tools.Network
         {
             foreach(var n in nodes)
             {
-                if(n.Ctrl != null && n.Ctrl.Receives)
+                if(n.Ctrl != null && n.Ctrl.Receives && n.Connected)
                 {
                     return n.Ctrl.BitRate;
                 }
@@ -752,6 +824,8 @@ namespace Antmicro.Renode.Tools.Network
             public string Name;
             public int Index;
             public bool Ack = true;
+            public bool Connected = true;
+            public ulong WireFreeNs;    // its own wire, while disconnected
             public int Tec;
             public ulong NotBeforeNs;
             public readonly Queue<Offer> Queue = new Queue<Offer>();

@@ -198,6 +198,18 @@ class CanPeriodic(_Can):
     until_ms: Optional[float] = Field(None, ge=0)   # default: to the end
 
 
+class CanWire(_Model):
+    """Opens (connected: false) or closes a board's stub to a bus at at_ms:
+    the controller `node` (an endpoint of `bus`, e.g. ams.FDCAN1) is cut off,
+    hears nothing and gets no ACK (models/renode/VhilCanBus.cs, Open wire)."""
+    kind: Literal["can_wire"]
+    name: Optional[str] = Field(None, pattern=_ROW)
+    at_ms: float = Field(0, ge=0)
+    bus: str = Field(pattern=_NAME)
+    node: str = Field(pattern=r"^[A-Za-z_]\w{0,63}\.[A-Za-z0-9_]{1,32}$")
+    connected: bool
+
+
 class GpioSet(_Model):
     kind: Literal["gpio"]
     name: Optional[str] = Field(None, pattern=_ROW)
@@ -265,7 +277,7 @@ class PlantSet(_Model):
 
 
 Stimulus = Annotated[Union[CanSend, CanPeriodic, StopPeriodic, GpioSet, AnalogSet, WatchOp,
-                           PlantSet], Field(discriminator="kind")]
+                           PlantSet, CanWire], Field(discriminator="kind")]
 
 
 class SymbolWatch(_Model):
@@ -502,6 +514,12 @@ def check_scenario(sc: RunScenario, system: System) -> list[str]:
         if isinstance(s, (CanSend, CanPeriodic)):
             if s.bus not in system.buses:
                 errors.append(f"{where}: no bus '{s.bus}' in {system.id}")
+        elif isinstance(s, CanWire):
+            if s.bus not in system.buses:
+                errors.append(f"{where}: no bus '{s.bus}' in {system.id}")
+            elif s.node not in system.buses[s.bus]["nodes"]:
+                errors.append(f"{where}: {s.node} is not on bus '{s.bus}' "
+                              f"({', '.join(system.buses[s.bus]['nodes'])})")
         elif isinstance(s, GpioSet):
             pin(s.board, s.pin, "gpio", where)
             owner = system.plant_driven_pins().get(f"{s.board}.{s.pin}")
