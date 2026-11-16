@@ -37,6 +37,8 @@ scripts/vhil-docker.sh server      # the web app (API + shell) on http://localho
 scripts/vhil-docker.sh shell
 ```
 
+What a host needs (cores, RAM, disk, VM size): [hardware.md](hardware.md).
+
 On macOS it uses a Colima VM rather than Docker Desktop: Docker Desktop's
 LinuxKit kernel has no vcan, so IFS_HIL's suites could not reach the buses.
 Colima's Ubuntu image lacks `linux-modules-extra` for its shipped kernel, so
