@@ -573,7 +573,8 @@ CREATE TABLE IF NOT EXISTS runs (
     owner      TEXT NOT NULL DEFAULT '',
     token      TEXT NOT NULL DEFAULT '',
     firmware_commits TEXT NOT NULL DEFAULT '{}',
-    imported   TEXT NOT NULL DEFAULT '{}'
+    imported   TEXT NOT NULL DEFAULT '{}',
+    seed       TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS runs_state ON runs (state, id);
 """
@@ -582,7 +583,7 @@ CREATE INDEX IF NOT EXISTS runs_state ON runs (state, id);
 _ADDED = {"heartbeat": "REAL", "attempts": "INTEGER NOT NULL DEFAULT 0",
           "ref_name": "TEXT NOT NULL DEFAULT ''", "owner": "TEXT NOT NULL DEFAULT ''",
           "token": "TEXT NOT NULL DEFAULT ''", "firmware_commits": "TEXT NOT NULL DEFAULT '{}'",
-          "imported": "TEXT NOT NULL DEFAULT '{}'"}
+          "imported": "TEXT NOT NULL DEFAULT '{}'", "seed": "TEXT NOT NULL DEFAULT '{}'"}
 
 
 class RunStore:
@@ -635,12 +636,14 @@ class RunStore:
     def create(self, system: str, ref: str, firmware: dict, scenario: dict,
                ref_name: str = "", owner: str = "", max_active: Optional[int] = None,
                max_active_per_user: Optional[int] = None,
-               firmware_commits: Optional[dict] = None) -> int:
+               firmware_commits: Optional[dict] = None, seed: Optional[dict] = None) -> int:
         """A queued run. `ref`: the workspace commit its system file is read
         at ("" outside git); `ref_name`: the branch/tag/commit it was asked as;
         `owner`: the login of who started it ("dev" in dev mode);
         `firmware_commits`: image key -> {ref, commit} its firmware refs
-        resolved to (vhil.worker.resolve_commits). Each run gets
+        resolved to (vhil.worker.resolve_commits); `seed`: a training
+        run's seeded firmware (vhil/training_fw.py; only the training API
+        sets it). Each run gets
         a random token, which its trace's header must carry for the API to
         serve the trace (trace_header). Raises QueueFull when the active runs
         (queued or running) already number `max_active`, or `max_active_per_user`
@@ -662,10 +665,11 @@ class RunStore:
                                     "queued or running runs: wait for one to finish or cancel one")
                 row = db.execute(
                     "INSERT INTO runs (state, system, ref, firmware, scenario, created, ref_name, "
-                    "owner, token, firmware_commits) VALUES ('queued', ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "RETURNING id",
+                    "owner, token, firmware_commits, seed) "
+                    "VALUES ('queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                     (system, ref, json.dumps(firmware), json.dumps(scenario), now_iso(), ref_name,
-                     owner, uuid.uuid4().hex, json.dumps(firmware_commits or {}))).fetchone()
+                     owner, uuid.uuid4().hex, json.dumps(firmware_commits or {}),
+                     json.dumps(seed or {}))).fetchone()
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
@@ -828,7 +832,7 @@ def _now(now: Optional[float]) -> float:
 
 def _row(row: sqlite3.Row) -> dict:
     d = dict(row)
-    for key in ("firmware", "scenario", "summary", "firmware_commits", "imported"):
+    for key in ("firmware", "scenario", "summary", "firmware_commits", "imported", "seed"):
         if key in d:
             d[key] = json.loads(d[key]) if d[key] else {}
     return d
@@ -1172,10 +1176,10 @@ def _login(request: Request) -> str:
 
 
 def submit(req: RunRequest, request: Request, settings, workspace, store: "RunStore",
-           limits: Limits) -> int:
+           limits: Limits, seed: Optional[dict] = None) -> int:
     """Queue a run as POST /api/runs does (checked against the limits, the
     system and its firmware refs): its id. The training API's runs come here
-    too (vhil/server/training.py)."""
+    too (vhil/server/training.py), with a puzzle's `seed` (RunStore.create)."""
     from vhil.server.workspace import NotFound
     login = _login
     sc = req.scenario
@@ -1229,7 +1233,7 @@ def submit(req: RunRequest, request: Request, settings, workspace, store: "RunSt
                               ref_name=req.ref or "", owner=login(request),
                               max_active=limits.max_active,
                               max_active_per_user=limits.max_active_per_user,
-                              firmware_commits=fw_commits)
+                              firmware_commits=fw_commits, seed=seed)
     except QueueFull as e:
         raise HTTPException(429, str(e))
     return run_id

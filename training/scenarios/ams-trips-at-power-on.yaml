@@ -1,0 +1,65 @@
+kind: training
+title: "The AMS faults as soon as it powers on"
+summary: "Nothing is wrong with the accumulator, yet the AMS goes to Error before anyone touches the car. Find the bug."
+level: 1
+fault: firmware
+topics: [AMS, cell voltages, firmware limits]
+system: ecu-ams
+firmware:
+  ecu: 44610a5366ad5c785751a6eccb1cf4a8616890ca
+  ams: 94b59a9e5bc5a5fe90705018ebcd8e6a23e851d0
+# The seeded bug: one line of the pinned AMS commit (training/patches/).
+seed:
+  image: ams
+  patch: patches/ams-overvoltage-limit.patch
+brief: |
+  **From the workshop:** "New AMS build flashed this morning. The pack hasn't been touched
+  since last week's test day, it was fine then. Now the AMS LED goes to error a few
+  seconds after LV on, and the car won't arm."
+
+  Run the car. Nothing in the hardware has changed: the fault is in the **AMS firmware**.
+  Find what makes the AMS trip, name the part of the firmware it's in, then fix it in
+  the source and check your fix.
+drive:
+  # RST_EXT, TSMS on, one DASH_CHG press: how the car is armed.
+  virtual_ms: 12000
+  stimuli:
+    - {kind: plant, name: sdc-reset, at_ms: 5400, plant: sdc, set: {reset: true}}
+    - {kind: plant, name: sdc-reset-release, at_ms: 5450, plant: sdc, set: {reset: false}}
+    - {kind: plant, name: tsms-on, at_ms: 5500, plant: sdc, set: {tsms: true}}
+    - {kind: gpio, name: dash-press, at_ms: 5600, board: ams, pin: PF10, level: true}
+    - {kind: gpio, name: dash-release, at_ms: 5650, board: ams, pin: PF10, level: false}
+  watch:
+    - {kind: symbol, board: ams, name: g_state_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_reason_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_detail_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ecu, name: g_last_ctrl_state, size: 1, period_ms: 10}
+    - {kind: pin, board: ams, pin: PB4}
+  # A healthy car: what the fixed one must do (test_solved).
+  expect:
+    - {check: never, name: no-ams-error, at_ms: 0, signal: "symbol:ams.g_state_telemetry", value: 5}
+    - {check: always, name: ams-ok, at_ms: 4500, signal: "pin:ams.PB4", value: high}
+    - {check: eventually, name: ams-run, at_ms: 5600, until_ms: 10600, signal: "symbol:ams.g_state_telemetry", value: 3}
+    - {check: always, name: sdc-closed-in-run, at_ms: 10800, signal: "plant:sdc.sdc_closed", value: 1}
+hints:
+  - "The AMS went to Error on its own. Before guessing, read why: its fault reason is on the AMS box in the diagram (and on CAN 0x6C0)."
+  - "Reason 5 is CellOverVoltage. Are the cells really overcharged? The DC-link bar shows the pack: 95 cells in series at about 350 V. What is that per cell, and what is the highest voltage a Li-ion cell may sit at?"
+  - "The cells are healthy, so the number they are compared against must be wrong. The AMS keeps its cell limits in one configuration header: what does it say the over-voltage limit is?"
+answer:
+  part: firmware
+  board: ams
+  module: config
+  explain: |
+    The over-voltage limit in the AMS configuration (CellOverVoltageMv in
+    Core/Inc/app/ams_config.hpp) was 3600 mV instead of 4200 mV: the maximum of an
+    LFP cell, not of the car's Li-ion cells. The cells sit at 3.7 V, a normal state of
+    charge, so as soon as the AMS had read every module it saw every cell "over
+    voltage" and latched Error (reason 5, CellOverVoltage; the detail byte names
+    the module of the highest cell), dropping AMS_OK. Nothing was wrong with the pack. A
+    limit is part of the safety case: change one only from the cell's datasheet and
+    the FS rules, and check it on the bench before the car.
+fix_note: "Seeded for training: the team's AMS never shipped this limit."
+sources:
+  - training/patches/ams-overvoltage-limit.patch
+solved:
+  - "training/tests/test_puzzles.py::test_solved[ams-trips-at-power-on]"

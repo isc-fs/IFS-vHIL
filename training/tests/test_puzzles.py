@@ -7,6 +7,9 @@ drive cycle passes every expect of a healthy car (`drive.expect`):
   test_fault_shows[<id>]     the drive with the faults, on the puzzle's own
                              images: some expect fails, so the puzzle has a
                              symptom (an author's check, never a trainee's).
+                             A seeded firmware puzzle's own image is its
+                             seeded build (python -m vhil.training_fw build
+                             <id>), given with --seeded; without it, skipped.
 
 Each runs as tests/scenarios does (vhil/worker.py execute_run on vhil.sim.Sim,
 a real power-on through each board's bootloader), its expects checked
@@ -68,8 +71,11 @@ def test_solved(pid, images, out_dir):
 
 
 @pytest.mark.parametrize("pid", RUN_PUZZLES)
-def test_fault_shows(pid, images, out_dir):
+def test_fault_shows(pid, images, out_dir, request):
     puzzle = tr.puzzles()[pid]
+    if puzzle.seed is not None and not request.config.getoption("--seeded"):
+        pytest.skip(f"{pid} seeds its bug in the {puzzle.seed.image} image: build it with "
+                    f"`python -m vhil.training_fw build {pid}` and pass it with --seeded")
     results = _drive(puzzle, images, out_dir, faults=True)
     assert any(not vexpect.ok(r) for r in results), \
         "the seeded fault shows no symptom: every healthy-car check passed\n" + _lines(results)
