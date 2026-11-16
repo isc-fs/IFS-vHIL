@@ -12,9 +12,12 @@ team's repos, and it is only ever reached from a training run: the gate,
 CI and every other run build commits only (invariant 1). A seeded image
 lives under <fw-dir>/training/, apart from the commit builds, and is named
 by what went into it (commit, recipe, patch, edits), so a rebuild of the
-same inputs is reused.
+same inputs is reused. Its MARKER says which patch it carries and whether a
+trainee's edits are in it: vhil/fwprune.py keeps a current puzzle's seeded
+build and removes edited ones a day after their last use.
 
     python -m vhil.training_fw build <puzzle> [--fw-dir DIR]    # the seeded ELF
+    python -m vhil.training_fw prebuild [--fw-dir DIR]          # every puzzle's images
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -29,10 +33,13 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
+from vhil import fwprune
 from vhil.system import COMMIT, REPO, System, local_source_dir, recipe_id
 
 # A trainee's edit replaces one of the files the patch touches, at most this big.
 MAX_EDIT_BYTES = 256 * 1024
+# In a seeded build's directory: {"patch_sha": ..., "edited": bool}.
+MARKER = ".vhil-training.json"
 PATCH_FILE = re.compile(r"^\+\+\+ b/(\S+)$", re.M)
 
 
@@ -56,6 +63,14 @@ def _key(fw: dict, commit: str, patch: str, edits: dict) -> str:
     ident = {"commit": commit, "recipe": recipe_id(fw), "patch": patch,
              "edits": {k: edits[k] for k in sorted(edits)}}
     return hashlib.sha256(json.dumps(ident, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def patch_sha(patch: str) -> str:
+    return hashlib.sha256(patch.encode()).hexdigest()
+
+
+def _mark(work: Path, patch: str, edits: dict) -> None:
+    (work / MARKER).write_text(json.dumps({"patch_sha": patch_sha(patch), "edited": bool(edits)}))
 
 
 def _git(*args, cwd: Optional[Path] = None) -> None:
@@ -87,6 +102,9 @@ def seeded_image(fw_dir: Path, system: System, image: str, commit: str, patch: s
     with open(fw_dir / ".build.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if elf.is_file() and tree.is_dir():
+            if not (work / MARKER).is_file():       # built before markers existed
+                _mark(work, patch, edits)
+            fwprune.touch_used(work)
             log(f"[{image}] seeded image {work.name}: built before, reused")
         else:
             log(f"[{image}] seeded image: {fw['repo']}@{commit[:12]} + training patch"
@@ -112,12 +130,41 @@ def seeded_image(fw_dir: Path, system: System, image: str, commit: str, patch: s
                 raise
             if Path(built[image]).resolve() != elf.resolve() or not elf.is_file():
                 raise RuntimeError(f"{image}: the seeded build gave no image at {elf}")
+            _mark(work, patch, edits)
+            fwprune.touch_used(work)
     if source_out is not None:
         for path in patch_files(patch):
             out = Path(source_out) / path
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text((tree / path).read_text())
     return elf
+
+
+def prebuild(fw_dir: Path, log: Callable[[str], None] = print) -> list[str]:
+    """Every puzzle's images, as its trainee's runs use them: its pinned
+    commits (the worker's own commit builds) and its seeded image, so no
+    trainee waits for a build of the puzzle itself (a deploy's warm-up).
+    Returns what failed, one line each."""
+    from vhil import training
+    from vhil.worker import FirmwareResolver
+    resolver, failed, done = FirmwareResolver(Path(fw_dir), log=log), [], set()
+    for pid, puzzle in sorted(training.puzzles().items()):
+        system = System(REPO / "systems" / f"{puzzle.system}.yaml")
+        try:
+            commits = resolver.commits(system, dict(puzzle.firmware), log=log)
+            key = (puzzle.system, json.dumps(commits, sort_keys=True))
+            if key not in done:
+                resolver.resolve(system, dict(puzzle.firmware), commits, on_line=log)
+                done.add(key)
+            if puzzle.seed is not None:
+                commit = (commits.get(puzzle.seed.image) or {}).get("commit") or ""
+                seeded_image(Path(fw_dir), system, puzzle.seed.image, commit,
+                             puzzle.seed.text(), log=log)
+            log(f"{pid}: ready")
+        except Exception as e:                  # the next puzzle still gets its images
+            failed.append(f"{pid}: {e}")
+            log(f"{pid}: FAILED: {e}")
+    return failed
 
 
 def main(argv=None) -> int:
@@ -127,7 +174,14 @@ def main(argv=None) -> int:
     b = sub.add_parser("build", help="build a firmware puzzle's seeded image (prints its ELF)")
     b.add_argument("puzzle")
     b.add_argument("--fw-dir", default="/vhil/training-fw")
+    pb = sub.add_parser("prebuild", help="build every puzzle's pinned and seeded images")
+    pb.add_argument("--fw-dir", default=os.environ.get("VHIL_FW_DIR", "/vhil/fw"))
     a = p.parse_args(argv)
+    if a.cmd == "prebuild":
+        failed = prebuild(Path(a.fw_dir), log=lambda m: print(m, file=sys.stderr))
+        for line in failed:
+            print(f"FAILED {line}")
+        return 1 if failed else 0
     puzzle = training.puzzles()[a.puzzle]
     if puzzle.seed is None:
         p.error(f"{a.puzzle} seeds no firmware")

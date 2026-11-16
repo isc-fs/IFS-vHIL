@@ -11,6 +11,8 @@
 #   egress     the workers' only way out: CONNECT to an allowlist (GitHub)
 #   api        FastAPI (vhil.server): shell, systems, runs, auth
 #   worker     vhil.worker x VHIL_WORKERS: claims queued runs, runs Renode
+#   training-prebuild  one-shot: builds every training puzzle's firmware
+#              (vhil/training_fw.py prebuild), so no trainee waits for it
 #   editor     Pipeline Manager + vhil.editor (the shell embeds it, same origin)
 #   proxy      Caddy: TLS for VHIL_SITE, the one origin: the app, and the
 #              editor under /editor/ behind the API's login check
@@ -259,12 +261,51 @@ services:
       VHIL_FW_KEEP_DAYS: ${VHIL_FW_KEEP_DAYS:-14}
       VHIL_FW_MAX_GB: ${VHIL_FW_MAX_GB:-0}
       VHIL_FW_PRUNE_INTERVAL_S: ${VHIL_FW_PRUNE_INTERVAL_S:-3600}
+      # A trainee's edited firmware build goes this long after its last use.
+      VHIL_TRAINING_KEEP_HOURS: ${VHIL_TRAINING_KEEP_HOURS:-24}
       VHIL_FIRMWARE_ACTIVE_DAYS: ${VHIL_FIRMWARE_ACTIVE_DAYS:-30}
     # docker stop: SIGTERM ends the current run as error (vhil/worker.py).
     stop_grace_period: 30s
     # No healthcheck: it serves nothing. A crash exits and restarts it.
     deploy:
       replicas: ${VHIL_WORKERS:-2}
+      resources:
+        limits:
+          pids: ${VHIL_WORKER_PIDS:-2048}
+          cpus: "${VHIL_WORKER_CPUS:-4}"
+          memory: ${VHIL_WORKER_MEMORY:-4g}
+
+  training-prebuild:
+    <<: *vhil
+    # Every training puzzle's images (training/README.md): its pinned commits
+    # and its seeded build, into the workers' firmware volume, once per
+    # deploy. Builds as a worker does (the same build lock, so it takes turns
+    # with them) and needs what a worker needs: git through `egress`, no
+    # secrets. Nothing waits for it: a puzzle started before it is done
+    # builds its own images, as before. A failed build is logged and the
+    # service still exits 0: a warm-up, never a reason for `up --wait` (or
+    # deploy/smoke.sh) to fail.
+    command:
+      - bash
+      - -c
+      - >-
+        python -m vhil.training_fw prebuild --fw-dir /vhil/fw ||
+        echo "training prebuild: some puzzle images failed (above); they build on first use"
+    restart: "no"
+    depends_on:
+      workspace:
+        condition: service_completed_successfully
+      egress:
+        condition: service_healthy
+    networks: [jobs]
+    tmpfs:
+      - /tmp:exec,size=${VHIL_WORKER_TMP:-1g},mode=1777
+    volumes:
+      - workspace:/workspace:ro
+      - fw:/vhil/fw
+    environment:
+      <<: [*paths, *proxied]
+    deploy:
       resources:
         limits:
           pids: ${VHIL_WORKER_PIDS:-2048}
