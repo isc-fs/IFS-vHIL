@@ -246,3 +246,56 @@ def test_policy_from_env(monkeypatch):
     monkeypatch.setenv("VHIL_FW_MAX_GB", "10")
     monkeypatch.setenv("VHIL_FW_PRUNE_INTERVAL_S", "60")
     assert PrunePolicy.from_env() == PrunePolicy(3, 2.5, 10_000_000_000, 60.0)
+
+
+# -- training (rule d, and <fw-dir>/training/: vhil/training_fw.py) ----------------
+
+PATCH = "--- a/x.h\n+++ b/x.h\n"
+
+
+def puzzle(catalog: Path, commit: str):
+    t = catalog.parent / "training"
+    (t / "patches").mkdir(parents=True)
+    (t / "patches" / "p.patch").write_text(PATCH)
+    (t / "scenarios").mkdir()
+    (t / "scenarios" / "a.yaml").write_text(
+        f"firmware: {{ecu: {commit}}}\nseed: {{image: ecu, patch: patches/p.patch}}\n")
+
+
+def training_build(fw: Path, n: int, hours_ago: float, patch: str = PATCH,
+                   edited: bool = False) -> Path:
+    import json
+    src = fw / "training" / f"ecu+{sha(1)[:12]}.{n:016x}"
+    (src / "build").mkdir(parents=True)
+    (src / "build" / "E.elf").write_bytes(b"x" * 100)
+    (src / fwprune.TRAINING_MARKER).write_text(json.dumps(
+        {"patch_sha": __import__("hashlib").sha256(patch.encode()).hexdigest(), "edited": edited}))
+    t = NOW - hours_ago * 3600
+    (src / fwprune.LAST_USED).touch()
+    os.utime(src / fwprune.LAST_USED, (t, t))
+    return src
+
+
+def test_a_training_puzzles_pinned_commit_stays(fw, catalog):
+    pinned = make_build(fw, 1, 400)
+    stale = make_build(fw, 2, 400)
+    puzzle(catalog, sha(1))
+    result = run(fw, catalog, PrunePolicy(keep=0, keep_days=0))
+    assert names(result.removed) == [stale.name]
+    assert pinned.exists()
+    assert "a training puzzle's" in {b.name: b for b in result.kept}[pinned.name].keep
+
+
+def test_trainee_builds_go_a_day_after_their_last_use_but_the_seed_stays(fw, catalog):
+    puzzle(catalog, sha(1))
+    seed = training_build(fw, 1, 24 * 90)                       # a current puzzle's, no edits
+    old_edit = training_build(fw, 2, 25, edited=True)
+    new_edit = training_build(fw, 3, 2, edited=True)
+    old_seed = training_build(fw, 4, 25, patch="an older patch")  # the puzzle changed since
+    unmarked = fw / "training" / "not-a-build"
+    unmarked.mkdir()
+    result = run(fw, catalog)
+    assert names(result.removed) == sorted([old_edit.name, old_seed.name])
+    assert seed.exists() and new_edit.exists() and unmarked.exists()
+    assert not old_edit.exists() and not old_seed.exists()
+    assert run(fw, catalog, dry_run=True).removed == []
