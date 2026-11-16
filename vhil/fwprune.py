@@ -23,7 +23,15 @@ and never removes a build that is
 - (b) the commit of a queued or running run (its firmware_commits, or a
   commit given as its ref);
 - (c) being built: the prune takes the build lock (`.build.lock`) without
-  waiting and skips the whole pass while a build holds it.
+  waiting and skips the whole pass while a build holds it;
+- (d) a commit a training puzzle pins (training/scenarios/*.yaml `firmware:`),
+  so a trainee's car never waits for its build.
+
+Training builds (`<fw-dir>/training/`, vhil/training_fw.py): a current
+puzzle's seeded build (its marker names the puzzle's patch, no edits) is
+kept; any other, a trainee's edited build above all, goes once unused for
+`training_keep_hours` (VHIL_TRAINING_KEEP_HOURS, 24). They are not counted
+against max_bytes.
 
 With `max_bytes` (VHIL_FW_MAX_GB, 0 = no cap) the builds the first two rules
 keep are removed oldest first while the commit builds together are bigger;
@@ -72,6 +80,9 @@ PRUNE_LOCK = ".prune.lock"
 LAST_PRUNE = ".last-prune"
 # <firmware id>+<commit[:12]>.<recipe id> (vhil.system commit_source_dir).
 BUILD_DIR = re.compile(r"(?P<id>[A-Za-z0-9_-]+)\+(?P<commit>[0-9a-f]{12})\.(?P<recipe>[0-9a-f]{10})")
+# <fw-dir>/training/<firmware id>+<commit[:12]>.<key> (vhil.training_fw).
+TRAINING_DIR = re.compile(r"(?P<id>[A-Za-z0-9_-]+)\+(?P<commit>[0-9a-f]{12})\.(?P<key>[0-9a-f]{16})")
+TRAINING_MARKER = ".vhil-training.json"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -87,13 +98,16 @@ class PrunePolicy:
     keep_days: float = 14.0         # used within
     max_bytes: int = 0              # all commit builds together; 0 = no cap
     interval_s: float = 3600.0      # the worker's passes, at most this often
+    training_keep_hours: float = 24.0   # a training build not a current puzzle's seed
 
     @classmethod
     def from_env(cls) -> "PrunePolicy":
         return cls(keep=int(_env_float("VHIL_FW_KEEP", cls.keep)),
                    keep_days=_env_float("VHIL_FW_KEEP_DAYS", cls.keep_days),
                    max_bytes=int(_env_float("VHIL_FW_MAX_GB", 0) * 1e9),
-                   interval_s=_env_float("VHIL_FW_PRUNE_INTERVAL_S", cls.interval_s))
+                   interval_s=_env_float("VHIL_FW_PRUNE_INTERVAL_S", cls.interval_s),
+                   training_keep_hours=_env_float("VHIL_TRAINING_KEEP_HOURS",
+                                                  cls.training_keep_hours))
 
 
 @dataclass
@@ -301,8 +315,54 @@ def run_commits(db: Optional[Path]) -> set[str]:
     return out
 
 
+def training_pins(training: Path) -> tuple[set[str], set[str]]:
+    """(the commit[:12]s the puzzles pin, the sha256s of their seed
+    patches), from training/scenarios/*.yaml (rule d)."""
+    import hashlib
+    commits, seeds = set(), set()
+    for p in sorted((Path(training) / "scenarios").glob("*.yaml")):
+        try:
+            doc = yaml.safe_load(p.read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        for c in (doc.get("firmware") or {}).values():
+            if isinstance(c, str) and COMMIT.fullmatch(c):
+                commits.add(c[:12])
+        patch = (doc.get("seed") or {}).get("patch")
+        if isinstance(patch, str):
+            try:
+                seeds.add(hashlib.sha256((Path(training) / patch).read_bytes()).hexdigest())
+            except OSError:
+                pass
+    return commits, seeds
+
+
+def training_plan(fw_dir: Path, policy: PrunePolicy, seeds: set[str],
+                  now: float) -> tuple[list[Build], list[Build]]:
+    """(remove, keep) of the training builds (module doc)."""
+    root, remove, keep = Path(fw_dir) / "training", [], []
+    if not root.is_dir():
+        return remove, keep
+    for src in sorted(p for p in root.iterdir() if p.is_dir()):
+        m = TRAINING_DIR.fullmatch(src.name)
+        if not m:
+            continue
+        b = Build(src, m["id"], m["commit"], last_used(src), _size(src), False)
+        try:
+            marker = json.loads((src / TRAINING_MARKER).read_text())
+        except (OSError, ValueError):
+            marker = {}
+        if marker.get("patch_sha") in seeds and not marker.get("edited", True):
+            b.keep.append("a puzzle's seeded build")
+        elif now - b.last_used <= policy.training_keep_hours * 3600:
+            b.keep.append(f"used within {policy.training_keep_hours:g} h")
+        (keep if b.keep else remove).append(b)
+    return remove, keep
+
+
 def plan(builds: list[Build], policy: PrunePolicy, heads: dict[str, Optional[set[str]]],
-         running: set[str], now: float) -> tuple[list[Build], list[Build]]:
+         running: set[str], now: float,
+         pinned: frozenset = frozenset()) -> tuple[list[Build], list[Build]]:
     """(remove, keep) under the policy (module doc). Sets each build's
     `keep` reasons."""
     hard: set[int] = set()
@@ -316,6 +376,8 @@ def plan(builds: list[Build], policy: PrunePolicy, heads: dict[str, Optional[set
             b.keep.append("active head")
         if b.commit12 in running:
             b.keep.append("queued/running run")
+        if b.commit12 in pinned:
+            b.keep.append("a training puzzle's")
         if b.keep:
             hard.add(id(b))
     for group in by_fw.values():
@@ -392,6 +454,12 @@ def _pass(fw_dir: Path, policy: PrunePolicy, result: PruneResult, *, catalog: Pa
         m = BUILD_DIR.fullmatch(src.name)
         builds.append(Build(src, m["id"], m["commit"], last_used(src), _size(src),
                             src.resolve() in listed_dirs))
+    pinned, seeds = training_pins(Path(catalog).parent / "training")
+    t_remove, t_keep = training_plan(fw_dir, policy, seeds, now)
+    result.removed, result.kept = list(t_remove), list(t_keep)
+    if not result.dry_run:
+        for b in t_remove:
+            shutil.rmtree(b.path, ignore_errors=True)
     if not builds:
         return result
     running = run_commits(db)
@@ -403,8 +471,9 @@ def _pass(fw_dir: Path, policy: PrunePolicy, result: PruneResult, *, catalog: Pa
         built.setdefault(b.firmware, set()).add(b.commit12)
     heads = protected_heads(catalogue_firmware(catalog), built, lister, details,
                             active_days, log)
-    remove, kept = plan(builds, policy, heads, running, now)
-    result.removed, result.kept = remove, kept
+    remove, kept = plan(builds, policy, heads, running, now, frozenset(pinned))
+    result.removed += remove
+    result.kept += kept
     if result.dry_run or not remove:
         return result
     gone = {b.path.resolve() for b in remove}
