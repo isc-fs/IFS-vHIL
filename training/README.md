@@ -96,6 +96,38 @@ The car is the ground truth. The vHIL is one data point.
 - **CAN buses.** ACU (ECU FDCAN2 <-> AMS FDCAN1), inverter (ECU FDCAN1),
   dash (ECU FDCAN3).
 
+## For instructors: running a session
+
+**Where.** On the team's vHIL host (`deploy/compose.prod.yaml`) the page is
+`<the host>/training/`. Anyone in the isc-fs GitHub organisation signs in with
+GitHub; nobody else gets in. Progress is per GitHub login and kept in the
+host's backups (`deploy/backup.py`, `training.json`). Locally,
+`scripts/vhil-docker.sh server` is the same page with no login.
+
+**Before a session.** A deploy builds every puzzle's firmware once
+(`training-prebuild` in `deploy/compose.prod.yaml`; by hand:
+`python -m vhil.training_fw prebuild`), so a trainee's first car run waits for
+no build. A firmware check still builds the trainee's own edit (a minute or
+two). The host runs at most `VHIL_WORKERS` (2) cars at once and queues the
+rest, so with a big group, pair trainees up. A trainee's edited firmware is
+removed a day after it was last used (`VHIL_TRAINING_KEEP_HOURS`).
+
+**Order.** Level 1 first; each teaches one part of the car:
+
+| Puzzle | Level | Fault | Teaches |
+|---|---|---|---|
+| `car-wont-arm` | 1 | hardware | The shutdown circuit, why nothing happens and nothing errors |
+| `precharge-never-finishes` | 1 | hardware | Precharge and the DC link, a voltage divider |
+| `ams-trips-at-power-on` | 1 | firmware | AMS fault reasons, cell limits, the config header |
+| `open-ntc-opens-the-sdc` | 2 | hardware | Cell temperatures, the AMS latch in the SDC |
+| `ecu-heartbeat-stops` | 2 | firmware | ECU <-> AMS heartbeat; the symptom on one board, the bug on the other |
+| `ams-cant-hear-the-car` | 2 | hardware | CAN wiring; the same fault reason as the last, a different cause |
+
+**While they work.** Let them read the fault reason and scrub the timeline
+before asking for a hint. When someone is stuck, ask what changed first, and
+on which board. After `ecu-heartbeat-stops`, give them
+`ams-cant-hear-the-car` and ask how they would tell the two apart on the car.
+
 ## For instructors: writing a puzzle
 
 A puzzle is `training/scenarios/<id>.yaml`:
