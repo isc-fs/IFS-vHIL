@@ -282,6 +282,21 @@ class CanBus:
         listen-only mode, so a board alone on the bus gets no ACK."""
         self._bus(f"SetAck {rn.quote(self.probe)} {_arg(bool(ack))}")
 
+    def set_connected(self, endpoint: str, connected: bool) -> None:
+        """Cut a board's controller (an endpoint of this bus, e.g. "ams.FDCAN1")
+        off the bus, or put it back: an open stub at its connector. Cut off, it
+        receives nothing and its frames get no ACK (VhilCanBus.cs, Open wire)."""
+        if endpoint not in self.sim.system.buses[self.name]["nodes"]:
+            raise ValueError(f"{endpoint} is not on bus '{self.name}'")
+        board = endpoint.split(".")[0]
+        path = self.sim.system.resolve(endpoint)[2]
+        leaf = path.split(".")[-1]
+        names = [n for n, v in self.nodes().items()
+                 if v["machine"] == board and n.split(":")[-1].split(".")[-1] == leaf]
+        if len(names) != 1:
+            raise ValueError(f"{endpoint}: no single node of bus '{self.name}' is {board}'s {path}")
+        self._bus(f"SetConnected {rn.quote(names[0])} {_arg(bool(connected))}")
+
     def frames(self, ids=None, since_us: int = 0) -> list[Frame]:
         return parse_frames(self.sim.monitor(f'{self.probe} Frames {_ids(ids)} {_int(since_us)}'))
 

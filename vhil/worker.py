@@ -494,6 +494,11 @@ def execute_scenario(sim, scenario: dict, trace: TraceWriter, *,
             at(t_us, lambda b=s["board"], port=port, pin=pin, lv=s["level"]:
                sim.io(b).set_input(port, pin, lv))
             note(t_us, f"{what} {s['board']}.{s['pin']} = {int(s['level'])}")
+        elif kind == "can_wire":
+            at(t_us, lambda bus=sim.can(s["bus"]), n=s["node"], c=s["connected"]:
+               bus.set_connected(n, c))
+            note(t_us, f"{what} {s['bus']}: {s['node']} "
+                       f"{'connected' if s['connected'] else 'cut off (open stub)'}")
         elif kind == "analog":
             at(t_us, lambda b=s["board"], pin=s["pin"], v=s["volts"]: sim.io(b).set_voltage(pin, v))
             note(t_us, f"{what} {s['board']}.{s['pin']} = {s['volts']} V")
@@ -1000,7 +1005,8 @@ def load_summary(loads: dict[str, list[float]]) -> dict:
             for bus, v in loads.items() if v}
 
 
-STIMULUS_KINDS = ("can_send", "can_periodic", "stop_periodic", "gpio", "analog", "watch", "plant")
+STIMULUS_KINDS = ("can_send", "can_periodic", "stop_periodic", "gpio", "analog", "watch", "plant",
+                  "can_wire")
 
 
 def has_symbol(sim, board: str, name: str) -> bool:

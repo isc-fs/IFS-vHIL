@@ -421,6 +421,37 @@ def test_a_lone_ams_retries_flushes_and_stays_error_passive(images):
         assert sim.read_symbol("ams", "g_state_telemetry") == 0
 
 
+def test_a_board_cut_off_the_bus_hears_nothing_and_goes_error_passive(images):
+    """An open stub at the AMS's ACU connector (SetConnected false, a
+    training fault): the AMS is alone on a wire of its own. Its frames get
+    ACK errors there, TEC to 128 (error-passive, as a lone AMS), and never
+    reach the bus: not in the timeline, not at the probe. The ECU's
+    heartbeat goes on, acknowledged by the probe, and the AMS no longer
+    hears it. Reconnected, the AMS's frames come back."""
+    with Sim(REPO / "systems" / "ecu-ams.yaml", images("ecu-ams"), arbitration=["can_acu"]) as sim:
+        sim.wait_for_app()
+        acu = sim.can("can_acu")
+        sim.run_for(ms=200)
+        acu.set_connected("ams.FDCAN1", False)
+        t0 = sim.run_for(ms=500)
+        tl = acu.timeline(since_us=t0 - 500_000)
+        assert {r.node.split(":")[0] for r in tl} == {"ecu"}, "a cut-off AMS frame reached the bus"
+        assert {r.outcome for r in tl} == {"ok"}
+        assert acu.count([VCU_HEARTBEAT], since_us=t0 - 400_000) >= 38
+        assert all(f.id != 0x6C0 for f in acu.frames(since_us=t0 - 400_000))
+        ams = next(n for n, v in acu.nodes().items() if v["machine"] == "ams")
+        assert acu.nodes()[ams]["tec"] == 128 and acu.nodes()[ams]["ack_errors"] >= 16
+        psr = reg(sim, "ams", FDCAN1, PSR)
+        assert psr & EP and not psr & BO
+
+        acu.set_connected("ams.FDCAN1", True)
+        t1 = sim.run_for(ms=500)
+        back = [r for r in acu.timeline(since_us=t1 - 500_000) if r.node.startswith("ams:")]
+        assert back and {r.outcome for r in back} == {"ok"}
+        with pytest.raises(ValueError):
+            acu.set_connected("ecu.FDCAN1", False)       # the inverter bus's, not this one's
+
+
 # -- exit criterion 4: a bus-load scenario from the car ---------------------------
 
 class Car:

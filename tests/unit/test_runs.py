@@ -1836,6 +1836,20 @@ def test_a_plant_row_must_name_a_plant_and_what_it_has():
         {"kind": "plant", "plant": "ts", "set": {"c_scale": 2, "sense_floor": 48}}]}), system) == []
 
 
+def test_a_can_wire_row_names_a_node_of_its_bus():
+    """can_wire cuts a board's stub off a bus (VhilCanBus.cs, Open wire): its
+    node must be one of the bus's endpoints."""
+    from vhil.server.runs import RunScenario, check_scenario
+    system = System(ECU_AMS_SYSTEM)
+
+    def errors(**row):
+        return check_scenario(RunScenario.model_validate({"kind": "run", "stimuli": [
+            {"kind": "can_wire", "connected": False, **row}]}), system)
+    assert errors(bus="can_acu", node="ams.FDCAN1") == []
+    assert any("no bus 'can_nope'" in e for e in errors(bus="can_nope", node="ams.FDCAN1"))
+    assert any("ecu.FDCAN1 is not on bus 'can_acu'" in e
+               for e in errors(bus="can_acu", node="ecu.FDCAN1"))
+
 def test_a_plant_signal_reads_the_plant_records():
     from vhil import expect as vexpect
     recs = [{"kind": "plant", "t_us": 6_488_500, "plant": "ts", "name": "air_pos_close_ratio",

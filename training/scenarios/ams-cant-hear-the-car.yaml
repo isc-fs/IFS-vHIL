@@ -1,0 +1,66 @@
+kind: training
+title: "The AMS can't hear the car"
+summary: "LV on, the AMS boots fine, but arming ends in an AMS error every time. The firmware is the team's release. Find the part."
+level: 2
+fault: hardware
+topics: [CAN, wiring, ECU <-> AMS]
+system: ecu-ams
+firmware:
+  ecu: 44610a5366ad5c785751a6eccb1cf4a8616890ca
+  ams: 94b59a9e5bc5a5fe90705018ebcd8e6a23e851d0
+brief: |
+  **From the workshop:** "We had the accumulator out for a cell swap and put it back
+  this morning. Same firmware as last week. Now every time we arm, the AMS goes to
+  Error."
+
+  Run the car. Read the AMS's fault reason, then use the CAN trace to find out who
+  is talking to whom. Find **which part** stops the car from arming, and name it.
+
+  Out of scope: analog and physical effects (EMI, noise, soldering).
+drive:
+  # RST_EXT, TSMS on, one DASH_CHG press: how the car is armed.
+  virtual_ms: 12000
+  stimuli:
+    - {kind: plant, name: sdc-reset, at_ms: 5400, plant: sdc, set: {reset: true}}
+    - {kind: plant, name: sdc-reset-release, at_ms: 5450, plant: sdc, set: {reset: false}}
+    - {kind: plant, name: tsms-on, at_ms: 5500, plant: sdc, set: {tsms: true}}
+    - {kind: gpio, name: dash-press, at_ms: 5600, board: ams, pin: PF10, level: true}
+    - {kind: gpio, name: dash-release, at_ms: 5650, board: ams, pin: PF10, level: false}
+  watch:
+    - {kind: symbol, board: ams, name: g_state_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_reason_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ams, name: g_fault_detail_telemetry, size: 1, period_ms: 10}
+    - {kind: symbol, board: ecu, name: g_last_ctrl_state, size: 1, period_ms: 10}
+    - {kind: pin, board: ams, pin: PB4}
+  # A healthy car: what the fixed one must do (test_solved).
+  expect:
+    - {check: never, name: no-ams-error, at_ms: 0, signal: "symbol:ams.g_state_telemetry", value: 5}
+    - {check: always, name: ams-ok, at_ms: 4500, signal: "pin:ams.PB4", value: high}
+    - {check: eventually, name: ams-run, at_ms: 5600, until_ms: 10600, signal: "symbol:ams.g_state_telemetry", value: 3}
+    - {check: always, name: sdc-closed-in-run, at_ms: 10800, signal: "plant:sdc.sdc_closed", value: 1}
+# The seeded fault: the AMS's ACU CAN stub is open at its connector (put back without
+# the plug fully mated): the AMS hears nothing and nobody hears it.
+faults:
+  - {kind: can_wire, name: acu-stub-open, at_ms: 0, bus: can_acu, node: ams.FDCAN1, connected: false}
+hints:
+  - "Read the AMS's fault reason on the AMS box in the diagram. Reason 11 is VcuStale: in Car mode the AMS must hear the ECU's (VCU's) 0x100 heartbeat at least every 200 ms, and it didn't."
+  - "Is the ECU sending it? Open the CAN trace tab, pick can_acu and type 100 in the ids box. Then clear the box: which frames on the ACU bus come from the AMS (its status 0x020, 0x4A0, 0x6C0...)?"
+  - "The ECU talks and nobody answers; the AMS boots and hears nothing. Both firmwares are fine. What joins the two boards, and what was unplugged this morning?"
+answer:
+  part: can.acu
+  explain: |
+    The AMS's ACU CAN stub was open at its connector (J1.9/J1.10, CAN_H/L_ACU): the
+    accumulator went back in without the plug fully mated. The ECU's frames still
+    went out and were acknowledged by the rest of the bus, but the AMS heard none of
+    them, and none of its own frames got onto the bus: alone on its wire they got no
+    ACK, so its controller went error-passive and kept retrying. At the DASH press the
+    AMS locked Car mode and latched VcuStale (reason 11) at once, because no 0x100 had
+    ever arrived. The ECU waited in Precharge for an AMS it never heard. The clue is
+    in the CAN trace: a board whose frames are missing entirely is not a firmware
+    bug. On the car: check the connector, then, power off, check continuity of
+    CAN_H and CAN_L from the AMS's connector to the ECU's.
+sources:
+  - docs/backplanes/ams.md (CAN_H/L_ACU, J1.9/J1.10)
+  - models/renode/VhilCanBus.cs (Open wire)
+solved:
+  - "training/tests/test_puzzles.py::test_solved[ams-cant-hear-the-car]"
