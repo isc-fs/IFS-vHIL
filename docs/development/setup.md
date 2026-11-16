@@ -39,6 +39,16 @@ scripts/vhil-docker.sh shell
 
 What a host needs (cores, RAM, disk, VM size): [hardware.md](hardware.md).
 
+On an arm64 host (Apple Silicon, arm64 Linux), `fw` builds in the x86 image,
+through Rosetta (Colima's `--vz-rosetta`, Docker Desktop) or qemu. Arm's
+x86-hosted and arm64-hosted builds of the same toolchain release ship
+different prebuilt C libraries, so only an x86-hosted build gives the image
+CI builds, byte for byte; the uDV's fingerprints differ otherwise (#351). It
+pulls the x86 image once (`ifs-vhil:<key>-amd64`, ~3.5 GB). With local
+images (uncommitted `docker/` changes), no Rosetta or qemu, or
+`VHIL_FW_NATIVE=1`, it builds natively and warns. A Colima VM created
+before this needs `colima stop vhil && colima start vhil --vz-rosetta` once.
+
 On macOS it uses a Colima VM rather than Docker Desktop: Docker Desktop's
 LinuxKit kernel has no vcan, so IFS_HIL's suites could not reach the buses.
 Colima's Ubuntu image lacks `linux-modules-extra` for its shipped kernel, so

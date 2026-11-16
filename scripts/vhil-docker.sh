@@ -46,6 +46,10 @@
 # recipe: FW_LOCAL="ecu=$HOME/src/IFS08-CE-ECU" (firmware id = absolute
 # path, no spaces; mounted read-only, copied to /vhil/fw/<id>@local and
 # built there, incrementally). FW_LOCAL_ONLY=1 builds just those images.
+# On an arm64 host, `fw` builds in the x86 (linux/amd64) image, through
+# Rosetta or qemu: the Arm toolchain's two host builds ship different
+# prebuilt C libraries, so only an x86-hosted build gives the image CI does
+# (#351). VHIL_FW_NATIVE=1 builds natively instead.
 # VHIL_DOCKER_CPUS=N limits the container to N
 # cores (--cpus, --cpuset-cpus), as a CI-class host: GitHub's runners have 4.
 # VHIL_FAST_FORWARD=0 passes through, to run Renode without the busy-wait
@@ -100,7 +104,7 @@ fi
 vm() {
     if ! colima status "$profile" >/dev/null 2>&1; then
         colima start "$profile" --cpu "${VHIL_CPUS:-8}" --memory "${VHIL_MEMORY:-8}" \
-            --disk 40 --vm-type vz --arch aarch64
+            --disk 40 --vm-type vz --vz-rosetta --arch aarch64
     fi
     # Colima's Ubuntu image ships without linux-modules-extra (vcan), and the
     # archive only carries it for the current kernel: move to that kernel
@@ -186,6 +190,36 @@ ensure_images() {
     base_tag=$base editor_tag=$editor
 }
 
+# The x86 image of this checkout for `fw` on an arm64 host (#351): sets
+# fw_ref and fw_platform, or leaves them empty (and says why) to build natively.
+fw_ref='' fw_platform=()
+x86_fw() {
+    [ "${VHIL_FW_NATIVE:-0}" = 1 ] && return
+    case $("${docker[@]}" info --format '{{.Architecture}}') in x86_64|amd64) return ;; esac
+    local why=
+    if [ "$base_tag" = latest ]; then
+        why="the images are a local build (docker/ has uncommitted changes)"
+    else
+        local ref=$base_image:$base-amd64
+        if ! have "$ref"; then
+            echo "pulling the x86 image ($registry/ifs-vhil:$base) to build firmware as CI does (#351)" >&2
+            if "${docker[@]}" pull -q --platform linux/amd64 "$registry/ifs-vhil:$base" >/dev/null; then
+                "${docker[@]}" tag "$registry/ifs-vhil:$base" "$ref"
+            fi
+        fi
+        if ! have "$ref"; then
+            why="no x86 image of this checkout could be pulled"
+        elif ! "${docker[@]}" run --rm --platform linux/amd64 "$ref" true >/dev/null 2>&1; then
+            why="this Docker can't run x86 images (Colima: colima start $profile --vz-rosetta)"
+        else
+            fw_ref=$ref fw_platform=(--platform linux/amd64)
+            return
+        fi
+    fi
+    echo "warning: building firmware natively: $why. The uDV image then differs from CI's" >&2
+    echo "  (the Arm toolchain's prebuilt C library differs by host, #351); VHIL_FW_NATIVE=1 silences this." >&2
+}
+
 # Run a script in the container. For vcan jobs, host networking puts
 # can0..can2 in the VM's namespace, where they outlive the container, and
 # --privileged lets the container create them.
@@ -193,11 +227,13 @@ in_container() {
     ensure_images
     local ref=$base_image:$base_tag
     [ "$image" = "$editor_image" ] && ref=$editor_image:$editor_tag
+    [ -n "$fw_ref" ] && ref=$fw_ref
     local tty=()
     [ -t 0 ] && [ -t 1 ] && tty=(-it)
     # VHIL_DOCKER_NAME names the container, so a caller (the VS Code
     # extension's Cancel) can stop it with `docker kill`.
     "${docker[@]}" run --rm ${tty[@]+"${tty[@]}"} ${run_args[@]+"${run_args[@]}"} \
+        ${fw_platform[@]+"${fw_platform[@]}"} \
         ${VHIL_DOCKER_NAME:+--name "$VHIL_DOCKER_NAME"} \
         ${cpu_args[@]+"${cpu_args[@]}"} ${src_args[@]+"${src_args[@]}"} \
         -v "$repo:/work" -v vhil-data:/vhil \
@@ -225,6 +261,8 @@ pull) pull_images ;;
 image) build_images ;;
 fw)
     [ $# -gt 0 ] || set -- ecu ams
+    ensure_images
+    x86_fw
     in_container "$prelude"'
         refs=(); for r in $FW_REFS; do refs+=(--ref "$r"); done
         for r in $FW_SOURCES; do refs+=(--source "$r"); done
