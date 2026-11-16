@@ -128,3 +128,58 @@ def test_signals_trace_a_pin_to_the_backplane(client):
     ok = sig[("ams", "PB4")]
     assert (ok["signal"], ok["net"], ok["module_pins"], ok["connector"]) == \
         ("AMS_OK", "GPIO1", ["J3.6"], "J1.4")
+
+
+# -- a seeded firmware puzzle (vhil/training_fw.py) ---------------------------------
+
+SEEDED = "ams-trips-at-power-on"
+
+
+def test_a_seeded_puzzle_names_its_patch_and_its_editable_files():
+    from vhil import training_fw
+    p = tr.puzzles()[SEEDED]
+    seed = p.seed_run()
+    assert seed["image"] == "ams" and seed["edits"] == {} and seed["puzzle"] == SEEDED
+    assert training_fw.patch_files(seed["patch"]) == ["Core/Inc/app/ams_config.hpp"]
+    assert p.public()["seeded"] == "ams" and "seed" not in p.public()
+    # Its check runs the pinned commits: the fix is in the edits, not a ref.
+    assert [r["firmware"] for r in p.check_run()] == [p.firmware]
+
+
+def test_a_trainee_edits_only_the_seeded_files():
+    from vhil import training_fw
+    patch = tr.puzzles()[SEEDED].seed.text()
+    assert training_fw.check_edits(patch, {"Core/Inc/app/ams_config.hpp": "x"}) == []
+    assert training_fw.check_edits(patch, {"Core/Src/main.cpp": "x"})
+    assert training_fw.check_edits(patch, {"../../etc/passwd": "x"})
+    big = "x" * (training_fw.MAX_EDIT_BYTES + 1)
+    assert training_fw.check_edits(patch, {"Core/Inc/app/ams_config.hpp": big})
+
+
+def test_a_seed_must_be_a_firmware_fault_on_a_pinned_image():
+    doc = tr.puzzles()[SEEDED].model_dump()
+    doc["seed"]["image"] = "ecu"
+    assert any("answer's board" in e or "pinned" in e for e in tr.Puzzle.model_validate(doc).check())
+    with pytest.raises(ValueError):
+        tr.Seed(image="ams", patch="../secret.patch")
+
+
+def test_a_seeded_car_and_its_check_carry_the_seed(client):
+    assert client.post(f"/api/training/puzzles/{SEEDED}/start").status_code == 201
+    car = client.get(f"/api/training/puzzles/{SEEDED}").json()["progress"]["car_run"]
+    from vhil.server.runs import RunStore
+    store = RunStore(client.app.state.settings.db)
+    assert store.get(car)["seed"]["image"] == "ams" and store.get(car)["seed"]["edits"] == {}
+    assert client.post(f"/api/training/puzzles/{SEEDED}/diagnose", json={"location": {
+        "part": "firmware", "board": "ams", "module": "config"}}).json()["correct"]
+    path = "Core/Inc/app/ams_config.hpp"
+    assert client.post(f"/api/training/puzzles/{SEEDED}/check", json={}).status_code == 422
+    assert client.post(f"/api/training/puzzles/{SEEDED}/check",
+                       json={"edits": {"Core/Src/main.cpp": "x"}}).status_code == 422
+    ids = client.post(f"/api/training/puzzles/{SEEDED}/check",
+                      json={"edits": {path: "fixed"}}).json()["run_ids"]
+    assert ids and all(store.get(i)["seed"]["edits"] == {path: "fixed"} for i in ids)
+    # An ordinary run never has one.
+    assert client.post("/api/runs", json={"system": "ecu-ams", "scenario": {
+        "kind": "run", "virtual_ms": 100}}).status_code in (201, 200)
+    assert all(not r["seed"] for r in store.list() if r["id"] not in [car, *ids])

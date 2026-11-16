@@ -132,7 +132,7 @@ async function puzzlePage(pid) {
           : P.fault === "hardware"
             ? h("button", { onclick: () => check(null), disabled: checks.some((s) => !TERMINAL.has(s)) },
                 "Replace the part and run the check")
-            : fixForm(),
+            : P.seeded ? editForm(car, checks) : fixForm(),
         last ? h("p", { class: "small" }, "Check: ", ...last.run_ids.map((i, k) => h("a", {
           href: `/editor/?run=${i}`, target: "_blank", rel: "noopener", class: `state ${checks[k]}` }, `run ${i} ${checks[k]}  `))) : null),
       pr.solved ? h("section", { class: "step done solved" }, h("h3", {}, "Solved"),
@@ -148,6 +148,71 @@ async function puzzlePage(pid) {
     return h("div", { class: "fix" },
       h("p", { class: "small" }, `Fix it in the ${P.answer?.board?.toUpperCase() || "board"}'s firmware repository, push a branch, and check it here. The check builds that ref and runs the grading tests.`),
       input, h("button", { onclick: () => check(input.value.trim()) }, "Check my fix"));
+  }
+
+  // A seeded firmware puzzle: the seeded files, as the car built them (its
+  // run's firmware-source/ artifacts), edited in a wide dialog and built by
+  // the check.
+  function editForm(car, checks) {
+    const busy = checks.some((x) => !TERMINAL.has(x));
+    return h("div", { class: "fix" },
+      h("p", { class: "small" }, `Fix it in the ${String(P.seeded).toUpperCase()} source your car was built from. The check builds your version with the team's recipe, powers the car on and runs the grading tests.`),
+      h("button", { disabled: !car || busy, onclick: () => openEditor() },
+        busy ? "Building and checking…" : S.edits ? "Open my edited source" : "Open the source"));
+  }
+
+  async function openEditor() {
+    const dlg = h("dialog", { class: "diag editor" });
+    const close = () => { dlg.close(); dlg.remove(); };
+    document.body.append(dlg);
+    dlg.showModal();
+    dlg.append(h("p", { class: "muted" }, "Loading the source…"));
+    let files;
+    try {
+      files = await loadSource(pr_car());
+    } catch (e) {
+      dlg.replaceChildren(h("p", {}, `Could not load the source: ${e.message}`),
+        h("button", { class: "secondary", onclick: close }, "Close"));
+      return;
+    }
+    if (!files.length) {
+      dlg.replaceChildren(h("p", {}, "Run your car first: the source comes from its build."),
+        h("button", { class: "secondary", onclick: close }, "Close"));
+      return;
+    }
+    const areas = files.map(([path, text]) => [path, h("textarea", {
+      class: "code", spellcheck: "false", "aria-label": path, wrap: "off",
+      oninput: (e) => { S.edits = { ...(S.edits || {}), [path]: e.target.value }; },
+    }, S.edits?.[path] ?? text)]);
+    dlg.replaceChildren(
+      h("h3", {}, `${String(P.seeded).toUpperCase()} firmware source`),
+      h("p", { class: "small muted" }, "Only the file below can be changed. Your edits are kept while this page is open."),
+      ...areas.flatMap(([path, ta]) => [h("p", { class: "small mono" }, path), ta]),
+      h("div", { class: "row" },
+        h("button", { onclick: async () => {
+          S.edits = Object.fromEntries(areas.map(([path, ta]) => [path, ta.value]));
+          close();
+          await check(null, S.edits);
+        } }, "Build and check my fix"),
+        h("button", { class: "secondary", onclick: () => {
+          S.edits = null;
+          for (const [path, ta] of areas) ta.value = files.find(([p]) => p === path)[1];
+        } }, "Undo my edits"),
+        h("button", { class: "secondary", onclick: close }, "Close")));
+  }
+
+  const pr_car = () => data.progress.car_run;
+
+  async function loadSource(runId) {
+    if (S.source?.run === runId) return S.source.files;
+    const { data: names } = await api(`/api/runs/${runId}/artifacts`);
+    const files = [];
+    for (const n of (names || []).filter((x) => x.startsWith("firmware-source/"))) {
+      const res = await fetch(`/api/runs/${runId}/artifacts/${n}`, { credentials: "same-origin" });
+      if (res.ok) files.push([n.slice("firmware-source/".length), await res.text()]);
+    }
+    S.source = { run: runId, files };
+    return files;
   }
 
   async function reload() {
@@ -174,9 +239,10 @@ async function puzzlePage(pid) {
     await reload();
   }
 
-  async function check(ref) {
+  async function check(ref, edits = null) {
     try {
-      await api(`/api/training/puzzles/${pid}/check`, { method: "POST", body: { fix_ref: ref } });
+      await api(`/api/training/puzzles/${pid}/check`, { method: "POST",
+        body: edits ? { edits } : { fix_ref: ref } });
     } catch (e) { alert(e.message); }
     await reload();
   }

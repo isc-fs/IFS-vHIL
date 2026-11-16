@@ -129,6 +129,9 @@ rules:
   - name: web app (server, live session, the shell the editor embeds)
     paths: [vhil/server/**]
     select: {editor: true, markers: [server, live_session], scenarios: ['*'], importers: true}
+  - name: training puzzles (training only, their tests outside the gate)
+    paths: [training/**, vhil/training.py, vhil/training_fw.py]
+    select: {}
 
   # -- systems, scenarios, firmware -----------------------------------------
   - name: a system

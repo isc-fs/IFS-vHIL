@@ -45,6 +45,10 @@ input, select { font: inherit; background: var(--bg-2); color: var(--fg); border
 .hints { padding-left: 18px; font-size: var(--fs-dense); }
 .hints li { margin-bottom: var(--sp-2); }
 .fix input { width: 100%; margin-bottom: var(--sp-2); }
+dialog.diag.editor { width: min(1100px, 94vw); }
+dialog.diag.editor textarea.code { width: 100%; height: 60vh; box-sizing: border-box; font-family: var(--font-mono);
+                                   font-size: 12px; line-height: 1.45; white-space: pre; overflow: auto; resize: vertical;
+                                   background: var(--bg-0); color: var(--fg); border: 1px solid var(--line); }
 a.state.passed { color: var(--status-ok); } a.state.failed, a.state.error { color: var(--status-failed); }
 
 .center { display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: var(--sp-3); gap: var(--sp-3); }
