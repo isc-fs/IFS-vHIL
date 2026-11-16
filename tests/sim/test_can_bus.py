@@ -251,6 +251,64 @@ def assert_same_runs(runs):
 
 # -- exit criterion 2: saturation ---------------------------------------------
 
+# -- Tx FIFO misuse (#415) -----------------------------------------------------
+
+TXBC, TXESC, TXBAR = 0x0C0, 0x0C8, 0x0D0
+
+
+def _fdcan2(sim, prop):
+    return int(sim.monitor(f"sysbus.fdcan2_h7 {prop}", board="ecu").strip(), 16)
+
+
+def _put_frame(sim, buffer, can_id, payload):
+    """Write a classic 8-byte standard frame into FDCAN2's Tx buffer element
+    `buffer` (RM0468, Tx buffer element: T0 ID [28:18], T1 DLC [19:16]), as
+    FDCAN_CopyMessageToRAM does, and leave the request to the caller."""
+    txbc = reg(sim, "ecu", FDCAN2, TXBC)
+    size = (8, 12, 16, 20, 24, 32, 48, 64)[reg(sim, "ecu", FDCAN2, TXESC) & 7]
+    element = (txbc & 0xFFFC) + buffer * (8 + size)
+    words = [can_id << 18, 8 << 16, int.from_bytes(payload[:4], "little"), int.from_bytes(payload[4:], "little")]
+    for k, w in enumerate(words):
+        sim.monitor(f"sysbus.canMessageRAM WriteDoubleWord {element + 4 * k:#x} {w:#x}", board="ecu")
+
+
+def _request(sim, buffer):
+    sim.monitor(f"sysbus WriteDoubleWord {FDCAN2 + TXBAR:#x} {1 << buffer:#x}", board="ecu")
+
+
+def test_a_tx_request_on_a_pending_buffer_drops_the_new_frame_and_is_counted(ecu_acu):
+    """Two writers on one Tx FIFO without a lock (#415): both read the same put
+    index, the first requests it, the second overwrites the element and
+    requests it again while it is pending. TXBAR on a pending buffer changes
+    nothing (RM0468, FDCAN_TXBAR), so the second frame never goes out; the
+    model counts it in TxRequestsDropped, and a FIFO request off the put
+    index in TxRequestsOffPut. A request off the put index on a free buffer
+    still goes out. The ECU's own traffic (one Tx task) counts neither."""
+    sim = ecu_acu
+    can = sim.can("can_acu")
+    assert (_fdcan2(sim, "TxRequestsDropped"), _fdcan2(sim, "TxRequestsOffPut")) == (0, 0)
+    put = (reg(sim, "ecu", FDCAN2, TXFQS) >> 16) & 0x1F
+    t = sim.now_us()
+    _put_frame(sim, put, 0x201, b"\x01" * 8)
+    _request(sim, put)                       # the first writer
+    _put_frame(sim, put, 0x202, b"\x02" * 8)
+    _request(sim, put)                       # the second, on the same put index
+    sim.run_for(ms=20)
+    assert [f.id for f in can.frames([0x201, 0x202], since_us=t)] == [0x201]
+    assert (_fdcan2(sim, "TxRequestsDropped"), _fdcan2(sim, "TxRequestsOffPut")) == (1, 1)
+
+    put = (reg(sim, "ecu", FDCAN2, TXFQS) >> 16) & 0x1F
+    txbc = reg(sim, "ecu", FDCAN2, TXBC)
+    first, size = (txbc >> 16) & 0x3F, (txbc >> 24) & 0x3F    # NDTB, TFQS
+    off = first + (put - first + 2) % size
+    t = sim.now_us()
+    _put_frame(sim, off, 0x203, b"\x03" * 8)
+    _request(sim, off)
+    sim.run_for(ms=20)
+    assert [f.id for f in can.frames([0x203], since_us=t)] == [0x203]
+    assert (_fdcan2(sim, "TxRequestsDropped"), _fdcan2(sim, "TxRequestsOffPut")) == (1, 2)
+
+
 def test_a_saturating_sender_starves_lower_priority_and_fills_the_tx_fifo(ecu_acu):
     """A 0x012 stream above the bus's capacity: the bus is 100 % busy, the
     ECU's 0x100 (lower priority) never gets on it, its 16-deep TX FIFO fills
