@@ -108,7 +108,7 @@ A puzzle is `training/scenarios/<id>.yaml`:
 | `firmware` | Image key -> full commit SHA: what the trainee's car runs. A firmware puzzle pins the real commit before the team's fix, never a patch. |
 | `brief` | What the trainee is told, in the team's words |
 | `drive` | The drive cycle: a scenario's `stimuli`, `watch` and `expect` (`docs/scenarios.md`). `expect` is what a healthy car does. |
-| `faults` | Hardware faults, as scenario stimulus rows (for example `{kind: plant, plant: ts, set: {open_ntc_module: 3, open_ntc_slot: 7}}`). Removed by the repair. |
+| `faults` | Hardware faults, as scenario stimulus rows (for example `{kind: plant, plant: ts, set: {open_ntc_module: 3, open_ntc_slot: 7}}`, or an open CAN stub: `{kind: can_wire, bus: can_acu, node: ams.FDCAN1, connected: false}`). Removed by the repair. |
 | `seed` | A firmware fault: `{image: ams, patch: patches/<name>.patch}`, a patch on the pinned commit of that image. The trainee can edit only the files it touches. |
 | `hints` | Staged, most general first |
 | `answer` | The location: a part from `vhil/training.py` `PARTS` and its fields, and the explanation shown once solved |
