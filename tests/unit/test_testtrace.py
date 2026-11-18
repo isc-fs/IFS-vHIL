@@ -156,3 +156,31 @@ def test_pytest_vscode_result_carries_trace_and_snapshots(tmp_path):
     assert [x["kind"] for x in lines] == ["snapshot", "result"]
     assert lines[0]["id"] == "t::a"
     assert lines[1]["trace"] == "traces/a.trace.jsonl"
+
+
+def test_a_fixture_sim_the_test_did_not_run_gets_the_time_before_it(tmp_path, monkeypatch):
+    """A module fixture's Sim, asserted on as it stood: not an empty trace."""
+    monkeypatch.setattr(testtrace, "decoder_of", lambda sim: testtrace.Decoder(CONTRACT))
+    sim = _fake(tmp_path)
+    sim.last_activity = 0                       # nothing ran during the test
+    monkeypatch.setattr(vsim, "live_sims", lambda: [sim])
+    monkeypatch.setattr(vsim, "activity", lambda: 10)
+    plugin = testtrace.Plugin(tmp_path / "traces", tmp_path)
+    item = types.SimpleNamespace(nodeid="t.py::b", funcargs={"ams": sim})
+    plugin.pytest_runtest_setup(item)
+    plugin.pytest_runtest_logfinish("t.py::b", None)
+    recs = testtrace.read(testtrace.RESULTS.pop("t.py::b")["trace"])
+    meta = recs[0]
+    assert meta["sims"][0]["context_us"] == testtrace.CONTEXT_US
+    assert [r["kind"] for r in recs[1:]] == ["can", "gpio"]   # no UART: bytes without times
+
+
+def test_a_sim_the_test_neither_used_nor_ran_stays_out(tmp_path, monkeypatch):
+    sim = _fake(tmp_path)
+    sim.last_activity = 0
+    monkeypatch.setattr(vsim, "live_sims", lambda: [sim])
+    monkeypatch.setattr(vsim, "activity", lambda: 10)
+    plugin = testtrace.Plugin(tmp_path / "traces", tmp_path)
+    plugin.pytest_runtest_setup(types.SimpleNamespace(nodeid="t.py::c", funcargs={}))
+    plugin.pytest_runtest_logfinish("t.py::c", None)
+    assert "t.py::c" not in testtrace.RESULTS

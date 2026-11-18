@@ -12,7 +12,10 @@ Records (every one has `kind`; those from a Sim have `sim`, its system id,
 
     meta      version, test, outcome, end_us (virtual time the test ended at,
               the failure's when it failed), sims [{sim, system, boards, buses,
-              end_us, decoded: [bus,...]}]
+              end_us, decoded: [bus,...], context_us}]; context_us only on a
+              Sim the test used without running it (a module fixture's,
+              asserted on as it stood): its records are the CONTEXT_US of
+              virtual time before the test instead of an empty trace
     can       t_us (frame start), end_us, sim, bus, node, id, ext, remote, dlc,
               data (hex), outcome (ok | ack | lost; a hub bus' frames are ok),
               and, when the firmware's contract knows the id: name, sender,
@@ -46,6 +49,7 @@ from vhil import candef
 
 VERSION = 1
 BUS_TAIL = 30
+CONTEXT_US = 1_000_000
 
 
 # -- decoding -------------------------------------------------------------------
@@ -323,6 +327,8 @@ class Plugin:
         self.mark = 0
         self.outcome = "passed"
         self.sims: list[tuple[str, str, list, int]] = []   # (label, system, records, end_us)
+        self.taken: set[int] = set()                        # id(sim) of what this test ran
+        self.context_labels: set[str] = set()               # labels of context-only Sims
         self.cursors: dict[int, Cursor] = {}               # id(sim) -> Cursor
         self.seen: list = []                                # keeps a Sim's id from being reused
 
@@ -336,15 +342,33 @@ class Plugin:
             return
         cursor = self.cursors.setdefault(id(sim), Cursor())
         self.seen.append(sim)
+        self.taken.add(id(sim))
         label = self._label(sim.system.id)
         records, end = collect(sim, label, cursor)
         self.sims.append((label, sim.system.id, records, end))
+
+    def context(self, sim) -> None:
+        """A Sim the test used but didn't run: what it recorded in the
+        CONTEXT_US before now. Its cursor stays where it was, and UART lines
+        (bytes without times) are left out."""
+        if id(sim) in self.taken:
+            return
+        try:
+            now = sim.now_us()
+            uart = {k: Path(p).stat().st_size for k, p in sim.uart_logs.items() if Path(p).exists()}
+        except Exception:   # noqa: BLE001 - a trace never fails a test
+            return
+        label = self._label(sim.system.id)
+        records, end = collect(sim, label, Cursor(us=max(0, now - CONTEXT_US), uart=uart))
+        self.sims.append((label, sim.system.id, records, end))
+        self.context_labels.add(label)
 
     # hooks
 
     def pytest_runtest_setup(self, item):
         from vhil import sim as sim_module
         self.item, self.outcome, self.sims = item, "passed", []
+        self.taken, self.context_labels = set(), set()
         self.mark = sim_module.activity()
         _SNAPSHOTS.pop(item.nodeid, None)
 
@@ -360,8 +384,14 @@ class Plugin:
         try:
             from vhil import sim as sim_module
             self.item = item
-            for sim in sim_module.live_sims():
+            live = list(sim_module.live_sims())
+            for sim in live:
                 self.take(sim)
+            # A fixture's Sim the test only asserted on: the time before it.
+            used = [v for v in getattr(item, "funcargs", {}).values()
+                    if any(v is s for s in live)]
+            for sim in used:
+                self.context(sim)
             self.item = None
             self.finish(nodeid)
         except Exception:   # noqa: BLE001 - a trace never fails a test
@@ -386,7 +416,8 @@ class Plugin:
                 "end_us": end,
                 "sims": [{"sim": lab, "system": s, "end_us": e,
                           "decoded": sorted({r["bus"] for r in recs
-                                             if r["kind"] == "can" and "name" in r})}
+                                             if r["kind"] == "can" and "name" in r}),
+                          **({"context_us": CONTEXT_US} if lab in self.context_labels else {})}
                          for lab, s, recs, e in self.sims]}
         path = write(self.dir, nodeid, [meta, *records, *snapshots])
         RESULTS[nodeid] = {"trace": path, "snapshots": snapshots}
