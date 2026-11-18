@@ -16,7 +16,7 @@ import * as vscode from "vscode";
 
 import {
   builtFirmware, collectArgs, dockerContext, fileOf, Item, Job, labelOf, parseLines, plan,
-  Record, runArgs, SUITES,
+  Record, runArgs, startsVm, SUITES,
 } from "./plan";
 import {
   buildSystem, Firmware, firmwareForRepo, firmwareOf, repoSlug, systemsOf, testRuns,
@@ -372,9 +372,15 @@ class Vhil implements vscode.Disposable {
       .filter((r) => !this.local || testRuns(r, this.local.firmware.id, systems));
     if (!items.length) {
       this.log.show(true);
-      void vscode.window.showErrorMessage(
-        `vHIL: listing the tests failed (exit ${code}). Is the Docker VM up? See the vHIL output.`,
-        "Start VM").then((a) => { if (a) void this.task("Start the Docker VM", ["vm"]); });
+      const { context } = this.config();
+      if (startsVm(context)) {
+        void vscode.window.showErrorMessage(
+          `vHIL: listing the tests failed (exit ${code}). Is the Docker VM up? See the vHIL output.`,
+          "Start VM").then((a) => { if (a) void this.task("Start the Docker VM", ["vm"]); });
+      } else {
+        void vscode.window.showErrorMessage(
+          `vHIL: listing the tests failed (exit ${code}). Is Docker (context ${context}) running? See the vHIL output.`);
+      }
       return;
     }
     this.build(items, records);
@@ -695,8 +701,11 @@ class Vhil implements vscode.Disposable {
       description: `${c.context} · ${checking ? "checking…" : this.vmUp ? "up" : "down"}`,
       icon: this.vmUp ? "vm-running" : "vm-outline",
       color: this.vmUp === false ? "problemsWarningIcon.foreground" : undefined,
-      tooltip: this.vmUp === false ? `Docker context ${c.context} doesn't answer: start the VM.` : undefined,
-      context: this.vmUp ? "vm.up" : "vm.down",
+      tooltip: this.vmUp !== false ? undefined : startsVm(c.context)
+        ? `Docker context ${c.context} doesn't answer: start the VM.`
+        : `Docker context ${c.context} doesn't answer: start Docker.`,
+      // Only a Colima context gets the inline Start button (vm.down).
+      context: this.vmUp ? "vm.up" : startsVm(c.context) ? "vm.down" : "vm.external",
     });
     const images = node("Images", {
       description: "pull or rebuild", icon: "package", context: "images",
@@ -964,7 +973,8 @@ class Vhil implements vscode.Disposable {
     const actions: { label: string; run: () => unknown }[] = [
       { label: "$(beaker) Show the vHIL sidebar", run: () => vscode.commands.executeCommand("workbench.view.extension.vhil") },
       { label: "$(refresh) Refresh tests", run: () => this.refresh() },
-      { label: "$(vm) Start the Docker VM", run: () => this.task("Start the Docker VM", ["vm"]) },
+      ...(startsVm(this.config().context)
+        ? [{ label: "$(vm) Start the Docker VM", run: () => this.task("Start the Docker VM", ["vm"]) }] : []),
       { label: "$(tools) Build firmware…", run: () => this.buildFirmware() },
       { label: "$(type-hierarchy) Open the system editor", run: () => this.openEditor() },
       { label: "$(pulse) Check VM and firmware", run: () => this.checkStatus() },
