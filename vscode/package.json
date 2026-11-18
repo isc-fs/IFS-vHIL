@@ -91,6 +91,30 @@
         "title": "Show bus trace",
         "category": "vHIL",
         "icon": "$(pulse)"
+      },
+      {
+        "command": "vhil.newSystem",
+        "title": "New system\u2026",
+        "category": "vHIL",
+        "icon": "$(add)"
+      },
+      {
+        "command": "vhil.openSystemYaml",
+        "title": "Open the system file",
+        "category": "vHIL",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "vhil.runSystemScenarios",
+        "title": "Run its scenarios",
+        "category": "vHIL",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "vhil.openEditorInBrowser",
+        "title": "Open the system editor in the browser",
+        "category": "vHIL",
+        "icon": "$(link-external)"
       }
     ],
     "configuration": {
@@ -231,6 +255,68 @@
         {
           "command": "vhil.showTrace",
           "when": "false"
+        },
+        {
+          "command": "vhil.newSystem",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.openSystemYaml",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.openEditorInBrowser",
+          "when": "vhil.active"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "vhil.newSystem",
+          "when": "view == vhil.systems",
+          "group": "navigation@0"
+        },
+        {
+          "command": "vhil.refreshTests",
+          "when": "view == vhil.systems",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vhil.openSystemYaml",
+          "when": "view == vhil.systems && viewItem =~ /^vhilSystem/",
+          "group": "inline@1"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "view == vhil.systems && viewItem == vhilSystemWithScenarios",
+          "group": "inline@0"
+        },
+        {
+          "command": "vhil.openSystemInEditor",
+          "when": "view == vhil.systems && viewItem =~ /^vhilSystem/",
+          "group": "1_open@0"
+        },
+        {
+          "command": "vhil.openSystemYaml",
+          "when": "view == vhil.systems && viewItem =~ /^vhilSystem/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "view == vhil.systems && viewItem == vhilSystemWithScenarios",
+          "group": "2_run@0"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "vhil.openEditorInBrowser",
+          "when": "activeWebviewPanelId == 'vhil.editor'",
+          "group": "navigation"
         }
       ]
     },
@@ -241,6 +327,13 @@
           "title": "vHIL Trace",
           "icon": "media/vhil.svg"
         }
+      ],
+      "activitybar": [
+        {
+          "id": "vhil",
+          "title": "vHIL",
+          "icon": "media/vhil.svg"
+        }
       ]
     },
     "views": {
@@ -249,6 +342,13 @@
           "type": "webview",
           "id": "vhil.trace",
           "name": "vHIL Trace",
+          "when": "vhil.active"
+        }
+      ],
+      "vhil": [
+        {
+          "id": "vhil.systems",
+          "name": "Systems",
           "when": "vhil.active"
         }
       ]

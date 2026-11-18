@@ -4,6 +4,8 @@
 // the vHIL's Docker image through scripts/vhil-docker.sh, as CI runs them
 // (vscode/README.md). VS Code's own Test Results keep the run history.
 //
+// A sidebar view lists the systems (open one in the editor, make a new one).
+//
 // Two ways in: the IFS-vHIL checkout open as a folder, or a firmware
 // repository the catalogue builds (IFS08-CE-ECU, ...). In a firmware
 // repository the extension keeps its own checkout of the vHIL, builds the
@@ -28,6 +30,8 @@ import { barOf, findings, Fix, GROUP, groupId, Phase, scenarioSystem } from "./s
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
 import { TRACE_VIEW, TracePanel } from "./tracePanel";
+import { newSystemError, Row, rows } from "./systemsView";
+import { SystemsView } from "./systemsTree";
 
 const SCRIPT = "scripts/vhil-docker.sh";
 // Where the plugin's JSON lines go: results/ is git-ignored and inside /work.
@@ -166,6 +170,7 @@ class Vhil implements vscode.Disposable {
   private readonly traces = new Map<string, string>();
   private readonly snapshots = new Map<string, Snapshot[]>();
   private readonly tracePanel: TracePanel;
+  private readonly systemsView = new SystemsView();
   private readonly problems = vscode.languages.createDiagnosticCollection("vHIL firmware build");
   private readonly systemProblems = vscode.languages.createDiagnosticCollection("vHIL systems");
 
@@ -206,6 +211,7 @@ class Vhil implements vscode.Disposable {
     const command = (id: string, f: (...a: any[]) => unknown) => vscode.commands.registerCommand(id, f);
     this.disposables.push(
       this.controller, this.status, this.log, tests, systems, this.problems, this.systemProblems,
+      this.systemsView, vscode.window.registerTreeDataProvider("vhil.systems", this.systemsView),
       vscode.window.registerWebviewViewProvider(TRACE_VIEW, this.tracePanel,
         { webviewOptions: { retainContextWhenHidden: true } }),
       tests.onDidChange(later), tests.onDidCreate(later), tests.onDidDelete(later),
@@ -228,9 +234,20 @@ class Vhil implements vscode.Disposable {
       command("vhil.buildFirmware", () => this.buildFirmware()),
       command("vhil.openEditor", () => this.openEditor()),
       // From a scenario system's group in the Testing panel, or the palette.
-      command("vhil.openSystemInEditor", async (item?: vscode.TestItem) => {
-        const id = item?.id.startsWith(GROUP) ? item.id.split("/").pop() : await this.pickSystem("Open in the system editor");
+      // From the Systems view (its id), a scenario system's group in the Testing panel, or the palette.
+      command("vhil.openSystemInEditor", async (item?: vscode.TestItem | Row | string) => {
+        const id = systemOf(item) ?? await this.pickSystem("Open in the system editor");
         if (id) await this.openEditor(id);
+      }),
+      command("vhil.newSystem", () => this.newSystem()),
+      command("vhil.openSystemYaml", async (item?: Row | string) => {
+        const id = systemOf(item) ?? await this.pickSystem("Open which system file?");
+        if (id) await vscode.window.showTextDocument(vscode.Uri.file(path.join(this.repo, "systems", `${id}.yaml`)));
+      }),
+      command("vhil.runSystemScenarios", (item?: Row | string) => this.runScenarios(systemOf(item))),
+      command("vhil.openEditorInBrowser", async () => {
+        const url = await vscode.env.asExternalUri(vscode.Uri.parse(this.editorPage));
+        await vscode.env.openExternal(url);
       }),
       command("vhil.stopEditor", () => this.editorTask?.terminate()),
       command("vhil.tools", () => this.tools()),
@@ -395,6 +412,7 @@ class Vhil implements vscode.Disposable {
         this.env(), (t) => { text += t; }).done;
       this.built = builtFirmware(code === 0 ? text : "");
     }
+    this.updateView();
     if (!this.busy) this.setPhase(this.idlePhase());
   }
 
@@ -945,10 +963,10 @@ class Vhil implements vscode.Disposable {
    * The system editor in a VS Code tab: a webview framing EDITOR_URL (the
    * editor's frame-ancestors allows VS Code, vhil/server/security.py). Starts
    * the editor first if it doesn't answer, and frames it once it does, on
-   * `system` if given (the editor's ?system=).
+   * `system` if given (the editor's ?system=; with &new=1, a new one).
    */
-  private async openEditor(system?: string) {
-    const page = system ? `${EDITOR_URL}?system=${encodeURIComponent(system)}` : EDITOR_URL;
+  private async openEditor(system?: string, isNew = false) {
+    const page = system ? `${EDITOR_URL}?system=${encodeURIComponent(system)}${isNew ? "&new=1" : ""}` : EDITOR_URL;
     if (this.editorPanel) {
       this.editorPanel.reveal();
       if (system && this.editorReady) {
@@ -996,6 +1014,44 @@ class Vhil implements vscode.Disposable {
         smoke: fs.existsSync(path.join(this.repo, `tests/${id}_smoke.robot`)),
       };
     });
+    this.updateView();
+  }
+
+  private updateView() {
+    this.systemsView.update(rows(this.mySystems(),
+      { dockerUp: this.dockerUp, editorUp: this.editorUp, context: this.config().context }, !this.local));
+  }
+
+  /** A new system: its id, then the editor on an empty canvas (?new=1); saved by its Commit…. */
+  private async newSystem() {
+    const existing = this.systems.map((s) => s.id);
+    const id = await vscode.window.showInputBox({
+      title: "vHIL: new system",
+      prompt: "Its id, the file systems/<id>.yaml. Place boards and wire buses in the editor, then Commit….",
+      placeHolder: "ecu-ams-dash",
+      validateInput: (v) => newSystemError(v.trim(), existing),
+    });
+    if (id) await this.openEditor(id.trim(), true);
+  }
+
+  /** A system's scenarios (its group in the Testing panel), as a run from the panel. */
+  private async runScenarios(system?: string) {
+    const id = system ?? await this.pickSystem("Run the scenarios of which system?", (s) => s.scenarios);
+    if (!id) return;
+    if (!this.byId.size) await this.refresh();
+    const group = this.byId.get(groupId(id));
+    if (!group) {
+      void vscode.window.showInformationMessage(`vHIL: ${id} has no scenarios in the Testing panel.`);
+      return;
+    }
+    await vscode.commands.executeCommand("workbench.view.testing.focus");
+    const cts = new vscode.CancellationTokenSource();
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `vHIL: ${id} scenarios`, cancellable: true },
+      (_, token) => {
+        token.onCancellationRequested(() => cts.cancel());
+        return this.run(new vscode.TestRunRequest([group]), cts.token);
+      });
   }
 
   /** The systems shown: in a firmware repository, those that run its firmware. */
@@ -1092,6 +1148,14 @@ class Vhil implements vscode.Disposable {
       }
     }
   }
+}
+
+/** The system a command was given: a Systems view row, a scenario group, or its id. */
+function systemOf(item?: vscode.TestItem | Row | string): string | undefined {
+  if (typeof item === "string") return item;
+  if (!item) return undefined;
+  if ("kind" in item) return item.kind === "system" ? item.label : undefined;
+  return item.id.startsWith(GROUP) ? item.id.split("/").pop() : undefined;
 }
 
 /** The editor panel's page: the editor framed at `url`, else `message`. */
