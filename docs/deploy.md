@@ -65,8 +65,9 @@ editor sits on an internal network shared with the proxy only, so the gate
 is the only way in, and there is no second port or site.
 
 **Headers.** The app's pages may be framed by nobody (`frame-ancestors
-'none'`, `X-Frame-Options: DENY`), the editor only by the app itself
-(`frame-ancestors 'self'`, `SAMEORIGIN`), from the Caddyfile. Each upstream
+'none'`, `X-Frame-Options: DENY`), the editor only by the app itself and
+the VS Code extension's editor panel (`frame-ancestors 'self'
+vscode-webview: vscode-file:`, no other web origin), from the Caddyfile. Each upstream
 adds its own full policy, so a browser enforces both: the API's
 (`vhil/server/security.py`) and the editor's, `EDITOR_CSP` there, which
 Pipeline Manager sends (`PM_CSP`, `scripts/editor.sh`): `default-src`,

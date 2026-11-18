@@ -140,7 +140,9 @@ def test_the_editors_csp_needs_no_unsafe_source():
     csp = dict(d.split(" ", 1) for d in EDITOR_CSP.split("; "))
     for directive in ("default-src", "script-src", "style-src", "connect-src", "font-src"):
         assert csp[directive] == "'self'", directive
-    assert csp["frame-ancestors"] == "'self'" and csp["object-src"] == "'none'"
+    # This site and VS Code's editor panel, no other web origin.
+    assert csp["frame-ancestors"] == "'self' vscode-webview: vscode-file:"
+    assert csp["object-src"] == "'none'"
     assert "unsafe" not in EDITOR_CSP and "*" not in EDITOR_CSP
 
 

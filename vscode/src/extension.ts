@@ -158,6 +158,7 @@ class Vhil implements vscode.Disposable {
   private built = new Map<string, string>();
   private editorUp = false;
   private editorTask: vscode.TaskExecution | undefined;
+  private editorPanel: vscode.WebviewPanel | undefined;
   private checking: Promise<void> | undefined;
   private checked = 0;
   private systems: SystemInfo[] = [];
@@ -745,15 +746,40 @@ class Vhil implements vscode.Disposable {
     if (pick) await this.task(`Build firmware: ${pick.label}`, ["fw", ...pick.label.split(" ")]);
   }
 
+  /**
+   * The system editor in a VS Code tab: a webview framing EDITOR_URL (the
+   * editor's frame-ancestors allows VS Code, vhil/server/security.py). Starts
+   * the editor first if it doesn't answer, and frames it once it does.
+   */
   private async openEditor() {
-    if (await editorAnswers()) {
-      void vscode.env.openExternal(vscode.Uri.parse(EDITOR_URL));
+    if (this.editorPanel) {
+      this.editorPanel.reveal();
       return;
     }
-    if (!this.editorTask) void this.task("System editor", ["editor"], {}, false);
-    this.statusTree.refresh();
-    void vscode.window.showInformationMessage("vHIL: starting the editor; open it once it's up.", "Open")
-      .then((a) => { if (a) void vscode.env.openExternal(vscode.Uri.parse(EDITOR_URL)); });
+    const panel = vscode.window.createWebviewPanel("vhil.editor", "vHIL system editor",
+      vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+    this.editorPanel = panel;
+    let open = true;
+    panel.onDidDispose(() => { open = false; this.editorPanel = undefined; });
+    panel.webview.html = editorHtml(undefined, "Starting the system editor…");
+    const deadline = Date.now() + 5 * 60_000;
+    while (open && !(await editorAnswers())) {
+      if (!this.editorTask) {
+        void this.task("System editor", ["editor"], {}, false);
+        this.statusTree.refresh();
+      }
+      if (Date.now() > deadline) {
+        panel.webview.html = editorHtml(undefined,
+          "The system editor didn't start in 5 minutes. See the System editor terminal.");
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    if (!open) return;
+    // Through asExternalUri, so a remote window reaches it through a forwarded port.
+    const url = await vscode.env.asExternalUri(vscode.Uri.parse(EDITOR_URL));
+    panel.webview.html = editorHtml(url.toString(true));
+    void this.checkStatus();
   }
 
   // -- the sidebar: Systems ---------------------------------------------------
@@ -951,6 +977,22 @@ class Vhil implements vscode.Disposable {
 }
 
 /** Whether the system editor answers on its proxy. */
+/** The editor panel's page: the editor framed at `url`, else `message`. */
+function editorHtml(url: string | undefined, message = ""): string {
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  const origin = url ? new URL(url).origin : "";
+  const csp = `default-src 'none'; style-src 'unsafe-inline'${origin ? `; frame-src ${origin}` : ""}`;
+  const body = url
+    ? `<iframe src="${esc(url)}" allow="clipboard-read; clipboard-write"></iframe>`
+    : `<p>${esc(message)}</p>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<style>html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+iframe { border: 0; width: 100%; height: 100%; display: block; }
+p { padding: 1em; font-family: var(--vscode-font-family); color: var(--vscode-foreground); }</style>
+</head><body>${body}</body></html>`;
+}
+
 function editorAnswers(): Promise<boolean> {
   return fetch(EDITOR_URL, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
 }

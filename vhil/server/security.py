@@ -44,7 +44,10 @@ def origin_of(url: str) -> str | None:
 
 
 # The editor (Pipeline Manager under /editor/). connect-src 'self' covers its
-# same-origin socket.io WebSocket in current browsers.
+# same-origin socket.io WebSocket in current browsers. Besides this site, only
+# VS Code may frame it: the vHIL extension's editor panel is a webview
+# (vscode-webview:) inside the workbench (vscode-file:), and frame-ancestors
+# checks every ancestor. No web origin is added.
 EDITOR_CSP = "; ".join([
     "default-src 'self'",
     "script-src 'self'",
@@ -54,7 +57,7 @@ EDITOR_CSP = "; ".join([
     "connect-src 'self'",
     "worker-src 'self'",
     "frame-src 'none'",
-    "frame-ancestors 'self'",
+    "frame-ancestors 'self' vscode-webview: vscode-file:",
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'self'",
