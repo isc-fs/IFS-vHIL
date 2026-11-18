@@ -2,8 +2,8 @@
 
 The vHIL's tests in VS Code's **Testing** panel: every test of `tests/unit`,
 `tests/sim` and `tests/scenarios`, with Run and Cancel per test, file or
-folder. Its tools in a **vHIL sidebar**: the VM, images, firmware and system
-editor, every system with its tests, the last runs. Runs go through `scripts/vhil-docker.sh` in the vHIL's Docker
+folder, and one **status bar** item that says where things stand and runs
+the tests again. Runs go through `scripts/vhil-docker.sh` in the vHIL's Docker
 image, as CI's jobs do, so the host needs Docker only (on macOS, the Colima
 VM `scripts/vhil-docker.sh vm` makes).
 
@@ -43,45 +43,36 @@ fetches anything for a repository on the vHIL's GitHub owner.
 - **The Testing panel lists the tests that run your firmware:** the sim
   tests with its marker (`ecu`, `ams`, `udv`; `bootloader` for the CAN
   bootloader) and the scenarios of the systems it is in. The unit tests,
-  which test the vHIL itself, are left out. The Systems view shows those
-  systems only.
-- **The status bar** shows `vHIL · ecu: local (uncommitted)`, and the
-  Firmware list which build each image is (`ecu@local`, `ams@dev`).
+  which test the vHIL itself, are left out.
+- **The status bar** shows `vHIL ecu@local*` (`*`: uncommitted changes).
 
 ## Use
 
-- **Testing panel:** the three folders, their files and tests; the pytest
-  markers are tags (`@can`, `@system_ams`) for the panel's filter. The list
-  comes from `pytest --collect-only` in the container (about 20 s) and
-  refreshes when a test file changes.
-- **Run:** a unit test runs under pytest itself; a sim or scenario test
-  under the `sim` / `scenarios` job, which finds the firmware the last
-  `fw` built. Results come in as each test ends; a failure is shown at its
-  line. The run's output is the test's output.
+1. **Edit and save** your firmware.
+2. **Run**: the Run button in the Testing panel (a test, a file, a system's
+   scenarios, everything), or click the status bar to run the last run
+   again. Docker is checked first (on macOS the Colima VM is started),
+   images are pulled and missing firmware built as needed.
+3. **Watch**: results come in as each test ends; the status bar counts
+   (`vHIL 12/40`, then `vHIL 42` or `vHIL 3 failed`). A failure shows at
+   its line, with the test's output. VS Code's Test Results keep the history
+   and **Rerun Failed Tests**.
+
+- **Testing panel:** the three folders; sim tests by file, scenarios by
+  system. The pytest markers are tags (`@can`, `@system_ams`) for the
+  panel's filter. The list comes from `pytest --collect-only` in the
+  container (about 20 s) and refreshes when a test file changes.
+  Right-click a system's scenarios: **Open a system in the system editor**.
 - **Cancel** stops the run's container.
-- **Status bar** (`vHIL`): whether the Docker VM answers and which firmware
-  is built (sim and scenario tests need ecu, ams and the bootloader). Click
-  it for the actions.
-
-### The vHIL sidebar
-
-The vHIL icon in the activity bar opens four views. Their buttons show on
-hover; right-click a system or a run for the rest.
-
-- **Status:** the Docker VM (start it), the images (pull or rebuild), the
-  firmware `fw` last built per board (build, or rebuild one board), the
-  system editor (open; started here, stop), the firmware refs (settings).
-  Checked when the view opens and after every command.
-- **Systems:** every `systems/*.yaml` with its boards and how many sim tests
-  and scenarios it has. Run its sim tests (by its `system_*` marker) or its
-  scenarios, which show in the Testing panel; run its smoke suite, validate
-  it, open its file.
-- **Runs:** the last 20 runs, of tests or commands, with what passed and
-  failed, how long and when. Click a test run for its output; run it again,
-  or only its failures. A failed test opens in the Testing panel.
-- **Tools:** a shell in the container, an IFS_HIL suite against the ECU or
-  the AMS, firmware coverage, speed, pruning old firmware builds, exporting
-  and importing a web app run.
+- **Status bar:** `Docker not running` (click: Diagnose), `building
+  ecu@local`, `12/40`, `42` or `3 failed` (click: run again).
+- **vHIL: Diagnose:** Docker, images, firmware and the system editor, each
+  with its fix (start the VM, pull images, build firmware, change the
+  context, open the editor).
+- **vHIL: Open the system editor** opens it in a tab, started if needed.
+- **vHIL: Tools…** (the vHIL repository only): a shell in the container,
+  an IFS_HIL suite, coverage, speed, a smoke suite, validating a system,
+  pruning firmware builds, exporting and importing a web app run.
 
 A command runs as a VS Code task, in the terminal panel, where it can be
 watched and stopped.
@@ -90,7 +81,7 @@ watched and stopped.
 
 | Setting | What | Script variable |
 |---|---|---|
-| `vhil.dockerContext` | Docker context (empty: `colima-vhil` on macOS, `default` elsewhere) | `VHIL_DOCKER_CONTEXT` |
+| `vhil.dockerContext` | Docker context (empty: `colima-vhil` on macOS, `default` elsewhere; Docker Desktop: `desktop-linux`) | `VHIL_DOCKER_CONTEXT` |
 | `vhil.ifsHilRef` | IFS_HIL ref for firmware builds | `IFS_HIL_REF` |
 | `vhil.firmwareRefs` | firmware refs for **Build firmware**, e.g. `ecu=feat/x` | `FW_REFS` |
 | `vhil.cpus` | cores per run, 4 as CI's runners (0: no limit) | `VHIL_DOCKER_CPUS` |
@@ -105,9 +96,10 @@ writes JSON lines, one per collected test (node id, file, line, markers) or
 one when a test starts and ends (outcome, duration, failure and where). The
 extension reads the file under `results/vscode/` while the run goes on.
 `src/plan.ts` holds what a run executes and how its lines parse,
-`src/sidebar.ts` what the sidebar shows, `src/firmware.ts` which firmware a
-repository is and which tests and systems run it (all tested by `npm test`);
-`src/extension.ts` and `src/views.ts` are the VS Code side.
+`src/status.ts` what the status bar and Diagnose show, `src/systems.ts` the
+systems and tools, `src/firmware.ts` which firmware a repository is and which
+tests and systems run it (all tested by `npm test`); `src/extension.ts` is the
+VS Code side.
 
 Not yet: debugging a test, the Robot smoke suites, Windows hosts (the script
 is bash; WSL2 works as on Linux).
