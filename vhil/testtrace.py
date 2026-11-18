@@ -329,6 +329,7 @@ class Plugin:
         self.sims: list[tuple[str, str, list, int]] = []   # (label, system, records, end_us)
         self.taken: set[int] = set()                        # id(sim) of what this test ran
         self.context_labels: set[str] = set()               # labels of context-only Sims
+        self.args: list = []                                # the test's arguments (fixtures)
         self.cursors: dict[int, Cursor] = {}               # id(sim) -> Cursor
         self.seen: list = []                                # keeps a Sim's id from being reused
 
@@ -368,9 +369,13 @@ class Plugin:
     def pytest_runtest_setup(self, item):
         from vhil import sim as sim_module
         self.item, self.outcome, self.sims = item, "passed", []
-        self.taken, self.context_labels = set(), set()
+        self.taken, self.context_labels, self.args = set(), set(), []
         self.mark = sim_module.activity()
         _SNAPSHOTS.pop(item.nodeid, None)
+
+    def pytest_runtest_call(self, item):
+        # pytest drops item.funcargs at teardown, before logfinish.
+        self.args = list((getattr(item, "funcargs", None) or {}).values())
 
     def pytest_runtest_logreport(self, report):
         if report.failed:
@@ -388,8 +393,7 @@ class Plugin:
             for sim in live:
                 self.take(sim)
             # A fixture's Sim the test only asserted on: the time before it.
-            used = [v for v in getattr(item, "funcargs", {}).values()
-                    if any(v is s for s in live)]
+            used = [v for v in self.args if any(v is s for s in live)]
             for sim in used:
                 self.context(sim)
             self.item = None

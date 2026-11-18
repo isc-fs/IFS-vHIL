@@ -168,6 +168,8 @@ def test_a_fixture_sim_the_test_did_not_run_gets_the_time_before_it(tmp_path, mo
     plugin = testtrace.Plugin(tmp_path / "traces", tmp_path)
     item = types.SimpleNamespace(nodeid="t.py::b", funcargs={"ams": sim})
     plugin.pytest_runtest_setup(item)
+    plugin.pytest_runtest_call(item)
+    item.funcargs = None                        # what pytest's teardown leaves
     plugin.pytest_runtest_logfinish("t.py::b", None)
     recs = testtrace.read(testtrace.RESULTS.pop("t.py::b")["trace"])
     meta = recs[0]
