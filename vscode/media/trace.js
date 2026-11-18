@@ -54,7 +54,9 @@
     fail = all.filter((r) => r.kind === "snapshot" && typeof r.time_us === "number").map((r) => r.time_us);
     const errors = all.filter((r) => r.kind === "error");
     end = Math.max(meta.end_us || 0, records.length ? records[records.length - 1].t_us : 0, 1);
-    range = [0, end];
+    // A Sim the test used without running it: the second before the test, not from 0.
+    const context = (meta.sims || []).find((x) => x.context_us);
+    range = [context ? Math.max(0, end - context.context_us) : 0, end];
     const many = multi();
     const seen = new Map();
     for (const r of records) {
@@ -67,6 +69,9 @@
     $("outcome").textContent = meta.outcome || "";
     $("outcome").className = "outcome " + (meta.outcome || "");
     $("empty").style.display = records.length || uart.length ? "none" : "block";
+    $("context").textContent = context
+      ? `This test ran no simulated time: the ${context.context_us / 1e6} s before it, from its fixture's Sim.`
+      : "";
     $("errors").textContent = errors.map((e) => e.what + ": " + e.message).join("\n");
     $("uart").style.display = uart.length ? "block" : "none";
     $("uart-count").textContent = uart.length + " lines";

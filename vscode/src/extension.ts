@@ -195,19 +195,22 @@ class Vhil implements vscode.Disposable {
     const systems = watch("systems/**");
     const later = () => this.refreshSoon();
     const reread = () => this.readSystems();
+    // A system file changed on disk (a save, a checkout, a revert): validate's errors in Problems.
+    const timers = new Map<string, NodeJS.Timeout>();
+    const revalidate = (uri: vscode.Uri) => {
+      reread();
+      if (!/\/systems\/[^/]+\.yaml$/.test(uri.fsPath)) return;
+      clearTimeout(timers.get(uri.fsPath));
+      timers.set(uri.fsPath, setTimeout(() => { timers.delete(uri.fsPath); void this.validate(uri); }, 300));
+    };
     const command = (id: string, f: (...a: any[]) => unknown) => vscode.commands.registerCommand(id, f);
     this.disposables.push(
       this.controller, this.status, this.log, tests, systems, this.problems, this.systemProblems,
-      // A system file saved in the vHIL repository: validate's errors in Problems.
-      vscode.workspace.onDidSaveTextDocument((d) => {
-        if (!local && /\/systems\/[^/]+\.yaml$/.test(d.uri.fsPath) && d.uri.fsPath.startsWith(this.repo)) {
-          void this.validate(d);
-        }
-      }),
       vscode.window.registerWebviewViewProvider(TRACE_VIEW, this.tracePanel,
         { webviewOptions: { retainContextWhenHidden: true } }),
       tests.onDidChange(later), tests.onDidCreate(later), tests.onDidDelete(later),
-      systems.onDidChange(reread), systems.onDidCreate(reread), systems.onDidDelete(reread),
+      systems.onDidChange(revalidate), systems.onDidCreate(revalidate),
+      systems.onDidDelete((uri) => { reread(); this.systemProblems.delete(uri); }),
       vscode.tasks.onDidEndTaskProcess((e) => {
         if (e.execution === this.editorTask) this.editorTask = undefined;
         if (e.execution.task.source === "vHIL") void this.checkStatus();
@@ -836,15 +839,19 @@ class Vhil implements vscode.Disposable {
     await running;
   }
 
-  /** `validate` on a saved system file: its errors in Problems, at the lines they name. */
-  private async validate(doc: vscode.TextDocument) {
-    const rel = path.relative(this.repo, doc.uri.fsPath);
+  /** `validate` on a system file as it is on disk: its errors in Problems, at the lines they name. */
+  private async validate(uri: vscode.Uri) {
+    const rel = path.relative(this.repo, uri.fsPath);
     let out = "";
     const code = await this.script(["run", "python", "-m", "vhil.system", "validate", rel],
       this.env(), (t) => { out += t; }).done;
-    this.systemProblems.set(doc.uri, code === 0 ? [] : validationProblems(out, doc.getText()).map((p) => {
-      const line = doc.lineAt(Math.min(p.line, doc.lineCount - 1));
-      const d = new vscode.Diagnostic(line.range, p.message, vscode.DiagnosticSeverity.Error);
+    let text: string;
+    try { text = fs.readFileSync(uri.fsPath, "utf8"); } catch { this.systemProblems.delete(uri); return; }
+    const lines = text.split("\n");
+    this.systemProblems.set(uri, code === 0 ? [] : validationProblems(out, text).map((p) => {
+      const n = Math.min(p.line, lines.length - 1);
+      const range = new vscode.Range(n, 0, n, lines[n].replace(/\r$/, "").length);
+      const d = new vscode.Diagnostic(range, p.message, vscode.DiagnosticSeverity.Error);
       d.source = "vhil.system validate";
       return d;
     }));
@@ -895,8 +902,15 @@ class Vhil implements vscode.Disposable {
           try {
             const ready = JSON.parse(fs.readFileSync(readyFile, "utf8")) as Ready;
             const local = this.local ? { firmware: this.local.firmware.id, dir: this.local.dir } : undefined;
+            // No breakpoint would run the test straight through: stop at the first instruction.
+            const stop = !vscode.debug.breakpoints.some((b) => b.enabled);
             await vscode.debug.startDebugging(this.folder,
-              debugConfig(ready, dir, gdb, local) as vscode.DebugConfiguration);
+              debugConfig(ready, dir, gdb, local, stop) as vscode.DebugConfiguration);
+            if (stop) {
+              void vscode.window.showInformationMessage(
+                `vHIL: ${ready.board} is paused at its first instruction (no breakpoints set). ` +
+                "Set breakpoints, then Continue (F5).");
+            }
             return;
           } catch {
             // Still being written: the next poll.
