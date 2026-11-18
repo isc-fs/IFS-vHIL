@@ -582,6 +582,9 @@ class Sim:
             self._start_coverage(Path(self.coverage_dir))
         if self.uart_log_dir is not None:
             self._capture_uarts(self.uart_log_dir)
+        # VHIL_DEBUG=<board>:<port>: wait for an outside debugger (#425).
+        from vhil import debugattach
+        debugattach.maybe_attach(self)
         _live.append(self)
         return self
 
