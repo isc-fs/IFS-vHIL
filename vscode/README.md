@@ -82,6 +82,13 @@ fetches anything for a repository on the vHIL's GitHub owner.
   panel's filter. The list comes from `pytest --collect-only` in the
   container (about 20 s) and refreshes when a test file changes.
   Right-click a system's scenarios: **Open a system in the system editor**.
+- **Run on save**: the Testing panel's continuous run (the eye icon) runs
+  the selection again whenever you save a C file or header (one run at a
+  time; a save during a run queues one more).
+- **Listing** happens once per vHIL checkout commit in a firmware
+  repository: reopening the window shows the tests at once.
+- **System files** (the vHIL repository): saving `systems/*.yaml`
+  validates it; its errors show in Problems at the line they name.
 - **Cancel** stops the run's container.
 - **Status bar:** `Docker not running` (click: Diagnose), `building
   ecu@local`, `12/40`, `42` or `3 failed` (click: run again).
