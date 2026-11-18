@@ -40,8 +40,8 @@ export interface Ready {
  * mapped to sources the host has (the open firmware's working tree, else
  * the copy debugattach took). Launching with a server address connects and
  * continues: the stub has the board stopped before its first instruction,
- * so the breakpoints go in first. With none set (`stop`), it stays stopped
- * there instead of running the test through.
+ * so the breakpoints go in first. With none set (`stop`), it stops at main
+ * (the bootloader's, the first to run) instead of running the test through.
  */
 export function debugConfig(ready: Ready, dir: string, gdb: string,
                             local?: { firmware: string; dir: string },

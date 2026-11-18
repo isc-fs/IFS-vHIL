@@ -902,13 +902,13 @@ class Vhil implements vscode.Disposable {
           try {
             const ready = JSON.parse(fs.readFileSync(readyFile, "utf8")) as Ready;
             const local = this.local ? { firmware: this.local.firmware.id, dir: this.local.dir } : undefined;
-            // No breakpoint would run the test straight through: stop at the first instruction.
+            // No breakpoint would run the test straight through: stop at entry (main).
             const stop = !vscode.debug.breakpoints.some((b) => b.enabled);
             await vscode.debug.startDebugging(this.folder,
               debugConfig(ready, dir, gdb, local, stop) as vscode.DebugConfiguration);
             if (stop) {
               void vscode.window.showInformationMessage(
-                `vHIL: ${ready.board} is paused at its first instruction (no breakpoints set). ` +
+                `vHIL: ${ready.board} is paused at main (no breakpoints set). ` +
                 "Set breakpoints, then Continue (F5).");
             }
             return;
