@@ -186,3 +186,21 @@ def test_a_sim_the_test_neither_used_nor_ran_stays_out(tmp_path, monkeypatch):
     plugin.pytest_runtest_setup(types.SimpleNamespace(nodeid="t.py::c", funcargs={}))
     plugin.pytest_runtest_logfinish("t.py::c", None)
     assert "t.py::c" not in testtrace.RESULTS
+
+
+def test_a_sim_touched_without_running_still_gets_context(tmp_path, monkeypatch):
+    """A failure snapshot touches the Sim (last_activity) but runs no time."""
+    monkeypatch.setattr(testtrace, "decoder_of", lambda sim: testtrace.Decoder(CONTRACT))
+    sim = _fake(tmp_path)
+    sim.last_activity = 50                      # touched after the mark
+    monkeypatch.setattr(vsim, "live_sims", lambda: [sim])
+    monkeypatch.setattr(vsim, "activity", lambda: 10)
+    plugin = testtrace.Plugin(tmp_path / "traces", tmp_path)
+    plugin.cursors[id(sim)] = testtrace.Cursor(us=2_000)   # an earlier test took up to now
+    item = types.SimpleNamespace(nodeid="t.py::d", funcargs={"ams": sim})
+    plugin.pytest_runtest_setup(item)
+    plugin.pytest_runtest_call(item)
+    plugin.pytest_runtest_logfinish("t.py::d", None)
+    recs = testtrace.read(testtrace.RESULTS.pop("t.py::d")["trace"])
+    assert recs[0]["sims"] == [{"sim": "ecu", "system": "ecu", "end_us": 2_000, "decoded": ["can_acu"],
+                                "context_us": testtrace.CONTEXT_US}]

@@ -343,9 +343,14 @@ class Plugin:
             return
         cursor = self.cursors.setdefault(id(sim), Cursor())
         self.seen.append(sim)
-        self.taken.add(id(sim))
+        before = cursor.us
         label = self._label(sim.system.id)
         records, end = collect(sim, label, cursor)
+        # Touched without running (a failure snapshot reads registers): no
+        # time of its own, so `context` gives it the time before.
+        if end <= before and before > 0:
+            return
+        self.taken.add(id(sim))
         self.sims.append((label, sim.system.id, records, end))
 
     def context(self, sim) -> None:
