@@ -13,8 +13,12 @@ vhil-docker.sh publishes on the host's 127.0.0.1 (VHIL_DEBUG_PORT).
 What the debugger needs is written to VHIL_DEBUG_DIR (default
 results/vscode/debug, in /work): the board's images (`<board>.elf`, its
 bootloader `<board>.bootloader.elf`) and `ready.json` {board, port, system,
-images, sources}, `sources` the container paths they were built in. The
-extension waits for ready.json, then attaches.
+images, sources, host_sources}, `sources` the container paths they were
+built in. A tree that lives only in the container (not an `@local` working
+tree, which the extension maps itself) has its source files copied to
+`src/<id>@<ref>` beside them, once per build; `host_sources` names that
+copy, relative to the folder, or null. The extension waits for ready.json,
+then attaches.
 
 While GDB holds the board, a RunFor waits for it as it waits for the
 worker's debugger (lockstep: no firmware timeout fires on any board), so
@@ -34,6 +38,9 @@ from typing import Optional
 from vhil import renode as rn
 
 ENV = "VHIL_DEBUG"
+# What a debugger shows of a firmware tree: its C, C++, assembly and headers.
+SOURCE_SUFFIXES = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx", ".inc", ".def", ".s", ".S"}
+SKIP_DIRS = {"build", ".git", "node_modules"}
 WAIT_S = float(os.environ.get("VHIL_DEBUG_WAIT_S", "300"))
 
 _done = False
@@ -89,10 +96,29 @@ def _serve(listener: socket.socket, target: int, first: threading.Event) -> None
         first.set()
 
 
+def copy_sources(root: Path, dest: Path, stamp: str) -> None:
+    """The source files of `root` into `dest`, unless `dest` already holds
+    the copy `stamp` names (the image it was taken for)."""
+    mark = dest / ".vhil-stamp"
+    if mark.is_file() and mark.read_text() == stamp:
+        return
+    shutil.rmtree(dest, ignore_errors=True)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [n for n in dirnames if n not in SKIP_DIRS]
+        for name in filenames:
+            if Path(name).suffix in SOURCE_SUFFIXES:
+                src = Path(dirpath) / name
+                to = dest / src.relative_to(root)
+                to.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, to)
+    dest.mkdir(parents=True, exist_ok=True)
+    mark.write_text(stamp)
+
+
 def ready_info(board: str, port: int, system: str, images: list[Path], out: Path) -> dict:
     """ready.json's content, the images copied into `out` (pure but for the copy)."""
     names = [f"{board}.elf", f"{board}.bootloader.elf"]
-    copied, sources = [], []
+    copied, sources, host = [], [], []
     for image, name in zip(images, names):
         dest = out / name
         shutil.copyfile(image, dest)
@@ -101,7 +127,15 @@ def ready_info(board: str, port: int, system: str, images: list[Path], out: Path
         parts = Path(image).parts
         root = Path(*parts[:4]) if len(parts) > 4 and parts[1:3] == ("vhil", "fw") else Path(image).parent
         sources.append(str(root))
-    return {"board": board, "port": port, "system": system, "images": copied, "sources": sources}
+        # Only the container has this tree: a copy the host's debugger can open.
+        if root.parts[1:3] == ("vhil", "fw") and not root.name.endswith("@local") and root.is_dir():
+            st = Path(image).stat()
+            copy_sources(root, out / "src" / root.name, f"{image}:{st.st_size}:{st.st_mtime_ns}")
+            host.append(f"src/{root.name}")
+        else:
+            host.append(None)
+    return {"board": board, "port": port, "system": system, "images": copied, "sources": sources,
+            "host_sources": host}
 
 
 def maybe_attach(sim) -> None:

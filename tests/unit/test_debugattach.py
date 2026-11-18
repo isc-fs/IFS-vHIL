@@ -56,3 +56,30 @@ def test_the_forwarder_pipes_both_ways_and_flags_the_first_client():
         c.sendall(b"$g#67")
         assert c.recv(100) == b"$G#67"
     listener.close()
+
+
+def test_copy_sources_takes_source_files_once_per_build(tmp_path):
+    root = tmp_path / "ams@dev"
+    (root / "Core" / "Src").mkdir(parents=True)
+    (root / "build").mkdir()
+    (root / "Core" / "Src" / "main.c").write_text("int main;")
+    (root / "Core" / "Src" / "notes.txt").write_text("x")
+    (root / "build" / "gen.c").write_text("generated")
+    dest = tmp_path / "out" / "src" / "ams@dev"
+    d.copy_sources(root, dest, "a")
+    assert (dest / "Core" / "Src" / "main.c").read_text() == "int main;"
+    assert not (dest / "Core" / "Src" / "notes.txt").exists()
+    assert not (dest / "build").exists()
+    (root / "Core" / "Src" / "main.c").write_text("int main2;")
+    d.copy_sources(root, dest, "a")            # same build: kept
+    assert (dest / "Core" / "Src" / "main.c").read_text() == "int main;"
+    d.copy_sources(root, dest, "b")            # a new build: copied again
+    assert (dest / "Core" / "Src" / "main.c").read_text() == "int main2;"
+
+
+def test_ready_info_has_no_host_copy_outside_vhil_fw(tmp_path):
+    app = tmp_path / "AMS.elf"
+    app.write_bytes(b"app")
+    out = tmp_path / "out"
+    out.mkdir()
+    assert d.ready_info("ams", 1, "ams", [app], out)["host_sources"] == [None]
