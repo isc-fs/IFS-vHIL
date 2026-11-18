@@ -17,8 +17,9 @@
 # on no other port and in no other site.
 #
 # Response headers: nosniff, no referrer across origins, and who may frame a
-# page (CSP frame-ancestors): nobody for the app, and no other origin for the
-# editor. Nothing frames the editor now: it is the vHIL workspace, a page of
+# page (CSP frame-ancestors): nobody for the app; for the editor, no other
+# web origin, only VS Code's own schemes (the vHIL extension's editor panel,
+# vhil/server/security.py). Nothing frames the editor now: it is the vHIL workspace, a page of
 # its own, which the shell's Editor route redirects to (vhil/server/static/
 # editor.js). Each upstream adds its own full CSP (vhil/server/security.py:
 # the API's, and the editor's through PM_CSP), so a browser enforces both.
@@ -51,7 +52,8 @@
 
 	handle_path /editor/* {
 		header {
-			Content-Security-Policy "frame-ancestors 'self'; base-uri 'none'; object-src 'none'"
+			Content-Security-Policy "frame-ancestors 'self' vscode-webview: vscode-file:; base-uri 'none'; object-src 'none'"
+			# For browsers without frame-ancestors; those with it ignore this.
 			X-Frame-Options SAMEORIGIN
 		}
 		forward_auth api:8080 {
