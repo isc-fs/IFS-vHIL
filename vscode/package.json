@@ -2,7 +2,7 @@
   "name": "vhil-tests",
   "displayName": "ISC vHIL",
   "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel against your working tree, in the vHIL's Docker image.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "isc-fs",
   "private": true,
   "repository": {
@@ -140,6 +140,12 @@
           "default": "",
           "markdownDescription": "Advanced. The branch or tag of that checkout, updated once a day (**Update the vHIL checkout** now). Empty: `dev`.",
           "order": 6
+        },
+        "vhil.gdbPath": {
+          "type": "string",
+          "default": "",
+          "order": 7,
+          "markdownDescription": "Advanced. The host's GDB for **Debug Test** (`arm-none-eabi-gdb` on the PATH when empty; STM32CubeCLT ships one)."
         }
       }
     },

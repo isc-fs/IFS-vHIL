@@ -12,6 +12,7 @@
 import * as cp from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as net from "net";
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -22,6 +23,7 @@ import {
 import {
   buildSystem, Firmware, firmwareForRepo, firmwareOf, repoSlug, systemsOf, testRuns,
 } from "./firmware";
+import { boardsOf as debugBoards, debugConfig, Ready } from "./debug";
 import { barOf, findings, Fix, GROUP, groupId, Phase, scenarioSystem } from "./status";
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
@@ -173,6 +175,8 @@ class Vhil implements vscode.Disposable {
     this.controller.refreshHandler = () => this.refresh();
     this.controller.createRunProfile("Run", vscode.TestRunProfileKind.Run,
       (request, token) => this.run(request, token), true);
+    this.controller.createRunProfile("Debug", vscode.TestRunProfileKind.Debug,
+      (request, token) => this.debug(request, token), true);
 
     this.log = vscode.window.createOutputChannel("vHIL");
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -529,12 +533,13 @@ class Vhil implements vscode.Disposable {
     return into;
   }
 
-  private async run(request: vscode.TestRunRequest, token: vscode.CancellationToken) {
+  private async run(request: vscode.TestRunRequest, token: vscode.CancellationToken,
+                    extraEnv: { [key: string]: string } = {}) {
     if (!this.byId.size) {
       if (!(await this.ensureDocker())) return;
       await this.refresh();
     }
-    this.lastRequest = request;
+    if (!extraEnv.VHIL_DEBUG) this.lastRequest = request;
     const included = request.include ?? [...this.controller.items].map(([, i]) => i);
     const excluded = request.exclude ?? [];
     const excludedIds = new Set(excluded.flatMap((e) => this.leaves(e)).map((e) => e.id));
@@ -562,7 +567,7 @@ class Vhil implements vscode.Disposable {
         if (token.isCancellationRequested) break;
         const mine = all.filter((t) => jobIds.some((id) => t.id === id || t.id.startsWith(id + "/") || t.id.startsWith(id + "::")));
         const deselect = [...excludedIds].filter((id) => jobIds.some((g) => id.startsWith(g + "/") || id.startsWith(g + "::")));
-        await this.runJob(run, tally, job, jobIds, deselect, mine, c.pytestArgs, c.context, token);
+        await this.runJob(run, tally, job, jobIds, deselect, mine, c.pytestArgs, c.context, token, extraEnv);
       }
     } finally {
       run.end();
@@ -581,14 +586,14 @@ class Vhil implements vscode.Disposable {
 
   private async runJob(run: vscode.TestRun, tally: Tally, job: Job, ids: string[], deselect: string[],
                        tests: vscode.TestItem[], extra: string[], context: string,
-                       token: vscode.CancellationToken) {
+                       token: vscode.CancellationToken, extraEnv: { [key: string]: string } = {}) {
     const name = `vhil-vscode-${crypto.randomBytes(4).toString("hex")}`;
     const out = this.outFile(name);
     const args = runArgs(job, ids, deselect, out.rel, extra);
     const write = (t: string) => run.appendOutput(t.replace(/\r?\n/g, "\r\n"));
     write(`$ ${SCRIPT} ${args.map(shellQuote).join(" ")}\n`);
     let text = "";
-    const proc = this.script(args, this.env({ VHIL_DOCKER_NAME: name }), (t) => {
+    const proc = this.script(args, this.env({ VHIL_DOCKER_NAME: name, ...extraEnv }), (t) => {
       text += t;
       write(t);
     });
@@ -767,6 +772,72 @@ class Vhil implements vscode.Disposable {
         host && f.line ? new vscode.Position(f.line - 1, 0) : undefined);
     }));
     return msg;
+  }
+
+  // -- debugging a test (#425) -------------------------------------------------
+
+  /**
+   * Run one test with a board held for VS Code's debugger
+   * (vhil/debugattach.py): once the board waits (ready.json), attach the
+   * host's arm-none-eabi-gdb through cppdbg; the test goes on when the board
+   * runs, and its result comes in as any run's.
+   */
+  private async debug(request: vscode.TestRunRequest, token: vscode.CancellationToken) {
+    if (!this.byId.size) await this.refresh();
+    const tests = (request.include ?? []).flatMap((i) => this.leaves(i));
+    if (tests.length !== 1 || !tests[0].id.includes("::") || tests[0].id.startsWith("tests/unit/")) {
+      void vscode.window.showErrorMessage("vHIL: debug one sim or scenario test at a time.");
+      return;
+    }
+    const test = tests[0];
+    if (!vscode.extensions.getExtension("ms-vscode.cpptools")) {
+      const a = await vscode.window.showErrorMessage(
+        "vHIL: debugging a test needs the C/C++ extension (ms-vscode.cpptools).", "Install");
+      if (a) await vscode.commands.executeCommand("workbench.extensions.installExtension", "ms-vscode.cpptools");
+      return;
+    }
+    const boards = debugBoards({ id: test.id, markers: test.tags.map((t) => t.id) }, this.local?.firmware.id);
+    const board = boards.length > 1
+      ? (await vscode.window.showQuickPick(boards, { title: "vHIL: debug which board?" }))
+      : boards[0] ?? (await vscode.window.showInputBox({ title: "vHIL: debug which board?", prompt: "ecu, ams or udv" }));
+    if (!board) return;
+    const port = await freePort();
+    const dir = path.join(this.repo, "results", "vscode", "debug");
+    const readyFile = path.join(dir, "ready.json");
+    fs.rmSync(readyFile, { force: true });
+    const gdb = vscode.workspace.getConfiguration("vhil").get<string>("gdbPath", "") || "arm-none-eabi-gdb";
+
+    let done = false;
+    let session: vscode.DebugSession | undefined;
+    const started = vscode.debug.onDidStartDebugSession((s) => {
+      if (s.configuration.miDebuggerServerAddress === `127.0.0.1:${port}`) session = s;
+    });
+    // Attach once the board waits; the build and the boot to it come first.
+    const attach = (async () => {
+      while (!done && !token.isCancellationRequested) {
+        if (fs.existsSync(readyFile)) {
+          try {
+            const ready = JSON.parse(fs.readFileSync(readyFile, "utf8")) as Ready;
+            const local = this.local ? { firmware: this.local.firmware.id, dir: this.local.dir } : undefined;
+            await vscode.debug.startDebugging(this.folder,
+              debugConfig(ready, dir, gdb, local) as vscode.DebugConfiguration);
+            return;
+          } catch {
+            // Still being written: the next poll.
+          }
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    })();
+    try {
+      await this.run(new vscode.TestRunRequest([test], undefined, request.profile), token,
+                     { VHIL_DEBUG: `${board}:${port}` });
+    } finally {
+      done = true;
+      await attach;
+      started.dispose();
+      if (session) await vscode.debug.stopDebugging(session);
+    }
   }
 
   // -- firmware, the system editor, systems -----------------------------------
@@ -952,6 +1023,18 @@ p { padding: 1em; font-family: var(--vscode-font-family); color: var(--vscode-fo
 /** Whether the system editor answers on its proxy. */
 function editorAnswers(): Promise<boolean> {
   return fetch(EDITOR_URL, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
+}
+
+/** A free TCP port on the host, for a held board's debugger. */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as net.AddressInfo).port;
+      srv.close(() => resolve(port));
+    });
+  });
 }
 
 function shellQuote(s: string): string {
