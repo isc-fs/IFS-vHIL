@@ -330,6 +330,7 @@ class Plugin:
         self.taken: set[int] = set()                        # id(sim) of what this test ran
         self.context_labels: set[str] = set()               # labels of context-only Sims
         self.args: list = []                                # the test's arguments (fixtures)
+        self.context_sims: list = []                        # the Sims `context` took
         self.cursors: dict[int, Cursor] = {}               # id(sim) -> Cursor
         self.seen: list = []                                # keeps a Sim's id from being reused
 
@@ -347,8 +348,12 @@ class Plugin:
         label = self._label(sim.system.id)
         records, end = collect(sim, label, cursor)
         # Touched without running (a failure snapshot reads registers): no
-        # time of its own, so `context` gives it the time before.
+        # time of its own, so the time before, if it is one of the test's
+        # arguments. Now, while it lives: a module fixture's teardown stops
+        # it before logfinish.
         if end <= before and before > 0:
+            if any(sim is a for a in self.args):
+                self.context(sim)
             return
         self.taken.add(id(sim))
         self.sims.append((label, sim.system.id, records, end))
@@ -357,8 +362,9 @@ class Plugin:
         """A Sim the test used but didn't run: what it recorded in the
         CONTEXT_US before now. Its cursor stays where it was, and UART lines
         (bytes without times) are left out."""
-        if id(sim) in self.taken:
+        if id(sim) in self.taken or any(sim is s for s in self.context_sims):
             return
+        self.context_sims.append(sim)
         try:
             now = sim.now_us()
             uart = {k: Path(p).stat().st_size for k, p in sim.uart_logs.items() if Path(p).exists()}
@@ -374,7 +380,7 @@ class Plugin:
     def pytest_runtest_setup(self, item):
         from vhil import sim as sim_module
         self.item, self.outcome, self.sims = item, "passed", []
-        self.taken, self.context_labels, self.args = set(), set(), []
+        self.taken, self.context_labels, self.args, self.context_sims = set(), set(), [], []
         self.mark = sim_module.activity()
         _SNAPSHOTS.pop(item.nodeid, None)
 

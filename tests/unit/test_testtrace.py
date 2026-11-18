@@ -204,3 +204,21 @@ def test_a_sim_touched_without_running_still_gets_context(tmp_path, monkeypatch)
     recs = testtrace.read(testtrace.RESULTS.pop("t.py::d")["trace"])
     assert recs[0]["sims"] == [{"sim": "ecu", "system": "ecu", "end_us": 2_000, "decoded": ["can_acu"],
                                 "context_us": testtrace.CONTEXT_US}]
+
+
+def test_a_fixture_sim_stopped_at_teardown_gets_context_while_it_lives(tmp_path, monkeypatch):
+    """The last test of a module: its fixture stops the Sim before logfinish."""
+    monkeypatch.setattr(testtrace, "decoder_of", lambda sim: testtrace.Decoder(CONTRACT))
+    sim = _fake(tmp_path)
+    sim.last_activity = 50
+    monkeypatch.setattr(vsim, "activity", lambda: 10)
+    plugin = testtrace.Plugin(tmp_path / "traces", tmp_path)
+    plugin.cursors[id(sim)] = testtrace.Cursor(us=2_000)
+    item = types.SimpleNamespace(nodeid="t.py::e", funcargs={"ams": sim})
+    plugin.pytest_runtest_setup(item)
+    plugin.pytest_runtest_call(item)
+    plugin.take(sim)                            # INSTRUMENT.on_stop at the fixture's teardown
+    monkeypatch.setattr(vsim, "live_sims", lambda: [])
+    plugin.pytest_runtest_logfinish("t.py::e", None)
+    recs = testtrace.read(testtrace.RESULTS.pop("t.py::e")["trace"])
+    assert recs[0]["sims"][0]["context_us"] == testtrace.CONTEXT_US and len(recs[0]["sims"]) == 1
