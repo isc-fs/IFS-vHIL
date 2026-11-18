@@ -163,7 +163,7 @@
         "vhil.dockerContext": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Docker context the vHIL runs in (`VHIL_DOCKER_CONTEXT`). Empty: `colima-vhil` on macOS, `default` elsewhere."
+          "markdownDescription": "Docker context the vHIL runs in (`VHIL_DOCKER_CONTEXT`). Empty: `colima-vhil` on macOS, `default` elsewhere. Docker Desktop is `desktop-linux`: start it yourself, as only a Colima context is a VM the vHIL starts."
         },
         "vhil.ifsHilRef": {
           "type": "string",

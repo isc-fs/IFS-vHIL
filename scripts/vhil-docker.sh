@@ -102,6 +102,17 @@ if [ -n "${VHIL_DOCKER_CPUS:-}" ]; then
 fi
 
 vm() {
+    # Only a Colima context is a VM this script owns. Any other (Docker
+    # Desktop's desktop-linux, a native engine) is started by its owner.
+    if [ "$context" != "colima-$profile" ]; then
+        if "${docker[@]}" info >/dev/null 2>&1; then
+            echo "Docker context $context is up; it isn't a Colima VM, so there is nothing to start." >&2
+            echo "(The ifs-hil job needs vcan, which only the Colima VM is set up with.)" >&2
+            return 0
+        fi
+        echo "error: Docker context $context doesn't answer, and it isn't a Colima VM this script starts: start it yourself." >&2
+        return 1
+    fi
     if ! colima status "$profile" >/dev/null 2>&1; then
         colima start "$profile" --cpu "${VHIL_CPUS:-8}" --memory "${VHIL_MEMORY:-8}" \
             --disk 40 --vm-type vz --vz-rosetta --arch aarch64

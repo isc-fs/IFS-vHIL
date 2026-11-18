@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import {
   builtFirmware, collectArgs, contains, dockerContext, fileOf, jobOf, labelOf, parseLines, plan,
-  runArgs,
+  runArgs, startsVm,
 } from "../src/plan";
 
 test("each id runs under its folder's job", () => {
@@ -49,6 +49,9 @@ test("ids, contexts and built firmware", () => {
   assert.equal(dockerContext("", "darwin"), "colima-vhil");
   assert.equal(dockerContext("", "linux"), "default");
   assert.equal(dockerContext(" mine ", "darwin"), "mine");
+  assert.ok(startsVm("colima-vhil"));
+  assert.ok(!startsVm("desktop-linux"));
+  assert.ok(!startsVm("default"));
   const built = builtFirmware("ecu=/vhil/fw/a/ECU08.elf\necu.bootloader=/vhil/fw/b/bl.elf\n\n");
   assert.equal(built.get("ecu.bootloader"), "/vhil/fw/b/bl.elf");
   assert.equal(built.size, 2);

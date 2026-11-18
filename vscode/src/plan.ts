@@ -129,6 +129,11 @@ export function dockerContext(setting: string, platform: string): string {
   return setting.trim() || (platform === "darwin" ? "colima-vhil" : "default");
 }
 
+/** Whether `vhil-docker.sh vm` starts this context: only its Colima VM (colima-<profile>). */
+export function startsVm(context: string): boolean {
+  return context.startsWith("colima-");
+}
+
 /** The firmware the last `fw` build left, from /vhil/fw/built.txt ("ecu=/vhil/fw/...elf" lines). */
 export function builtFirmware(text: string): Map<string, string> {
   const built = new Map<string, string>();
