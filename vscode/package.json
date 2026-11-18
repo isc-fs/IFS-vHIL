@@ -73,7 +73,13 @@
         "command": "vhil.openEditor",
         "title": "Open the system editor",
         "category": "vHIL",
-        "icon": "$(link-external)"
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "vhil.openSystemInEditor",
+        "title": "Open in the system editor",
+        "category": "vHIL",
+        "icon": "$(type-hierarchy)"
       },
       {
         "command": "vhil.stopEditor",
@@ -268,6 +274,11 @@
           "group": "navigation"
         },
         {
+          "command": "vhil.openEditor",
+          "when": "view == vhil.systems",
+          "group": "navigation"
+        },
+        {
           "command": "vhil.clearRuns",
           "when": "view == vhil.runs",
           "group": "navigation"
@@ -325,6 +336,11 @@
           "group": "inline"
         },
         {
+          "command": "vhil.openSystemInEditor",
+          "when": "view == vhil.systems && viewItem =~ /^system/",
+          "group": "inline"
+        },
+        {
           "command": "vhil.runSystemSim",
           "when": "view == vhil.systems && viewItem =~ /^system/",
           "group": "1_run@1"
@@ -343,6 +359,11 @@
           "command": "vhil.validateSystem",
           "when": "view == vhil.systems && viewItem =~ /^system/",
           "group": "2_check@1"
+        },
+        {
+          "command": "vhil.openSystemInEditor",
+          "when": "view == vhil.systems && viewItem =~ /^system/",
+          "group": "3_open@0"
         },
         {
           "command": "vhil.openSystemFile",
@@ -418,6 +439,10 @@
         },
         {
           "command": "vhil.tool",
+          "when": "false"
+        },
+        {
+          "command": "vhil.openSystemInEditor",
           "when": "false"
         }
       ]

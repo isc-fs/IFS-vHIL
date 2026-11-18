@@ -159,6 +159,9 @@ class Vhil implements vscode.Disposable {
   private editorUp = false;
   private editorTask: vscode.TaskExecution | undefined;
   private editorPanel: vscode.WebviewPanel | undefined;
+  /** The page the panel frames once the editor answers, and whether it does yet. */
+  private editorPage = EDITOR_URL;
+  private editorReady = false;
   private checking: Promise<void> | undefined;
   private checked = 0;
   private systems: SystemInfo[] = [];
@@ -222,6 +225,7 @@ class Vhil implements vscode.Disposable {
       command("vhil.buildFirmware", () => this.buildFirmware()),
       command("vhil.rebuildBoard", (n: Node) => this.task(`Build firmware: ${n.data}`, ["fw", String(n.data)])),
       command("vhil.openEditor", () => this.openEditor()),
+      command("vhil.openSystemInEditor", (n: Node) => this.openEditor(this.systemOf(n).id)),
       command("vhil.stopEditor", () => this.editorTask?.terminate()),
       command("vhil.openSettings", (key?: string) =>
         vscode.commands.executeCommand("workbench.action.openSettings", typeof key === "string" ? key : "vhil.")),
@@ -735,7 +739,7 @@ class Vhil implements vscode.Disposable {
       description: this.editorUp ? "running · localhost:8080" : ours ? "starting…" : "stopped",
       icon: "type-hierarchy",
       context: this.editorUp ? (ours ? "editor.up.ours" : "editor.up") : ours ? "editor.down.ours" : "editor.down",
-      command: this.editorUp ? { command: "vhil.openEditor", title: "Open" } : undefined,
+      command: { command: "vhil.openEditor", title: "Open" },
     });
     const refs = node("Firmware refs", {
       description: `IFS_HIL ${c.ifsHilRef || "dev"}${c.firmwareRefs ? ` · ${c.firmwareRefs}` : ""}`,
@@ -758,18 +762,28 @@ class Vhil implements vscode.Disposable {
   /**
    * The system editor in a VS Code tab: a webview framing EDITOR_URL (the
    * editor's frame-ancestors allows VS Code, vhil/server/security.py). Starts
-   * the editor first if it doesn't answer, and frames it once it does.
+   * the editor first if it doesn't answer, and frames it once it does, on
+   * `system` if given (the editor's ?system=).
    */
-  private async openEditor() {
+  private async openEditor(system?: string) {
+    const page = system ? `${EDITOR_URL}?system=${encodeURIComponent(system)}` : EDITOR_URL;
     if (this.editorPanel) {
       this.editorPanel.reveal();
+      if (system && this.editorReady) {
+        const url = await vscode.env.asExternalUri(vscode.Uri.parse(page));
+        this.editorPanel.webview.html = editorHtml(url.toString(true));
+      } else if (system) {
+        this.editorPage = page;
+      }
       return;
     }
+    this.editorPage = page;
+    this.editorReady = false;
     const panel = vscode.window.createWebviewPanel("vhil.editor", "vHIL system editor",
       vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
     this.editorPanel = panel;
     let open = true;
-    panel.onDidDispose(() => { open = false; this.editorPanel = undefined; });
+    panel.onDidDispose(() => { open = false; this.editorPanel = undefined; this.editorReady = false; });
     panel.webview.html = editorHtml(undefined, "Starting the system editor…");
     const deadline = Date.now() + 5 * 60_000;
     while (open && !(await editorAnswers())) {
@@ -786,8 +800,9 @@ class Vhil implements vscode.Disposable {
     }
     if (!open) return;
     // Through asExternalUri, so a remote window reaches it through a forwarded port.
-    const url = await vscode.env.asExternalUri(vscode.Uri.parse(EDITOR_URL));
+    const url = await vscode.env.asExternalUri(vscode.Uri.parse(this.editorPage));
     panel.webview.html = editorHtml(url.toString(true));
+    this.editorReady = true;
     void this.checkStatus();
   }
 
