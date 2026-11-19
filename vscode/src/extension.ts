@@ -470,7 +470,8 @@ class Vhil implements vscode.Disposable {
   }
 
   private pullImages() {
-    return this.task("Pull images", ["pull"]);
+    // `images`: pull what's published, build what isn't (as a run would).
+    return this.task("Get images", ["images"]);
   }
 
   private outFile(name: string): { rel: string; abs: string } {
@@ -547,7 +548,7 @@ class Vhil implements vscode.Disposable {
   private async check() {
     const up = await this.dockerInfo();
     this.updateView();
-    if (!this.busy) this.setPhase(this.idlePhase());
+    this.settle();
     const editor = editorAnswers();
     if (this.local) {
       const status = await git(this.local.dir, ["status", "--porcelain"]);
@@ -565,7 +566,18 @@ class Vhil implements vscode.Disposable {
     }
     this.editorUp = await editor;
     this.updateView();
-    if (!this.busy) this.setPhase(this.idlePhase());
+    this.settle();
+  }
+
+  /**
+   * The bar back to the idle phase when no run owns it. A run's result stays
+   * up (the check after a run must not wipe it) unless something is wrong.
+   */
+  private settle() {
+    if (this.busy) return;
+    const idle = this.idlePhase();
+    if (this.phase.kind === "result" && idle.kind === "idle") return;
+    this.setPhase(idle);
   }
 
   private missingFirmware(): string[] {
@@ -600,7 +612,7 @@ class Vhil implements vscode.Disposable {
       needed: NEEDED_FW, editorUp: this.editorUp, debugger: await this.debuggerHealth(),
     });
     const fixes: { [f in Fix]: string } = {
-      startVm: "Start the Docker VM", pullImages: "Pull the images", buildFirmware: "Build firmware",
+      startVm: "Start the Docker VM", pullImages: "Get the images", buildFirmware: "Build firmware",
       openSettings: "Open the setting", openEditor: "Open the system editor",
     };
     const pick = await vscode.window.showQuickPick(list.map((f) => ({
@@ -820,6 +832,7 @@ class Vhil implements vscode.Disposable {
         this.setPhase({ kind: "building", firmware: `${this.local.firmware.id}@local` });
         const built = await this.buildLocal(run, tally, all, token);
         if (built === "failed") tested.started = true;
+        if (built === "cancelled") skipAll("vHIL: cancelled during the firmware build: nothing ran.");
         if (built === "infra") {
           skipAll("vHIL: the firmware build didn't get to the compiler: nothing ran.");
           void vscode.window.showErrorMessage(
@@ -839,6 +852,8 @@ class Vhil implements vscode.Disposable {
     } finally {
       run.end();
       this.busy--;
+      // The run may have pulled or built the images, and built firmware.
+      void this.checkStatus();
       // The first failure's buses, in the panel, without taking focus.
       const failed = all.find((t) => tally.failed.has(t.id) && this.traces.has(t.id));
       if (failed) void this.tracePanel.show(this.traces.get(failed.id)!, labelOf(failed.id), false);
@@ -920,7 +935,7 @@ class Vhil implements vscode.Disposable {
    * report as nothing ran.
    */
   private async buildLocal(run: vscode.TestRun, tally: Tally, tests: vscode.TestItem[],
-                           token: vscode.CancellationToken): Promise<"ok" | "failed" | "infra"> {
+                           token: vscode.CancellationToken): Promise<"ok" | "failed" | "infra" | "cancelled"> {
     const fw = this.local!.firmware.id;
     const system = buildSystem(this.systems, fw);
     if (!system) return "ok";
@@ -955,6 +970,8 @@ class Vhil implements vscode.Disposable {
     }
     for (const [file, list] of byFile) this.problems.set(vscode.Uri.file(file), list);
     if (code === 0) return "ok";
+    // Cancel (or a debugger that didn't start) killed the build: not a failure.
+    if (token.isCancellationRequested) return "cancelled";
     const errors = diags.filter((d) => d.severity === "error");
     if (!errors.length && (code === -1 || INFRA_FAILURE.test(text))) return "infra";
     const why = errors.length
@@ -1228,7 +1245,9 @@ class Vhil implements vscode.Disposable {
       ended.dispose();
       linked.dispose();
       if (!held && !attachError && !token.isCancellationRequested) {
-        void vscode.window.showWarningMessage(`vHIL: no board was held: ${board} never started in ${labelOf(test.id)}.`);
+        void vscode.window.showWarningMessage(liveRun
+          ? `vHIL: no board was held: ${board} never started in ${labelOf(test.id)}.`
+          : `vHIL: ${labelOf(test.id)} is no longer in the test listing: nothing ran.`);
       }
       if (session) await vscode.debug.stopDebugging(session);
       cts.dispose();

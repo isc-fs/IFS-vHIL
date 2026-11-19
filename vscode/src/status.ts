@@ -32,15 +32,19 @@ export function parseStatus(text: string): StackStatus | undefined {
   const built: string[] = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
-    const at = line.indexOf("=");
-    if (at <= 0) continue;
-    const key = line.slice(0, at);
-    const value = line.slice(at + 1);
-    const state = STATES.find((s) => s === value);
-    if (key === "docker" && (value === "up" || value === "down" || value === "nocli")) docker = value;
-    else if (key === "base_state" && state) baseState = state;
-    else if (key === "editor_state" && state) editorState = state;
-    else if (key === "built") built.push(value);
+    // built=<board>=<elf>: the rest of the line, which may hold spaces.
+    if (line.startsWith("built=")) { built.push(line.slice(6)); continue; }
+    // Any other line holds key=value tokens: `base=<k> base_state=<s>`.
+    for (const token of line.split(/\s+/)) {
+      const at = token.indexOf("=");
+      if (at <= 0) continue;
+      const key = token.slice(0, at);
+      const value = token.slice(at + 1);
+      const state = STATES.find((s) => s === value);
+      if (key === "docker" && (value === "up" || value === "down" || value === "nocli")) docker = value;
+      else if (key === "base_state" && state) baseState = state;
+      else if (key === "editor_state" && state) editorState = state;
+    }
   }
   if (!docker) return undefined;
   return { docker, baseState, editorState, built: builtLines(built.join("\n")) };
@@ -54,10 +58,10 @@ export function imagesNeeded(base?: ImageState, editor?: ImageState): boolean {
 /** What getting the images costs, for a tooltip. */
 export function imagesCost(base?: ImageState, editor?: ImageState): string {
   if (base === "missing") return "No published image matches this checkout: the base builds from source, ~30 min.";
-  if (editor === "missing" && base !== "published") {
-    return "The editor image builds on the published base (a few minutes).";
-  }
-  return "The published images of this checkout aren't here yet: pull several GB once.";
+  const editorBuilds = editor === "missing" ? " The editor image isn't published: it builds on the base (a few minutes)." : "";
+  if (base === "published") return `The published base image of this checkout isn't here yet: pull several GB once.${editorBuilds}`;
+  if (editorBuilds) return editorBuilds.trim();
+  return "The published images of this checkout aren't here yet: pull them once.";
 }
 
 /** Where the vHIL is: what the status bar shows. */
@@ -163,7 +167,7 @@ export interface Health {
 function imagesFinding(h: Health): Finding {
   const { baseState: b, editorState: e } = h;
   if (b === undefined && e === undefined) {
-    return { ok: true, label: "Images", detail: "pulled on first use; pull again for a fresh copy", fix: "pullImages" };
+    return { ok: true, label: "Images", detail: "fetched on first use (pulled, or built when not published)", fix: "pullImages" };
   }
   if (b === "local" && e === "local") return { ok: true, label: "Images", detail: "this checkout's, here" };
   if (b === "missing") {
@@ -175,7 +179,7 @@ function imagesFinding(h: Health): Finding {
   if (b === "published" || e === "published") {
     return { ok: false, label: "Images", detail: "published, not pulled yet (several GB)", fix: "pullImages" };
   }
-  return { ok: false, label: "Images", detail: "the editor image builds on the published base (a few minutes)" };
+  return { ok: false, label: "Images", detail: "the editor image builds on the base (a few minutes)", fix: "pullImages" };
 }
 
 function debuggerFinding(d: DebuggerHealth): Finding {

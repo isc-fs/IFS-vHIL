@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { barOf, findings, groupId, Health, imagesNeeded, parseStatus, scenarioSystem } from "../src/status";
+import { barOf, findings, groupId, Health, imagesCost, imagesNeeded, parseStatus, scenarioSystem } from "../src/status";
 
 test("the status bar: Docker down asks to diagnose, idle and results run the tests", () => {
   const down = barOf({ kind: "down", context: "desktop-linux" });
@@ -46,8 +46,8 @@ test("a scenario's system comes from its test id", () => {
 
 test("vhil-docker.sh status: docker, image states, built firmware (later lines win)", () => {
   const s = parseStatus([
-    "docker=up", "base=ifs-vhil:abc", "base_state=local", "editor=ifs-vhil-editor:def",
-    "editor_state=published", "clean=true",
+    // The script's real format: key and state on one line.
+    "docker=up", "base=abc base_state=local", "editor=def editor_state=published", "clean=true",
     "built=ecu=/vhil/fw/ecu@dev/ECU08.elf", "built=ams=/vhil/fw/ams@dev/AMS.elf",
     "built=ecu=/vhil/fw/ecu@local/ECU08.elf", "",
   ].join("\n"))!;
@@ -97,7 +97,7 @@ test("Diagnose: no docker CLI, image states, the debugger", () => {
   const missing = images("missing", "missing");
   assert.ok(!missing.ok);
   assert.match(missing.detail, /no published image: the first run builds Renode \(~30 min\)/);
-  assert.match(images("local", "missing").detail, /editor image builds on the published base/);
+  assert.match(images("local", "missing").detail, /editor image builds on the base/);
   assert.match(images("unknown", "local").detail, /registry unreachable/);
 
   const dbg = (d: NonNullable<Health["debugger"]>) => findings({ ...h, debugger: d }).at(-1)!;
@@ -109,4 +109,10 @@ test("Diagnose: no docker CLI, image states, the debugger", () => {
   assert.match(dbg({ cpptools: false, gdb: "x" }).detail, /ms-vscode.cpptools/);
   // Docker down still says whether Debug Test would work.
   assert.equal(findings({ ...h, dockerUp: false, debugger: { cpptools: true, gdb: "g" } }).at(-1)?.label, "Debugger");
+});
+
+test("images cost: an unpublished editor builds, even on a published base", () => {
+  assert.match(imagesCost("published", "missing"), /pull several GB.*editor image .*builds/);
+  assert.match(imagesCost("local", "missing"), /editor image .*builds/);
+  assert.match(imagesCost("missing", "missing"), /~30 min/);
 });

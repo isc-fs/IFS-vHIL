@@ -51,7 +51,7 @@
       },
       {
         "command": "vhil.pullImages",
-        "title": "Pull images",
+        "title": "Get images (pull, or build what isn't published)",
         "category": "vHIL"
       },
       {
