@@ -24,6 +24,9 @@ def pytest_addoption(parser):
     g.addoption("--vhil-trace", nargs="?", type=int, const=4096, default=0, metavar="BLOCKS",
                 help="keep the last BLOCKS translation blocks per CPU (default 4096) for "
                      "failure snapshots; the emulation runs 5-8x slower")
+    g.addoption("--vhil-trace-dir", default=None,
+                help="write each test's bus trace here (default: <sim-log-dir>/traces, or "
+                     "traces/ beside --vscode-out); docs/test-trace.md")
     g.addoption("--vhil-coverage", default=None, metavar="DIR",
                 help="write firmware coverage (lcov, function lists, summary) to DIR")
 
@@ -35,6 +38,8 @@ def pytest_configure(config):
     sim.INSTRUMENT.trace = config.getoption("--vhil-trace") or 0
     _record_systems(sim, os.environ.get("VHIL_IMPACT_RECORD"))
     _gate_quantum(sim)
+    from vhil import testtrace
+    testtrace.install(config)
     cov = config.getoption("--vhil-coverage")
     if cov:
         # A fresh run: logs left by an earlier one would be counted again.

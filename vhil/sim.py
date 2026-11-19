@@ -63,6 +63,9 @@ class Instrumentation:
     # Called with the Sim when a `with Sim(...)` block exits on an exception,
     # before Renode stops: the last chance to snapshot it (tests/sim/conftest.py).
     on_error_exit: Optional[Callable[["Sim"], None]] = None
+    # Called with the Sim as it stops, while Renode still answers: the last
+    # chance to read what it recorded (the per-test trace, vhil/testtrace.py).
+    on_stop: Optional[Callable[["Sim"], None]] = None
 
 
 INSTRUMENT = Instrumentation()
@@ -582,6 +585,9 @@ class Sim:
             self._start_coverage(Path(self.coverage_dir))
         if self.uart_log_dir is not None:
             self._capture_uarts(self.uart_log_dir)
+        # VHIL_DEBUG=<board>:<port>: wait for an outside debugger (#425).
+        from vhil import debugattach
+        debugattach.maybe_attach(self)
         _live.append(self)
         return self
 
@@ -628,6 +634,11 @@ class Sim:
         aborted = False
         if self._monitor is not None:
             aborted = self._monitor.aborted is not None
+            if not aborted and INSTRUMENT.on_stop is not None:
+                try:
+                    INSTRUMENT.on_stop(self)
+                except Exception:
+                    pass   # a trace never keeps a Sim from stopping
             if not aborted:
                 try:
                     self._monitor.execute("quit")

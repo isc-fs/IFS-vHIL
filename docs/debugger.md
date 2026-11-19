@@ -162,3 +162,26 @@ contracts.
   lockstep, until the step completes.
 - Sources are the fw volume's checkout of the image's ref, which a rebuild of
   that ref replaces (the image is reused by ref name: docs/deploy.md).
+
+## From VS Code: a test's board, held for your debugger
+
+`VHIL_DEBUG=<board>:<port>` (`scripts/vhil-docker.sh` passes it and
+publishes the port on the host's 127.0.0.1) makes the first `Sim` of a test
+run with that board start its stub and wait, before it runs a single
+instruction, for a GDB on that port (`vhil/debugattach.py`; up to
+`VHIL_DEBUG_WAIT_S`, 300 s). The board's images and `ready.json` (board,
+port, system, images, their build trees) go to `results/vscode/debug/`, for
+the debugger on the host to load. The stub is the one above, behind a
+forwarder in the container (the stub listens on the container's 127.0.0.1
+only), with the same limits: no memory or register writes, no `monitor`,
+no detach (GDB leaving lets the board run on). A held board holds every
+board, as above, and the monitor waits for it with no timeout.
+
+```sh
+VHIL_DEBUG=ams:3333 scripts/vhil-docker.sh sim tests/sim/test_ams_boot.py::test_relays_stay_open_through_boot
+# then, on the host:
+arm-none-eabi-gdb results/vscode/debug/ams.elf -ex "add-symbol-file results/vscode/debug/ams.bootloader.elf" \
+    -ex "target remote 127.0.0.1:3333"     # stopped at Reset_Handler; break main, continue
+```
+
+The VS Code extension's **Debug** profile does this for a test (#425).
