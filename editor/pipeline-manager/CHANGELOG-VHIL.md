@@ -732,6 +732,19 @@ from `git archive 04613679` except as listed below.
     (`GET /api/systems/<id>/dataflow?new=true&firmware=`,
     vhil/server/systems_write.py).
 
+34. **A board without roles picks its firmware, not a role.**
+    `vhil/VhilBoardControls.vue` showed the Role select on every board,
+    disabled and empty on the SensorHub, which is not a main control unit
+    and has no roles (`catalog/boards/sensorhub.yaml`), and showed its
+    firmware as "(none)" with no way to pick one: the card only showed it
+    and the inspector is read-only. The Role row now shows only on a board
+    with roles; one without gets a Firmware select (the spec's `firmware`
+    values, "(none)" reading "none: an image given at run"), and picking
+    one resets its ref to the catalogue's. `workspace.js` `boardFirmware`
+    drops "(none)" (`NO_FIRMWARE`). The backend offers such a board only
+    firmware no board of another platform claims (`vhil/editor.py`
+    `firmware_for`), so the SensorHub isn't offered the MainLite's.
+
 ## Left for later
 
 - **Dependabot alerts with no fix.** `showdown` ≤ 2.1.0 (three: ReDoS and

@@ -548,6 +548,9 @@ export function refsOf(fwId, all = false) {
 }
 export const clearRefs = () => refsCache.clear();
 
+/** A board without roles names no catalogue firmware (vhil/editor.py NO_FIRMWARE). */
+export const NO_FIRMWARE = '(none)';
+
 /**
  * A board's app and bootloader: the firmware each runs (the role sets which:
  * a node property shown read-only) and the ref picked for it. "<id> (not in
@@ -568,7 +571,9 @@ export function boardFirmware(node) {
             fw: ws.firmware[fwId] || null,
             ref: String(propValue(node, refProp)),
         };
-    }).filter((f) => f.fwId);
+    // '(none)' (vhil/editor.py NO_FIRMWARE): no catalogue firmware, an
+    // image given at run.
+    }).filter((f) => f.fwId && f.fwId !== NO_FIRMWARE);
 }
 
 /** Picks a ref (empty: the catalogue's, so the file keeps no ref). */
