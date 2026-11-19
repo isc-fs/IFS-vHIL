@@ -761,6 +761,11 @@ from `git archive 04613679` except as listed below.
     each from there. Signed in (`vhil login`), a commit goes to a branch of
     yours on the opened commit and is pushed right after
     ([docs/team-store.md](../../docs/team-store.md)).
+38. **Sign in from the Team view.** **Sign in with GitHub** runs GitHub's
+    device flow on the server (`vhil/server/account.py`): the view shows the
+    code and link, polls until it is entered, then reloads who you are and
+    `/api/config` (Propose). The server reads the account file live, so
+    signing in or out needs no restart.
 
 ## Left for later
 
