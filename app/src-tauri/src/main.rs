@@ -127,6 +127,26 @@ fn account_cmd(verb: &str) -> Command {
     c
 }
 
+/// `bin/vhil-clone <verb> <dir> [base]`: your own clone against GitHub
+/// (status, update, switch). The app's own copy, like ACCOUNT_SCRIPT.
+const CLONE_SCRIPT: &str = include_str!("../../../bin/vhil-clone");
+/// The branch work reaches through pull requests.
+const BASE_BRANCH: &str = "dev";
+
+fn clone_cmd(args: &[&str]) -> Command {
+    let mut c = if WSL {
+        let mut c = command("wsl.exe");
+        c.args(["-e", "bash", "-c", CLONE_SCRIPT, "vhil-clone"]);
+        c
+    } else {
+        let mut c = command("/bin/bash");
+        c.args(["-c", CLONE_SCRIPT, "vhil-clone"]);
+        c
+    };
+    c.args(args);
+    c
+}
+
 /// `bin/vhil <args>` in the workspace.
 fn vhil(ws: &str, args: &[&str]) -> Command {
     let mut c = if WSL {
@@ -378,6 +398,37 @@ async fn doctor(app: AppHandle) -> Result<serde_json::Value, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Your own clone against GitHub (`vhil-clone status`, after a fetch): its
+/// branch, how far behind its upstream, and whether it is merged into dev
+/// already. None for the app's own copy (it follows the app's ref) or when
+/// git can't tell (no branch, not a clone).
+#[tauri::command]
+async fn clone_status(app: AppHandle) -> Option<serde_json::Value> {
+    let s = load_settings(&app);
+    let ws = s.workspace?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = clone_cmd(&["status", &ws, BASE_BRANCH]).stdin(Stdio::null()).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let mut m = serde_json::Map::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                let v = v.parse::<u64>().map(serde_json::Value::from)
+                    .unwrap_or_else(|_| serde_json::Value::from(v));
+                m.insert(k.to_string(), v);
+            }
+        }
+        if m.contains_key("detached") || !m.contains_key("branch") {
+            return None;
+        }
+        m.insert("base".into(), BASE_BRANCH.into());
+        Some(serde_json::Value::Object(m))
+    })
+    .await
+    .ok()?
+}
+
 /// The GitHub account the team store shares as (`vhil-account whoami`), or None.
 #[tauri::command]
 async fn account() -> Option<String> {
@@ -392,7 +443,8 @@ async fn account() -> Option<String> {
 
 /// The long tasks: `tools` (macOS: Homebrew installs colima and docker),
 /// `workspace` (clone, or move the app's clone to its ref), `vm` (macOS),
-/// `setup`, and `login` / `logout` (the team store's GitHub account).
+/// `setup`, `login` / `logout` (the team store's GitHub account), and for
+/// your own clone `update-clone` (fast-forward) / `switch-clone` (to dev).
 #[tauri::command]
 fn run(app: AppHandle, task: String) -> Result<(), String> {
     let cmd = match task.as_str() {
@@ -423,6 +475,16 @@ fn run(app: AppHandle, task: String) -> Result<(), String> {
                 git log --oneline -1"#,
                 &[&ws, REPO_URL, workspace_ref()],
             )
+        }
+        "update-clone" | "switch-clone" => {
+            let Some(ws) = load_settings(&app).workspace else {
+                return Err("the app's own copy follows the app: use Update".into());
+            };
+            if task == "update-clone" {
+                clone_cmd(&["update", &ws])
+            } else {
+                clone_cmd(&["switch", &ws, BASE_BRANCH])
+            }
         }
         "vm" => vhil(&workspace(&app)?, &["vm"]),
         "setup" => vhil(&workspace(&app)?, &["setup"]),
@@ -767,6 +829,7 @@ fn main() {
             info,
             set_workspace,
             doctor,
+            clone_status,
             account,
             open_device_page,
             run,
