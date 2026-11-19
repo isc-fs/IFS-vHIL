@@ -10,6 +10,9 @@ let info = null;
 let doctor = null;
 let running = null; // the task in progress
 let autoOpened = false;
+// Your own clone against GitHub (main.rs clone_status): undefined while it
+// is fetched, null when git can't tell (or the app's own copy).
+let clone;
 
 function step(id, level, detail, actions = []) {
   const li = $(`#step-${id}`);
@@ -70,10 +73,13 @@ function render() {
   if (!info.present) {
     step("workspace", "fail", info.managed ? "Not downloaded yet (about 25 MB)." : `${where} has no bin/vhil.`,
       info.managed && t.git ? [{ label: "Download", task: "workspace" }] : []);
-  } else {
+  } else if (info.managed) {
     step("workspace", info.synced ? "ok" : "warn",
-      info.managed ? (info.synced ? `The app's copy, at ${info.workspace_ref}: ${where}` : `The app's copy needs moving to ${info.workspace_ref}.`) : `Your clone: ${where}`,
-      info.managed ? [{ label: "Update", task: "workspace" }] : []);
+      info.synced ? `The app's copy, at ${info.workspace_ref}: ${where}` : `The app's copy needs moving to ${info.workspace_ref}.`,
+      [{ label: "Update", task: "workspace" }]);
+  } else {
+    const [level, detail, actions] = cloneStep(where);
+    step("workspace", level, detail, actions);
   }
 
   // 3. VM (macOS) and 4. images + firmware: from `vhil doctor`
@@ -118,16 +124,56 @@ function render() {
   // Sign in is a task too: one at a time (main.rs `busy`).
   $("#account-btn").disabled = Boolean(running);
 
-  if (ready && !fwMissing && !stay && !autoOpened && !running) {
+  // Your clone behind GitHub: stay here, so the warning is seen (Open still works).
+  const cloneSettled = info.managed || (clone !== undefined && !cloneAttention());
+  if (ready && !fwMissing && !stay && !autoOpened && !running && cloneSettled) {
     autoOpened = true;
     openApp();
   }
 }
 
+/** Whether your clone wants a look: behind its upstream, or merged into dev. */
+function cloneAttention() {
+  return Boolean(clone && (clone.behind > 0 || clone.merged > 0));
+}
+
+/** The "vHIL files" step for your own clone: [level, detail, actions]. */
+function cloneStep(where) {
+  const head = `Your clone: ${where}`;
+  if (clone === undefined) return ["ok", `${head} (checking GitHub…)`, []];
+  if (!clone) return ["ok", head, []];
+  const b = clone.branch;
+  const offline = clone.fetched ? "" : " (GitHub didn't answer: as of the last fetch)";
+  const n = (k) => `${k} commit${k === 1 ? "" : "s"}`;
+  if (clone.merged > 0) {
+    // Everything on the branch is in dev already: dev is the place to be.
+    return ["warn",
+      `${head}. ${b} is already in ${clone.base}, which is ${n(clone.merged)} ahead${offline}. ` +
+        "The vHIL runs the code of the branch you're on." +
+        (clone.dirty ? " Commit or stash your changes to switch." : ""),
+      clone.dirty ? [] : [{ label: `Switch to ${clone.base}`, task: "switch-clone" }]];
+  }
+  if (clone.behind > 0 && clone.ahead > 0) {
+    return ["warn",
+      `${head}. ${b} and ${clone.upstream} have both moved on (${clone.ahead} ahead, ${clone.behind} behind)${offline}: merge or rebase it with git.`, []];
+  }
+  if (clone.behind > 0) {
+    return ["warn", `${head}. ${b} is ${n(clone.behind)} behind ${clone.upstream}${offline}.`,
+      [{ label: "Update", task: "update-clone" }]];
+  }
+  return ["ok", `${head}, on ${b}${clone.upstream ? `, up to date with ${clone.upstream}` : ""}${offline}.`, []];
+}
+
 async function refresh() {
   info = await invoke("info");
   doctor = null;
+  clone = info.managed ? null : undefined;
   render();
+  if (!info.managed && info.present) {
+    invoke("clone_status").then((c) => { clone = c ?? null; }, () => { clone = null; }).then(render);
+  } else {
+    clone = null;
+  }
   if (info.present && info.tools.docker) {
     try {
       doctor = await invoke("doctor");

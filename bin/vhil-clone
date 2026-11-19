@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Your own clone against GitHub, for the desktop app's "vHIL files" step. The
+# app carries its own copy (include_str!), so it works whatever commit the
+# clone is at.
+#
+#   vhil-clone status <dir> [base]  fetch origin, then key=value lines:
+#       branch, fetched, upstream, ahead, behind (vs the upstream), dirty,
+#       merged=<n> when the branch is all in origin/<base> (dev), n commits
+#       behind it; detached=1 on no branch
+#   vhil-clone update <dir>         fast-forward the branch to its upstream
+#   vhil-clone switch <dir> [base]  switch to <base> and fast-forward it
+#
+# Never merges, rebases or discards anything: a fast-forward or nothing.
+set -uo pipefail
+
+cmd=${1:-} dir=${2:-} base=${3:-dev}
+cd "$dir" 2>/dev/null || { echo "no directory $dir" >&2; exit 1; }
+# Never wait for a password or a host-key prompt: no terminal to answer it.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND=${GIT_SSH_COMMAND:-"ssh -o BatchMode=yes -o ConnectTimeout=8"}
+
+case $cmd in
+status)
+    b=$(git symbolic-ref -q --short HEAD) || { echo detached=1; exit 0; }
+    echo "branch=$b"
+    git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 fetch --quiet origin \
+        </dev/null 2>/dev/null && echo fetched=1
+    if u=$(git rev-parse -q --verify --symbolic-full-name '@{u}' 2>/dev/null); then
+        echo "upstream=${u#refs/remotes/}"
+        read -r ahead behind < <(git rev-list --left-right --count 'HEAD...@{u}')
+        echo "ahead=$ahead"
+        echo "behind=$behind"
+    fi
+    [ -n "$(git status --porcelain --untracked-files=no)" ] && echo dirty=1
+    if [ "$b" != "$base" ] && git rev-parse -q --verify "refs/remotes/origin/$base" >/dev/null \
+        && git merge-base --is-ancestor HEAD "origin/$base"; then
+        echo "merged=$(git rev-list --count "HEAD..origin/$base")"
+    fi
+    exit 0 ;;
+update)
+    git merge --ff-only '@{u}' ;;
+switch)
+    git switch "$base" && git merge --ff-only '@{u}' ;;
+*)
+    sed -n '2,/^set -uo/{/^#/p;}' "$0" | sed 's/^# \{0,1\}//'
+    exit 2 ;;
+esac
