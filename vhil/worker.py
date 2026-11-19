@@ -95,13 +95,14 @@ from vhil import runlog
 from vhil import expect as vexpect
 from vhil import stateview
 from vhil.server.config import Settings
-from vhil.server.runs import (HEARTBEAT_S, MAX_ATTEMPTS, RECLAIM_AFTER_S, TRACE, Limits,
-                              RunStore, code_changes, materialise_system, trace_header)
+from vhil.server.runs import (HEARTBEAT_S, LOCAL_REF, MAX_ATTEMPTS, RECLAIM_AFTER_S, TRACE, Limits,
+                              RunStore, code_changes, local_sources, materialise_system,
+                              trace_header)
 from vhil.server.session import SessionStore
 from vhil.server.workspace import Workspace
 from vhil.system import (COMMIT, GATE_QUANTUM_US, System, SystemError, built_images,
                          commit_image_path, commit_source_dir, find_build, image_path,
-                         quantum_us, stamp_ref)
+                         local_source_dir, quantum_us, stamp_ref)
 
 DEFAULT_FW_DIR = Path(os.environ.get("VHIL_FW_DIR", "/vhil/fw"))
 
@@ -1200,6 +1201,9 @@ def resolve_commits(system: System, refs: dict, lister, known: Optional[dict] = 
     known, out, listed = known or {}, {}, {}
     for key in system.images():
         fw, ref = image_ref(system, key, refs)
+        if ref == LOCAL_REF:
+            out[key] = {"ref": ref, "commit": None}       # a working tree has no commit
+            continue
         k = known.get(key) or {}
         if k.get("ref") == ref and isinstance(k.get("commit"), str) and COMMIT.fullmatch(k["commit"]):
             out[key] = {"ref": ref, "commit": k["commit"]}
@@ -1250,6 +1254,13 @@ class Image(NamedTuple):
     commit: Optional[str] = None
 
 
+def _missing(want: dict[str, Image], built) -> list[str]:
+    """The images to build: those not built yet, and every working tree's
+    (its edits since the last run; the build is incremental)."""
+    return [k for k, im in want.items()
+            if im.ref == LOCAL_REF or im.path not in built or not im.path.is_file()]
+
+
 class FirmwareResolver:
     """Image key -> ELF for a system at the requested refs and their
     commits (module doc). `lister` resolves a ref the run has no commit for
@@ -1286,7 +1297,9 @@ class FirmwareResolver:
             fw, ref = image_ref(system, key, refs)
             c = (commits or {}).get(key)
             commit = c.get("commit") if isinstance(c, dict) else c
-            if commit:
+            if ref == LOCAL_REF:
+                path = (local_source_dir(self.fw_dir, fw) / fw["build"]["elf"]).resolve()
+            elif commit:
                 path = find_build(self.fw_dir, fw, commit, built) or \
                     commit_image_path(self.fw_dir, fw, commit).resolve()
             else:
@@ -1305,7 +1318,7 @@ class FirmwareResolver:
         with fwprune.reuse_lock(self.fw_dir):
             want = self.expected(system, refs, commits)
             built = self._built()
-            missing = [k for k, im in want.items() if im.path not in built or not im.path.is_file()]
+            missing = _missing(want, built)
             self._used(system, refs, {k: im for k, im in want.items() if k not in missing})
         if missing:
             if not self.build:
@@ -1323,13 +1336,21 @@ class FirmwareResolver:
                     fcntl.flock(lock, fcntl.LOCK_EX)
                 want = self.expected(system, refs, commits)    # another worker may have built it
                 built = self._built()
-                missing = [k for k, im in want.items()
-                           if im.path not in built or not im.path.is_file()]
+                missing = _missing(want, built)
                 if missing:
                     cmd = [sys.executable, "-m", "vhil.system", "build", str(system.path),
                            "--workdir", str(self.fw_dir)]
+                    trees = local_sources()
                     for key in missing:
-                        cmd += ["--only", key, "--ref", f"{key}={want[key].ref}"]
+                        cmd += ["--only", key]
+                        if want[key].ref == LOCAL_REF:
+                            fw, _ = image_ref(system, key, refs)
+                            if fw["id"] not in trees:
+                                raise RuntimeError(f"{key}: no working tree of {fw['id']} on this "
+                                                   f"server (VHIL_LOCAL_SOURCES)")
+                            cmd += ["--source", f"{fw['id']}={trees[fw['id']]}"]
+                            continue
+                        cmd += ["--ref", f"{key}={want[key].ref}"]
                         if want[key].commit:
                             cmd += ["--commit", f"{key}={want[key].commit}"]
                     self.log("building firmware: " + " ".join(cmd))
@@ -1337,8 +1358,11 @@ class FirmwareResolver:
                         f"{k} at {want[k].ref}" + (f" ({want[k].commit[:12]})" if want[k].commit else "")
                         for k in missing))
                     built_out = run_build(cmd, say)
+                    # A working tree's build is this run's alone: not one to reuse.
+                    kept = "".join(line for line in built_out.splitlines(keepends=True)
+                                   if "@local/" not in line)
                     with open(self.fw_dir / "built.txt", "a") as f:
-                        f.write(built_out)
+                        f.write(kept)
         # A commit build remembers each name it was run as (vhil.system
         # newest_build: the editor's contract before a run).
         for key, im in want.items():
