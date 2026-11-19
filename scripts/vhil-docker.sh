@@ -7,6 +7,8 @@
 #   scripts/vhil-docker.sh vm                    create/start the VM, with vcan
 #   scripts/vhil-docker.sh pull                  pull the published images of this checkout
 #   scripts/vhil-docker.sh image                 (re)build the images (docker/) locally
+#   scripts/vhil-docker.sh images                get what a run needs: pull the published images,
+#                                                build the ones that aren't (as a run would)
 #   scripts/vhil-docker.sh status                what's there, read-only (never pulls, builds
 #                                                or changes anything): key=value lines, below
 #   scripts/vhil-docker.sh fw [ecu ams udv ...]  build firmware from systems/<s>.yaml
@@ -420,6 +422,7 @@ case "$cmd" in
 vm) vm ;;
 pull) pull_images ;;
 image) build_images ;;
+images) ensure_images ;;
 status) status ;;
 fw)
     [ $# -gt 0 ] || set -- ecu ams
