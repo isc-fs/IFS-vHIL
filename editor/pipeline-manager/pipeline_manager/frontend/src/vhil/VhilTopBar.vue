@@ -153,6 +153,15 @@ scenario" records it.
             </select>
         </label>
 
+        <label
+            v-if="ws.config.local_firmware?.length" class="vhil-quantum"
+            :title="`Build ${ws.config.local_firmware.join(', ')} from your working tree, `
+                + 'uncommitted edits included, before each Run, Live and pytest run '
+                + '(off: the catalogue\'s or the board\'s refs)'"
+        >
+            <input v-model="ws.useLocal" type="checkbox" :disabled="live" />
+            <span class="mono">{{ ws.config.local_firmware.map((f) => `${f}@local`).join(', ') }}</span>
+        </label>
         <div v-if="!live" class="vhil-run-buttons">
             <button
                 type="button" class="vhil-btn --primary" :disabled="ws.busy || running"

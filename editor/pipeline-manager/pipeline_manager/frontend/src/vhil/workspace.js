@@ -84,7 +84,12 @@ const LAYOUT = {
 };
 
 export const ws = reactive({
-    config: { run_virtual_ms: 5000, base_branch: 'dev', can_open_pr: false },
+    config: {
+        run_virtual_ms: 5000, base_branch: 'dev', can_open_pr: false, local_firmware: [],
+    },
+    // Runs build the server's working tree (config.local_firmware: the VS
+    // Code extension's firmware repository) instead of the catalogue's refs.
+    useLocal: true,
     systems: [],
     firmware: {}, // id -> catalogue firmware (repo, ref)
     // The open system. saved: the signature of the graph when it was opened
@@ -807,9 +812,9 @@ export function startLive() {
             say('No live session', 'warning', why.replace('Run then runs', 'Live then runs'));
             return;
         }
-        const body = runRequest({
+        const body = withLocal(runRequest({
             system: ws.id, ref: ws.runRef, dataflow, virtualMs: 1, quantumUs: ws.quantumUs,
-        });
+        }));
         // Open-ended: the server caps it (VHIL_MAX_LIVE_MS).
         const { quantum_us: quantum } = body.scenario;
         body.scenario = { kind: 'run', live: true };
@@ -932,6 +937,12 @@ async function scenarioRunEnded(id) {
     }
 }
 
+/** A run body with `local` set when it builds the server's working tree. */
+function withLocal(body) {
+    if (ws.useLocal && ws.config.local_firmware?.length) body.local = true;
+    return body;
+}
+
 export function runNow() {
     return guarded('Run', async () => {
         if (isLive()) throw new Error(`live session ${replay.id} is on: stop it first`);
@@ -956,9 +967,9 @@ export function runNow() {
             say('Not run', 'warning', why);
             return;
         }
-        const body = runRequest({
+        const body = withLocal(runRequest({
             system: ws.id, ref: ws.runRef, dataflow, virtualMs, scenario, quantumUs: ws.quantumUs,
-        });
+        }));
         let out;
         try {
             out = await call('POST', '/api/runs', body);
@@ -1002,12 +1013,12 @@ export function runPytest() {
         const tests = ws.pytest.select.trim();
         if (!ws.id || ws.isNew) throw new Error('open a saved system first');
         if (!tests) throw new Error('name a test file or node id under tests/sim');
-        const body = {
+        const body = withLocal({
             system: ws.id,
             scenario: {
                 kind: 'pytest', select: tests, timeout_s: Number(ws.pytest.timeoutS) || 3600,
             },
-        };
+        });
         let out;
         try {
             out = await call('POST', '/api/runs', body);
