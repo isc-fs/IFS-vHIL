@@ -251,7 +251,7 @@ logout) rm -f "$account_file"; echo "Signed out" ;;
 whoami) [ -n "$(account login)" ] && account login || { echo "not signed in: vhil login" >&2; exit 1; } ;;
 export) exec "$wrapper" export-run "$@" ;;
 import) exec "$wrapper" import-run "$@" ;;
-stop) "${docker[@]}" compose -f "$repo/docker/compose.yaml" down ;;
+stop) exec "$wrapper" down ;;
 version)
     echo "vhil $(git -C "$repo" describe --tags --always --dirty 2>/dev/null || echo unknown)"
     keys ;;
