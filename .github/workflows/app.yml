@@ -20,7 +20,7 @@ name: App
 
 on:
   pull_request:
-    paths: [app/**, .github/workflows/app.yml]
+    paths: [app/**, bin/vhil-account, .github/workflows/app.yml]
   push:
     tags: ['v*']
   workflow_dispatch:

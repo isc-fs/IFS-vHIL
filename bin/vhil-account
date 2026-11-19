@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# vhil-account: your GitHub account for the team store (docs/team-store.md).
+#
+#   vhil-account login    sign in (GitHub's device flow; prints "Open <url> and enter <code>")
+#   vhil-account whoami   your login, or exit 1
+#   vhil-account token    your token, or exit 1 (for vhil ui)
+#   vhil-account logout   forget it
+#
+# Standalone on purpose: bin/vhil runs it (vhil login, ...), and the desktop
+# app carries its own copy (app/src-tauri/src/main.rs) so signing in works
+# whichever commit your clone is at. It needs bash, curl, sed and tr only.
+set -euo pipefail
+
+# The account: a file only you can read, as the GitHub CLI keeps its own,
+# $XDG_CONFIG_HOME/vhil/github (~/.config/vhil/github; in WSL on Windows).
+# The OAuth app is the team's, "ISC vHIL" in isc-fs (device flow on, tokens
+# don't expire, as the GitHub CLI's); its client ID is public, not a secret.
+# VHIL_DEVICE_CLIENT_ID overrides it (empty: none). Scope public_repo: push
+# branches to the public repository.
+github_web=${VHIL_GITHUB_WEB:-https://github.com}
+github_api=${VHIL_GITHUB_API:-https://api.github.com}
+device_client_id=${VHIL_DEVICE_CLIENT_ID-Ov23lijKjGq1XpuDCjJB}
+account_file=${XDG_CONFIG_HOME:-$HOME/.config}/vhil/github
+
+account() {  # <key>: login or token from the account file, else empty
+    [ -f "$account_file" ] && sed -n "s/^$1=//p" "$account_file" | head -1
+}
+
+form() {  # <key> <urlencoded body>: one field of a form-encoded reply
+    tr '&' '\n' <<<"$2" | sed -n "s/^$1=//p" | head -1 | sed 's/%3A/:/g; s/%2F/\//g'
+}
+
+login() {
+    if [ -z "$device_client_id" ]; then
+        echo "error: the team's GitHub sign-in isn't set up yet (VHIL_DEVICE_CLIENT_ID): an isc-fs owner registers an OAuth app with device flow on" >&2
+        return 2
+    fi
+    local reply device user_code uri interval expires
+    reply=$(curl -fsS -X POST "$github_web/login/device/code" \
+        -d "client_id=$device_client_id" -d scope=public_repo) \
+        || { echo "error: GitHub didn't answer: are you online?" >&2; return 1; }
+    device=$(form device_code "$reply"); user_code=$(form user_code "$reply")
+    uri=$(form verification_uri "$reply"); interval=$(form interval "$reply")
+    expires=$(form expires_in "$reply")
+    [ -n "$device" ] && [ -n "$user_code" ] || { echo "error: GitHub refused the sign-in: $reply" >&2; return 1; }
+    # The desktop app shows this line's code and link (app/ui/app.js).
+    echo "Open ${uri:-$github_web/login/device} and enter $user_code"
+    local waited=0 token err
+    interval=${interval:-5}
+    while [ "$waited" -lt "${expires:-900}" ]; do
+        sleep "$interval"; waited=$((waited + interval))
+        reply=$(curl -fsS -X POST "$github_web/login/oauth/access_token" -d "client_id=$device_client_id" \
+            -d "device_code=$device" -d grant_type=urn:ietf:params:oauth:grant-type:device_code) || continue
+        token=$(form access_token "$reply"); err=$(form error "$reply")
+        if [ -n "$token" ]; then
+            local who
+            who=$(curl -fsS -H "Authorization: Bearer $token" "$github_api/user" \
+                | grep -o '"login": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+            [ -n "$who" ] || { echo "error: signed in, but GitHub didn't say who you are" >&2; return 1; }
+            mkdir -p "$(dirname "$account_file")"
+            (umask 077; printf 'login=%s\ntoken=%s\n' "$who" "$token" > "$account_file")
+            echo "Signed in as $who"
+            return 0
+        fi
+        case $err in
+        authorization_pending) ;;
+        slow_down) interval=$((interval + 5)) ;;
+        expired_token) break ;;
+        access_denied) echo "error: the sign-in was cancelled on GitHub" >&2; return 1 ;;
+        *) echo "error: GitHub refused the sign-in: $err" >&2; return 1 ;;
+        esac
+    done
+    echo "error: the code expired before it was entered: run vhil login again" >&2
+    return 1
+}
+
+case ${1:-} in
+login) login ;;
+logout) rm -f "$account_file"; echo "Signed out" ;;
+whoami) [ -n "$(account login)" ] && account login || { echo "not signed in: vhil login" >&2; exit 1; } ;;
+token) [ -n "$(account token)" ] && account token || exit 1 ;;
+*) sed -n '2,/^set -euo/{/^#/p;}' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

@@ -14,7 +14,7 @@ usual way, through a pull request.
   open, **Restart the vHIL** makes it share from then on. **Sign Out of
   GitHub** is next to it.
 - **Terminal:** `vhil login` (GitHub's device flow; it works in WSL), then
-  `vhil whoami` and `vhil logout`.
+  `vhil whoami` and `vhil logout` (`bin/vhil-account`; the desktop app carries its own copy, so signing in works whichever commit your clone is at).
 
 The token stays in a file only you can read, `~/.config/vhil/github` (in WSL
 on Windows), as the GitHub CLI keeps its own. It has the `public_repo` scope:
