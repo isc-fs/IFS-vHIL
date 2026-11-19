@@ -753,3 +753,4 @@ from `git archive 04613679` except as listed below.
 - **Screenshot baselines.** The editor image has Playwright's library
   (`node_modules`) but no browser; the dark/light × 1366×768/1920×1080
   baselines and the axe scan wait for a pinned browser in CI.
+
