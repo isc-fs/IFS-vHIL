@@ -25,7 +25,7 @@ import {
 } from "./firmware";
 import { boardsOf as debugBoards, debugConfig, Ready } from "./debug";
 import { barOf, findings, Fix, GROUP, groupId, Phase, scenarioSystem } from "./status";
-import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS } from "./systems";
+import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
 import { TRACE_VIEW, TracePanel } from "./tracePanel";
 
@@ -167,14 +167,16 @@ class Vhil implements vscode.Disposable {
   private readonly snapshots = new Map<string, Snapshot[]>();
   private readonly tracePanel: TracePanel;
   private readonly problems = vscode.languages.createDiagnosticCollection("vHIL firmware build");
+  private readonly systemProblems = vscode.languages.createDiagnosticCollection("vHIL systems");
 
   constructor(repo: string, private readonly folder: vscode.WorkspaceFolder,
               private readonly context: vscode.ExtensionContext, private readonly local?: Local) {
     this.repo = repo;
     this.controller = vscode.tests.createTestController("vhil", "vHIL");
     this.controller.refreshHandler = () => this.refresh();
-    this.controller.createRunProfile("Run", vscode.TestRunProfileKind.Run,
-      (request, token) => this.run(request, token), true);
+    const runProfile = this.controller.createRunProfile("Run", vscode.TestRunProfileKind.Run,
+      (request, token) => request.continuous ? this.runOnSave(request, token) : this.run(request, token), true);
+    runProfile.supportsContinuousRun = true;
     this.controller.createRunProfile("Debug", vscode.TestRunProfileKind.Debug,
       (request, token) => this.debug(request, token), true);
 
@@ -193,13 +195,22 @@ class Vhil implements vscode.Disposable {
     const systems = watch("systems/**");
     const later = () => this.refreshSoon();
     const reread = () => this.readSystems();
+    // A system file changed on disk (a save, a checkout, a revert): validate's errors in Problems.
+    const timers = new Map<string, NodeJS.Timeout>();
+    const revalidate = (uri: vscode.Uri) => {
+      reread();
+      if (!/\/systems\/[^/]+\.yaml$/.test(uri.fsPath)) return;
+      clearTimeout(timers.get(uri.fsPath));
+      timers.set(uri.fsPath, setTimeout(() => { timers.delete(uri.fsPath); void this.validate(uri); }, 300));
+    };
     const command = (id: string, f: (...a: any[]) => unknown) => vscode.commands.registerCommand(id, f);
     this.disposables.push(
-      this.controller, this.status, this.log, tests, systems, this.problems,
+      this.controller, this.status, this.log, tests, systems, this.problems, this.systemProblems,
       vscode.window.registerWebviewViewProvider(TRACE_VIEW, this.tracePanel,
         { webviewOptions: { retainContextWhenHidden: true } }),
       tests.onDidChange(later), tests.onDidCreate(later), tests.onDidDelete(later),
-      systems.onDidChange(reread), systems.onDidCreate(reread), systems.onDidDelete(reread),
+      systems.onDidChange(revalidate), systems.onDidCreate(revalidate),
+      systems.onDidDelete((uri) => { reread(); this.systemProblems.delete(uri); }),
       vscode.tasks.onDidEndTaskProcess((e) => {
         if (e.execution === this.editorTask) this.editorTask = undefined;
         if (e.execution.task.source === "vHIL") void this.checkStatus();
@@ -451,7 +462,25 @@ class Vhil implements vscode.Disposable {
     return this.refreshing;
   }
 
+  /** The listed tests of this checkout's commit, from the last listing: no 20 s wait on open. */
+  private cacheKey(head: string): string {
+    return `vhil.tests:${this.repo}:${head}:${this.local?.firmware.id ?? ""}`;
+  }
+
+  private async head(): Promise<string> {
+    const r = await git(this.repo, ["rev-parse", "HEAD"]);
+    return r.ok ? r.out.trim() : "";
+  }
+
   private async collect() {
+    // In a firmware repository the tests are the checkout's, which changes
+    // only with its commit: a cached listing is the listing.
+    const head = this.local ? await this.head() : "";
+    const cached = head ? this.context.workspaceState.get<Record[]>(this.cacheKey(head)) : undefined;
+    if (cached?.length && !this.byId.size) {
+      this.build(cached.filter((r): r is Item => r.kind === "item"), cached);
+      return;
+    }
     if (!(await this.ensureDocker(false))) return;
     const out = this.outFile("collect");
     const roots = SUITES.map((s) => s.root).filter((r) => !this.local || r !== "tests/unit");
@@ -470,6 +499,7 @@ class Vhil implements vscode.Disposable {
       return;
     }
     this.build(items, records);
+    if (head) void this.context.workspaceState.update(this.cacheKey(head), [...items, ...records.filter((r) => r.kind === "error")]);
   }
 
   private tag(marker: string): vscode.TestTag {
@@ -774,6 +804,59 @@ class Vhil implements vscode.Disposable {
     return msg;
   }
 
+  /**
+   * Continuous run: the request again each time a source file is saved (C
+   * and headers in a firmware repository; Python, systems and models in the
+   * vHIL's), one run at a time, until it is turned off.
+   */
+  private async runOnSave(request: vscode.TestRunRequest, token: vscode.CancellationToken) {
+    const glob = this.local ? "**/*.{c,h,cpp,hpp,cc,s,S,ld,ioc}" : "{vhil,models,systems,catalog,tests}/**";
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(this.local?.dir ?? this.repo, glob));
+    let timer: NodeJS.Timeout | undefined;
+    let running: Promise<void> | undefined;
+    let again = false;
+    const once = new vscode.TestRunRequest(request.include, request.exclude, request.profile);
+    const go = () => {
+      if (running) { again = true; return; }
+      const cts = new vscode.CancellationTokenSource();
+      const stop = token.onCancellationRequested(() => cts.cancel());
+      running = this.run(once, cts.token).finally(() => {
+        stop.dispose();
+        running = undefined;
+        if (again && !token.isCancellationRequested) { again = false; go(); }
+      });
+    };
+    const changed = (uri: vscode.Uri) => {
+      if (/[\\/](build|results|\.git|node_modules)[\\/]/.test(uri.fsPath)) return;
+      clearTimeout(timer);
+      timer = setTimeout(go, 800);
+    };
+    const subs = [watcher, watcher.onDidChange(changed), watcher.onDidCreate(changed)];
+    await new Promise<void>((resolve) => token.onCancellationRequested(() => resolve()));
+    clearTimeout(timer);
+    for (const d of subs) d.dispose();
+    await running;
+  }
+
+  /** `validate` on a system file as it is on disk: its errors in Problems, at the lines they name. */
+  private async validate(uri: vscode.Uri) {
+    const rel = path.relative(this.repo, uri.fsPath);
+    let out = "";
+    const code = await this.script(["run", "python", "-m", "vhil.system", "validate", rel],
+      this.env(), (t) => { out += t; }).done;
+    let text: string;
+    try { text = fs.readFileSync(uri.fsPath, "utf8"); } catch { this.systemProblems.delete(uri); return; }
+    const lines = text.split("\n");
+    this.systemProblems.set(uri, code === 0 ? [] : validationProblems(out, text).map((p) => {
+      const n = Math.min(p.line, lines.length - 1);
+      const range = new vscode.Range(n, 0, n, lines[n].replace(/\r$/, "").length);
+      const d = new vscode.Diagnostic(range, p.message, vscode.DiagnosticSeverity.Error);
+      d.source = "vhil.system validate";
+      return d;
+    }));
+  }
+
   // -- debugging a test (#425) -------------------------------------------------
 
   /**
@@ -819,8 +902,15 @@ class Vhil implements vscode.Disposable {
           try {
             const ready = JSON.parse(fs.readFileSync(readyFile, "utf8")) as Ready;
             const local = this.local ? { firmware: this.local.firmware.id, dir: this.local.dir } : undefined;
+            // No breakpoint would run the test straight through: stop at entry (main).
+            const stop = !vscode.debug.breakpoints.some((b) => b.enabled);
             await vscode.debug.startDebugging(this.folder,
-              debugConfig(ready, dir, gdb, local) as vscode.DebugConfiguration);
+              debugConfig(ready, dir, gdb, local, stop) as vscode.DebugConfiguration);
+            if (stop) {
+              void vscode.window.showInformationMessage(
+                `vHIL: ${ready.board} is paused at main (no breakpoints set). ` +
+                "Set breakpoints, then Continue (F5).");
+            }
             return;
           } catch {
             // Still being written: the next poll.

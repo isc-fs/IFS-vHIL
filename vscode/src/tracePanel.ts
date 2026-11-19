@@ -83,7 +83,7 @@ button { background: var(--vscode-button-secondaryBackground); color: var(--vsco
           overflow: auto; border-top: 1px solid var(--vscode-panel-border); padding: 4px 0; }
 #detail:empty { display: none; }
 #errors { color: var(--vscode-errorForeground); white-space: pre; font-size: 11px; }
-#errors:empty, #empty { display: none; }
+#errors:empty, #context:empty, #empty { display: none; }
 details { font-size: 12px; } #uart-lines { white-space: pre; font-family: var(--vscode-editor-font-family);
   max-height: 120px; overflow: auto; }
 </style></head><body>
@@ -92,6 +92,7 @@ details { font-size: 12px; } #uart-lines { white-space: pre; font-family: var(--
 <span id="count" class="muted"></span><span id="span" class="muted"></span>
 <button id="to-fail" title="The 2 s before the failure">Failure</button><button id="reset" title="Whole test (double-click the lanes)">All</button></div>
 <div id="empty" class="muted">This test recorded nothing.</div>
+<div id="context" class="muted"></div>
 <div id="errors"></div>
 <canvas id="lanes"></canvas>
 <div id="rows"><div id="spacer"></div><div id="view"></div></div>

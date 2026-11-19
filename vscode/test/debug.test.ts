@@ -27,3 +27,14 @@ test("the debug configuration attaches to the held board with the working tree's
     "set substitute-path /vhil/fw/ecu@local /home/me/IFS08-CE-ECU",
   ]);
 });
+
+test("a tree only the container has maps to its copy; no breakpoints stops at entry", () => {
+  const ready = { board: "ams", port: 1, system: "ams", images: ["ams.elf", "ams.bootloader.elf"],
+                  sources: ["/vhil/fw/ams@dev", "/vhil/fw/can-bootloader@v1.7.0"],
+                  host_sources: ["src/ams@dev", null] };
+  const c = debugConfig(ready, "/r/d", "gdb", undefined, true);
+  assert.deepEqual(c.sourceFileMap, { "/vhil/fw/ams@dev": "/r/d/src/ams@dev" });
+  assert.equal(c.targetArchitecture, "arm");
+  assert.equal(c.stopAtEntry, true);
+  assert.equal(debugConfig(ready, "/r/d", "gdb").stopAtEntry, false);
+});

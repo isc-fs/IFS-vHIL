@@ -86,3 +86,31 @@ export type ToolId = (typeof TOOLS)[number]["id"];
 export function ifsHilArgs(dut: "ecu" | "ams", suite: string): { args: string[]; env: Record<string, string> } {
   return { args: ["ifs-hil", ...(suite.trim() ? [suite.trim()] : [])], env: { VHIL_DUT: dut } };
 }
+
+/** A `validate` error of a system file, at the line it is about. */
+export interface Problem {
+  line: number; // 0-based
+  message: string;
+}
+
+/**
+ * `python -m vhil.system validate`'s errors, each at the first line of the
+ * file holding a name it quotes ('nope', 'FDCAN9'), else the first line:
+ * validate names what is wrong, not where.
+ */
+export function validationProblems(output: string, text: string): Problem[] {
+  const lines = text.split("\n");
+  const out: Problem[] = [];
+  for (const raw of output.split("\n")) {
+    const m = /^(?:error|Error):\s*(.*)$/.exec(raw.trim());
+    if (!m) continue;
+    const names = [...m[1].matchAll(/'([^']+)'/g)].map((q) => q[1]).reverse();
+    let line = 0;
+    for (const name of names) {
+      const at = lines.findIndex((l) => !l.trim().startsWith("#") && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(l));
+      if (at >= 0) { line = at; break; }
+    }
+    out.push({ line, message: m[1] });
+  }
+  return out;
+}

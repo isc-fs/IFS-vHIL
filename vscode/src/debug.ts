@@ -31,19 +31,27 @@ export interface Ready {
   system: string;
   images: string[]; // file names in the same folder: app, then bootloader
   sources: string[]; // their build trees in the container
+  host_sources?: (string | null)[]; // copies of those trees, relative to the folder
 }
 
 /**
  * The cppdbg configuration: the host's arm-none-eabi-gdb on the copied
- * app image, the bootloader's symbols added, the container's build tree of
- * the open firmware mapped to its working tree. Launching with a server
- * address connects and continues: the stub has the board stopped before
- * its first instruction, so the breakpoints go in first.
+ * app image, the bootloader's symbols added, each container build tree
+ * mapped to sources the host has (the open firmware's working tree, else
+ * the copy debugattach took). Launching with a server address connects and
+ * continues: the stub has the board stopped before its first instruction,
+ * so the breakpoints go in first. With none set (`stop`), it stops at main
+ * (the bootloader's, the first to run) instead of running the test through.
  */
 export function debugConfig(ready: Ready, dir: string, gdb: string,
-                            local?: { firmware: string; dir: string }): { [key: string]: unknown } {
+                            local?: { firmware: string; dir: string },
+                            stop = false): { [key: string]: unknown } {
   const image = (name: string) => `${dir}/${name}`;
   const map: { [from: string]: string } = {};
+  ready.sources.forEach((from, i) => {
+    const copy = ready.host_sources?.[i];
+    if (copy) map[from] = `${dir}/${copy}`;
+  });
   if (local) map[`/vhil/fw/${local.firmware}@local`] = local.dir;
   const setup = [
     { text: "set confirm off" },
@@ -57,9 +65,10 @@ export function debugConfig(ready: Ready, dir: string, gdb: string,
     program: image(ready.images[0]),
     cwd: local?.dir ?? dir,
     MIMode: "gdb",
+    targetArchitecture: "arm",
     miDebuggerPath: gdb,
     miDebuggerServerAddress: `127.0.0.1:${ready.port}`,
-    stopAtEntry: false,
+    stopAtEntry: stop,
     externalConsole: false,
     setupCommands: setup,
     sourceFileMap: map,
