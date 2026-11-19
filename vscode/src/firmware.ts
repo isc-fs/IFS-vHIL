@@ -2,7 +2,7 @@
 // which of the vHIL's tests and systems run it. Without VS Code, tested by
 // test/firmware.test.ts.
 
-import { Board } from "./sidebar";
+import { Board } from "./systems";
 
 /** "owner/name" of a GitHub remote URL (https, ssh or scp-like), else undefined. */
 export function repoSlug(url: string): string | undefined {
