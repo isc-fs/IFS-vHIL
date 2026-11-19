@@ -36,6 +36,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from vhil import editor
+from vhil.server import account
 from vhil.server.config import env_secret
 from vhil.server.githost import (BranchDetails, CachedRefs, GitHost, GitHubBranches, GitHubHost,
                                  HostError, HostUnavailable, LsRemote, RefLister,
@@ -108,10 +109,16 @@ def _host(request: Request) -> GitHost:
     st = request.app.state
     if getattr(st, "git_host", None) is None:
         repo = repo_slug(st.settings.workspace)
-        # The GitHub App when configured (auth.install sets it), else a token.
+        # The GitHub App when configured (auth.install sets it); on a desktop
+        # (dev mode) your account, read live (vhil/server/account.py); else a
+        # token.
         app = getattr(st, "github_app", None)
-        token = ((lambda: app.token_for(repo, write=True)) if app is not None
-                 else env_secret("VHIL_GITHUB_TOKEN") or None)
+        if app is not None:
+            token = lambda: app.token_for(repo, write=True)  # noqa: E731
+        elif st.settings.auth == "dev":
+            token = account.token
+        else:
+            token = env_secret("VHIL_GITHUB_TOKEN") or None
         st.git_host = GitHubHost(token, repo)
     return st.git_host
 
@@ -340,7 +347,8 @@ def config(request: Request):
     return {"editor_url": EDITOR_PATH,
             "base_branch": _store(request).base,
             "auth": request.app.state.settings.auth,
-            "can_open_pr": bool(host.token) if isinstance(host, GitHubHost) else True,
+            "can_open_pr": (bool(account.token() if host.token is account.token else host.token)
+                            if isinstance(host, GitHubHost) else True),
             # Firmware a run can build from a developer's working tree
             # (RunRequest.local; the VS Code extension's firmware repository).
             "local_firmware": sorted(local_sources()),

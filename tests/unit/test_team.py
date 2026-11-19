@@ -27,6 +27,11 @@ def git(cwd, *args):
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.delenv("VHIL_TEAM_LOGIN", raising=False)
+    monkeypatch.delenv("VHIL_GITHUB_TOKEN", raising=False)
+    account = tmp_path / "config" / "vhil" / "github"
+    account.parent.mkdir(parents=True)
+    account.write_text("login=raul\ntoken=test-token\n")
+    monkeypatch.setenv("VHIL_ACCOUNT_FILE", str(account))
     seed = tmp_path / "seed"
     for d in ("catalog", "systems"):
         shutil.copytree(REPO / d, seed / d)
@@ -42,9 +47,8 @@ def env(tmp_path, monkeypatch):
     host = FakeGitHost()
     host.token = "test-token"
     app.state.git_host = host
-    app.state.team_login = "raul"
     return type("Env", (), dict(client=TestClient(app), app=app, ws=ws, bare=bare, host=host,
-                                tmp=tmp_path))
+                                tmp=tmp_path, account=account))
 
 
 def teammate_shares(env, branch="shared/ines/ams-faster", files=None):
@@ -142,7 +146,7 @@ def test_only_your_own_branches_are_shared(env):
 
 
 def test_without_a_github_account_you_sync_but_dont_share(env):
-    env.app.state.team_login = ""
+    env.account.unlink()
     env.host.token = None
     teammate_shares(env)
     out = env.client.post("/api/team/sync").json()

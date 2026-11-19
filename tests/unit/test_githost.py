@@ -215,9 +215,16 @@ def test_the_push_token_is_read_from_its_file(tmp_path, monkeypatch):
     monkeypatch.delenv("VHIL_GITHUB_TOKEN", raising=False)
     monkeypatch.setenv("VHIL_GITHUB_TOKEN_FILE", str(tmp_path / "token"))
     monkeypatch.setenv("VHIL_GITHUB_REPO", "isc-fs/IFS-vHIL")
-    state = SimpleNamespace(settings=SimpleNamespace(workspace=tmp_path), github_app=None)
+    monkeypatch.setenv("VHIL_ACCOUNT_FILE", str(tmp_path / "no-account"))
+    state = SimpleNamespace(settings=SimpleNamespace(workspace=tmp_path, auth="github"),
+                            github_app=None)
     host = systems_write._host(SimpleNamespace(app=SimpleNamespace(state=state)))
     assert host.token == TOKEN
+    # On a desktop (dev mode) it is your account, read live, else the same file.
+    state = SimpleNamespace(settings=SimpleNamespace(workspace=tmp_path, auth="dev"),
+                            github_app=None)
+    host = systems_write._host(SimpleNamespace(app=SimpleNamespace(state=state)))
+    assert host.token() == TOKEN
 
 
 # -- active branches, commits of refs ------------------------------------------------
