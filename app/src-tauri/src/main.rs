@@ -628,14 +628,43 @@ fn reveal(path: &Path) {
 }
 
 fn show_setup(app: &AppHandle) {
-    let url = if cfg!(windows) {
+    show_setup_for(app, "");
+}
+
+/// The set-up page; `account` ("login", "logout") starts that task there
+/// (the menu's Sign in / Sign Out: the page shows GitHub's code).
+fn show_setup_for(app: &AppHandle, account: &str) {
+    let base = if cfg!(windows) {
         "http://tauri.localhost/index.html?stay=1"
     } else {
         "tauri://localhost/index.html?stay=1"
     };
+    let url = if account.is_empty() { base.to_string() } else { format!("{base}&account={account}") };
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.navigate(url.parse().unwrap());
     }
+}
+
+/// Whether the vHIL web app answers (its containers are up).
+#[tauri::command]
+async fn app_running() -> bool {
+    tauri::async_runtime::spawn_blocking(app_answers).await.unwrap_or(false)
+}
+
+/// GitHub's device sign-in page, in the browser (the code is on the set-up page).
+#[tauri::command]
+fn open_device_page() -> Result<(), String> {
+    open_url("https://github.com/login/device")
+}
+
+/// Stop the vHIL's containers and open it again: it reads the account
+/// `vhil login` keeps when it starts.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    thread::spawn(move || {
+        stop_containers(&app);
+        let _ = open_app(app.clone());
+    });
 }
 
 /// On quit: stop the app's containers. The VM keeps running (a quick start
@@ -663,6 +692,9 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(app, "app", "Show the vHIL", true, Some("CmdOrCtrl+1"))?,
             &MenuItem::with_id(app, "browser", "Open in Browser", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "login", "Sign in with GitHub…", true, None::<&str>)?,
+            &MenuItem::with_id(app, "logout", "Sign Out of GitHub", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "stop", "Stop the App's Containers", true, None::<&str>)?,
             &MenuItem::with_id(app, "stop-vm", "Stop the Docker VM", cfg!(target_os = "macos"), None::<&str>)?,
         ],
@@ -680,6 +712,9 @@ fn main() {
             set_workspace,
             doctor,
             account,
+            open_device_page,
+            app_running,
+            restart_app,
             run,
             open_app,
             check_update,
@@ -705,6 +740,8 @@ fn main() {
             app.set_menu(menu(handle)?)?;
             app.on_menu_event(|app, event| match event.id().as_ref() {
                 "setup" => show_setup(app),
+                "login" => show_setup_for(app, "login"),
+                "logout" => show_setup_for(app, "logout"),
                 "app" => {
                     let _ = open_app(app.clone());
                 }

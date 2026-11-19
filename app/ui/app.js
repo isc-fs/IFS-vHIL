@@ -208,17 +208,27 @@ listen("log", (e) => {
   const m = /^Open (\S+) and enter (\S+)$/.exec(e.payload.line);
   if (!m) return;
   const p = $("#account-code");
-  p.textContent = `Open ${m[1]} in your browser and enter ${m[2]}`;
+  p.replaceChildren(`Enter ${m[2]} on GitHub (copied). `);
+  const btn = document.createElement("button");
+  btn.textContent = "Open GitHub";
+  btn.onclick = () => invoke("open_device_page");
+  p.append(btn);
   p.hidden = false;
   navigator.clipboard?.writeText(m[2]).catch(() => {});
+  invoke("open_device_page").catch(() => {});
 });
-listen("done", (e) => {
+listen("done", async (e) => {
   if (e.payload.task !== "login" && e.payload.task !== "logout") return;
   $("#account-code").hidden = true;
   refreshAccount();
-  // The running vHIL got its account when it started.
-  if (e.payload.code === 0 && e.payload.task === "login") {
-    $("#open-status").textContent = "Signed in: an open vHIL shares from its next start (Stop the App's Containers, then Open).";
+  // A running vHIL got its account when it started: restart it to share.
+  if (e.payload.code === 0 && e.payload.task === "login" && await invoke("app_running")) {
+    const s = $("#open-status");
+    s.replaceChildren("Signed in. The open vHIL shares after a restart. ");
+    const btn = document.createElement("button");
+    btn.textContent = "Restart the vHIL";
+    btn.onclick = () => { s.textContent = ""; running = "ui"; render(); invoke("restart_app"); };
+    s.append(btn);
   }
 });
 
@@ -267,6 +277,13 @@ async function checkUpdate() {
 async function start() {
   await refresh();
   refreshAccount();
+  // The menu's Sign in / Sign Out (main.rs show_setup_for).
+  const account = new URLSearchParams(location.search).get("account");
+  if ((account === "login" || account === "logout") && !running) {
+    history.replaceState(null, "", location.pathname + "?stay=1");
+    runTask(account);
+    return;
+  }
   if (info.managed && info.present && !info.synced && !running) runTask("workspace");
   checkUpdate();
 }

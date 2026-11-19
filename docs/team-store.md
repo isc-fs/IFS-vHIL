@@ -8,16 +8,19 @@ usual way, through a pull request.
 
 ## Sign in
 
-- **Desktop app:** **Team sharing → Sign in with GitHub**. It shows a code;
-  open the link in your browser, enter the code and approve.
+- **Desktop app:** the **vHIL** menu's **Sign in with GitHub…** (also on the
+  set-up page, under Team sharing). It opens GitHub's sign-in page in your
+  browser and copies the code: paste it there and approve. If the vHIL is
+  open, **Restart the vHIL** makes it share from then on. **Sign Out of
+  GitHub** is next to it.
 - **Terminal:** `vhil login` (GitHub's device flow; it works in WSL), then
   `vhil whoami` and `vhil logout`.
 
 The token stays in a file only you can read, `~/.config/vhil/github` (in WSL
 on Windows), as the GitHub CLI keeps its own. It has the `public_repo` scope:
 pushing branches to this public repository, where you need write access.
-`vhil ui` (the app's Open) hands it to the vHIL when it starts: after signing
-in, stop the app's containers and open the vHIL again.
+`vhil ui` (the app's Open) hands it to the vHIL when it starts, so a vHIL
+already open shares after a restart (the app offers it).
 
 Without signing in you can still sync and open everything teammates shared.
 
