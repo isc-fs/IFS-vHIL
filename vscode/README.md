@@ -2,8 +2,9 @@
 
 The vHIL's tests in VS Code's **Testing** panel: every test of `tests/unit`,
 `tests/sim` and `tests/scenarios`, with Run and Cancel per test, file or
-folder, and one **status bar** item that says where things stand and runs
-the tests again. Runs go through `scripts/vhil-docker.sh` in the vHIL's Docker
+folder, one **status bar** item that says where things stand and runs
+the tests again, and a **Systems** view (the vHIL icon) to open, run and
+make systems. Runs go through `scripts/vhil-docker.sh` in the vHIL's Docker
 image, as CI's jobs do, so the host needs Docker only (on macOS, the Colima
 VM `scripts/vhil-docker.sh vm` makes).
 
@@ -74,7 +75,8 @@ fetches anything for a repository on the vHIL's GitHub owner.
    `arm-none-eabi-gdb` (`vhil.gdbPath`; STM32CubeCLT ships one) through the
    C/C++ extension: set breakpoints in your C, continue, step. Every board
    stops while one is held, so no firmware timeout fires. Stop debugging and
-   the test runs on to its result. Limits: no memory or register writes
+   the test runs on to its result. With no breakpoint set, it stops at
+   `main` instead of running through. Limits: no memory or register writes
    (docs/debugger.md).
 
 - **Testing panel:** the three folders; sim tests by file, scenarios by
@@ -82,20 +84,30 @@ fetches anything for a repository on the vHIL's GitHub owner.
   panel's filter. The list comes from `pytest --collect-only` in the
   container (about 20 s) and refreshes when a test file changes.
   Right-click a system's scenarios: **Open a system in the system editor**.
+- **Systems** (the vHIL icon in the activity bar): the stack's state
+  (click: Diagnose), then each system you can test, with its boards. Click
+  one to open it in the system editor; inline, **Open the system file**
+  and **Run its scenarios**. **+** makes a new system: name it, then place
+  boards and wire buses on the editor's empty canvas and save it with the
+  editor's **Commit…** (a branch and PR on IFS-vHIL, from a firmware
+  repository too). **Tools…** at the bottom in the vHIL repository.
 - **Run on save**: the Testing panel's continuous run (the eye icon) runs
   the selection again whenever you save a C file or header (one run at a
   time; a save during a run queues one more).
 - **Listing** happens once per vHIL checkout commit in a firmware
   repository: reopening the window shows the tests at once.
-- **System files** (the vHIL repository): saving `systems/*.yaml`
-  validates it; its errors show in Problems at the line they name.
+- **System files** (the vHIL repository): any change to `systems/*.yaml`
+  (a save, a checkout, a revert) validates it; its errors show in Problems
+  at the line they name.
 - **Cancel** stops the run's container.
 - **Status bar:** `Docker not running` (click: Diagnose), `building
   ecu@local`, `12/40`, `42` or `3 failed` (click: run again).
 - **vHIL: Diagnose:** Docker, images, firmware and the system editor, each
   with its fix (start the VM, pull images, build firmware, change the
   context, open the editor).
-- **vHIL: Open the system editor** opens it in a tab, started if needed.
+- **vHIL: Open the system editor** opens it in a tab, started if needed;
+  the tab's **Open in the browser** button opens the same page outside VS
+  Code.
 - **vHIL: Tools…** (the vHIL repository only): a shell in the container,
   an IFS_HIL suite, coverage, speed, a smoke suite, validating a system,
   pruning firmware builds, exporting and importing a web app run.
@@ -123,7 +135,7 @@ one when a test starts and ends (outcome, duration, failure and where). The
 extension reads the file under `results/vscode/` while the run goes on.
 `src/plan.ts` holds what a run executes and how its lines parse,
 `src/status.ts` what the status bar and Diagnose show, `src/systems.ts` the
-systems and tools, `src/firmware.ts` which firmware a repository is and which
+systems and tools, `src/systemsView.ts` what the Systems view lists, `src/firmware.ts` which firmware a repository is and which
 tests and systems run it (all tested by `npm test`); `src/extension.ts` is the
 VS Code side.
 

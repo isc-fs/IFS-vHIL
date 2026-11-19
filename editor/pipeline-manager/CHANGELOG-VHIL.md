@@ -703,6 +703,14 @@ from `git archive 04613679` except as listed below.
     with where it came from in its tooltip. `src/vhil/api.js`
     `send` sends a File or Blob body as it is; `src/vhil/workspace.js`
     `importRun`; `src/vhil/VhilRail.vue`.
+32. **Fit the graph to the canvas it is drawn in.**
+    `pipeline_manager/frontend/src/custom/Editor.js` `editorSize`: the
+    `.baklava-editor` box, less the palette, inspector and dock laid over
+    it. Upstream sized against the window and shifted by the palette's
+    right edge, assuming a full-window canvas; in the vHIL workspace the
+    palette has its own column and the inspector covers the canvas's
+    right, so a loaded system landed behind the inspector. Falls back to
+    upstream's window sizing when there is no editor element.
 
 ## Left for later
 

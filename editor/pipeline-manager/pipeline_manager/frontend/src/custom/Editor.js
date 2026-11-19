@@ -758,6 +758,32 @@ export default class PipelineManagerEditor extends Editor {
             throw new Error('The editor is in browserless mode. Cannot obtain editor size.');
         }
 
+        // vHIL: the canvas's own box, less what is laid over it (the palette
+        // on the left, the inspector on the right, the dock below). The
+        // window minus the palette assumed a full-window canvas, which put
+        // the graph behind the vHIL inspector (CHANGELOG-VHIL.md).
+        const editorEl = document.getElementsByClassName('baklava-editor')[0];
+        const box = editorEl?.getBoundingClientRect();
+        if (box && box.width > 0 && box.height > 0) {
+            const over = (el) => {
+                const r = el?.getBoundingClientRect();
+                return r && r.width > 0 && r.height > 0 && r.right > box.left && r.left < box.right
+                    && r.bottom > box.top && r.top < box.bottom ? r : null;
+            };
+            const palette = over(document.getElementsByClassName('baklava-node-palette')[0]);
+            const left = palette ? Math.max(0, palette.right - box.left) : 0;
+            const inspector = over(document.querySelector('.vhil-inspector'));
+            const right = inspector && inspector.left > box.left + left
+                ? box.right - inspector.left : 0;
+            const dock = over(document.querySelector('.vhil-dock'));
+            const bottom = dock && dock.top > box.top ? box.bottom - dock.top : 0;
+            return {
+                editorWidth: box.width - left - right,
+                editorHeight: box.height - bottom,
+                sideBarWidth: left,
+            };
+        }
+
         const terminalHeight =
             document.getElementsByClassName('terminal-wrapper')[0]?.offsetHeight ?? 0;
         const navbarHeight = document.getElementsByClassName('wrapper')[0]?.offsetHeight ?? 0;
