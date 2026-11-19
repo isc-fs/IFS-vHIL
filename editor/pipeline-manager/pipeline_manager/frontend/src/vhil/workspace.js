@@ -180,6 +180,8 @@ export function answer(yes) {
 // Caddyfile, vhil/server/security.py). Messages to and from it:
 //   editor -> VS Code  {type: 'vhil.ready'}                 booted, can open
 //                      {type: 'vhil.openExternal', url}     open in a browser
+//                      {type: 'vhil.saved', system, branch} committed: VS Code
+//                                                           offers to push it
 //   VS Code -> editor  {type: 'vhil.open', system, isNew, firmware}
 // Every message names the parent's origin, never '*' (tests/unit/
 // test_editor_csp.py). The webview's is a per-panel id (vscode-webview://
@@ -662,6 +664,9 @@ async function commitSystem({ takeover = false } = {}) {
     committedAt(out);
     if (out.changed) {
         say(`Committed ${out.path} on ${out.branch} @ ${out.ref.slice(0, 8)}`);
+        // Framed by VS Code: it pushes the branch with the host's git when
+        // the server can't (no VHIL_GITHUB_TOKEN), e.g. in a firmware repository.
+        if (framed && !ws.config.can_open_pr) tellVsCode({ type: 'vhil.saved', system: ws.id, branch: out.branch });
     } else {
         say(`Nothing to commit: identical to ${out.ref.slice(0, 8)}`);
     }

@@ -4,11 +4,12 @@
 // panel. The tree itself is systemsTree.ts. Tested by test/systemsView.test.ts.
 
 import { ImageState, imagesCost, imagesNeeded } from "./status";
+import { SavedBranch } from "./branches";
 import { SystemInfo } from "./systems";
 
 /** What the view shows, without VS Code. */
 export interface Row {
-  kind: "status" | "system" | "tools";
+  kind: "status" | "system" | "branch" | "tools";
   id: string;
   label: string;
   description?: string;
@@ -60,7 +61,8 @@ export function statusRow(s: StackState): Row {
   };
 }
 
-export function rows(systems: SystemInfo[], state: StackState, tools: boolean): Row[] {
+export function rows(systems: SystemInfo[], state: StackState, tools: boolean,
+                     branches: SavedBranch[] = []): Row[] {
   const out: Row[] = [statusRow(state)];
   for (const s of systems) {
     const boards = s.boards.map((b) => b.name).join(", ");
@@ -70,6 +72,17 @@ export function rows(systems: SystemInfo[], state: StackState, tools: boolean): 
       tooltip: `${s.description || s.id}\n\nClick to open it in the system editor.`,
       icon: "circuit-board", command: "vhil.openSystemInEditor",
       context: s.scenarios ? "vhilSystemWithScenarios" : "vhilSystem",
+    });
+  }
+  // Saved by the editor's Commit… in the extension's checkout, not pushed yet.
+  for (const b of branches) {
+    out.push({
+      kind: "branch", id: `branch:${b.branch}`, label: b.branch,
+      description: ["not pushed", b.systems.join(", ")].filter(Boolean).join(" · "),
+      tooltip: `Committed by the system editor in the vHIL checkout VS Code keeps for this repository` +
+        `${b.systems.length ? ` (${b.systems.join(", ")})` : ""}, and on no remote yet.\n\n` +
+        "Click to push it with your git and open its pull request.",
+      icon: "git-branch", command: "vhil.pushSystemBranch", context: "vhilBranch",
     });
   }
   if (tools) out.push({ kind: "tools", id: "tools", label: "Tools…", icon: "tools", command: "vhil.tools" });

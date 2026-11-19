@@ -42,3 +42,14 @@ test("the status row asks for the images when a run would pull or build them", (
   assert.equal(statusRow({ dockerUp: true, editorUp: false, context: "x", baseState: "local", editorState: "local" }).label,
     "Stack ready");
 });
+
+test("an unpushed system branch is a row that pushes it", () => {
+  const state = { dockerUp: true, editorUp: false, context: "colima-vhil" };
+  const r = rows([], state, false, [{ branch: "vhil/ines/dash", systems: ["dash"] }]);
+  const b = r.find((x) => x.kind === "branch");
+  assert.equal(b?.label, "vhil/ines/dash");
+  assert.equal(b?.description, "not pushed · dash");
+  assert.equal(b?.command, "vhil.pushSystemBranch");
+  assert.equal(b?.context, "vhilBranch");
+  assert.equal(rows([], state, false).filter((x) => x.kind === "branch").length, 0);
+});
