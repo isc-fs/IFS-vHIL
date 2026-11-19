@@ -129,3 +129,21 @@ export function webPort(checkout: string, extensionOwned: boolean, set?: string)
   for (const c of checkout) h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0;
   return 8100 + (h % 800);
 }
+
+/**
+ * Where "Install the vhil command" links bin/vhil, in order: the first one
+ * that is (or can be made) writable. The desktop app's choice too
+ * (app/src-tauri/src/main.rs install_cli).
+ */
+export function cliDirs(platform: string, home: string): string[] {
+  return platform === "darwin" ? ["/opt/homebrew/bin", "/usr/local/bin"] : [`${home}/.local/bin`];
+}
+
+/**
+ * Whether the window runs on Windows itself, where the vHIL's bash scripts
+ * and Docker can't: they run in WSL (VS Code's WSL extension). A Remote-WSL
+ * window's extension host is Linux.
+ */
+export function needsWsl(platform: string): boolean {
+  return platform === "win32";
+}

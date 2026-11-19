@@ -1,6 +1,8 @@
 # ISC vHIL for VS Code
 
-The vHIL's tests in VS Code's **Testing** panel: every test of `tests/unit`,
+The vHIL in VS Code, beside the desktop app: its tests in the **Testing** panel,
+the system editor in a tab, your GitHub account for the team store, and your
+clone and the stack kept on current code. The tests: every test of `tests/unit`,
 `tests/sim` and `tests/scenarios`, with Run and Cancel per test, file or
 folder, one **status bar** item that says where things stand and runs
 the tests again, and a **Systems** view (the vHIL icon) to open, run and
@@ -159,6 +161,10 @@ Set up / Retry**, to try again.
   on the new code.
 - **vHIL: Set up the vHIL** runs `vhil setup` in a terminal: the Docker VM
   (macOS), the images and the firmware, then `vhil doctor`.
+- **vHIL: Install the vhil command** links `bin/vhil` into
+  `/opt/homebrew/bin` (or `/usr/local/bin`) on macOS, `~/.local/bin`
+  elsewhere, as the desktop app does: `vhil ui`, `vhil test`, `vhil login`
+  in any terminal.
 - **vHIL: Diagnose:** Docker (and its CLI), images (here, published, or
   built from source), firmware, the system editor, the debugger, and
   `vhil doctor`'s compose plugin and free disk checks, each
@@ -223,8 +229,13 @@ systems and tools, `src/systemsView.ts` what the Systems view lists, `src/firmwa
 tests and systems run it (all tested by `npm test`); `src/extension.ts` is the
 VS Code side.
 
-Not yet: the Robot smoke suites, Windows hosts (the script
-is bash; WSL2 works as on Linux).
+**Windows:** the vHIL runs in WSL2, as on Linux. Clone the repository (or
+the firmware repository) in WSL's filesystem and open it with VS Code's WSL
+extension (**WSL: Reopen Folder in WSL**, or `code .` in a WSL terminal),
+with Docker Desktop's WSL integration on. A folder opened on Windows itself
+gets a "vHIL: open in WSL" status bar item and a prompt instead.
+
+Not yet: the Robot smoke suites.
 
 ## Develop
 
