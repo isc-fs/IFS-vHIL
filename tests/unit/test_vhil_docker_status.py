@@ -172,3 +172,39 @@ def test_each_checkout_has_its_own_stack(tmp_path):
     assert port == "web_port=8080"
     r, _, _ = status(tmp_path, VHIL_WEB_PORT="8123")
     assert f"{project} web_port=8123" in r.stdout.splitlines()
+
+
+@pytest.mark.parametrize("verb", ["editor", "server"])
+def test_the_stack_starts_with_no_local_firmware(tmp_path, verb):
+    """FW_LOCAL unset (everyone but a firmware developer): the stack's verbs
+    must get past stack_local. v0.2.1 ended every `vhil ui` with "FW_LOCAL:
+    unbound variable" under set -u."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # Every docker call succeeds: the verb runs to its compose up.
+    (bindir / "docker").write_text("#!/bin/sh\nexit 0\n")
+    (bindir / "docker").chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "FW_LOCAL"}
+    env.update({"PATH": f"{bindir}:{os.environ['PATH']}", "STUB_LOG": str(tmp_path / "docker.log"),
+                "VHIL_DOCKER_CONTEXT": "stub", "XDG_CACHE_HOME": str(tmp_path / "cache"),
+                "VHIL_WEB_PORT": "18999", "STUB_UP": "1", "STUB_LOCAL": "1", "STUB_VOLUME": "1",
+                "STUB_PUBLISHED": "", "STUB_BUILT": ""})
+    r = subprocess.run(["bash", str(SCRIPT), verb], env=env, capture_output=True, text=True, timeout=60)
+    assert "unbound variable" not in r.stderr, r.stderr
+    assert r.returncode == 0, r.stderr
+
+
+def test_stop_downs_this_checkouts_stack_and_a_pre_446_one(tmp_path):
+    """vhil stop (the desktop app's Stop) took compose.yaml's own name,
+    ifs-vhil, so it never stopped the per-checkout stack `vhil ui` starts."""
+    r, _, calls = status(tmp_path)
+    project = next(l for l in r.stdout.splitlines() if l.startswith("project=")).split()[0][len("project="):]
+    bindir = tmp_path / "bin"
+    log = tmp_path / "down.log"
+    (bindir / "docker").write_text(f'#!/bin/sh\necho "$*" >> {log}\n')
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "VHIL_DOCKER_CONTEXT": "stub"}
+    r = subprocess.run(["bash", str(REPO / "bin/vhil"), "stop"], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    downs = [l for l in log.read_text().splitlines() if l.endswith(" down")]
+    assert any(f"-p {project} " in l for l in downs), downs
+    assert any("-p ifs-vhil " in l for l in downs), downs

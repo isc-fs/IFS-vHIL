@@ -755,6 +755,12 @@ from `git archive 04613679` except as listed below.
     repository), the top bar has a `<id>@local` toggle, on by default:
     Run, Live and a pytest run send `local: true`, and the worker builds
     that firmware from the tree (uncommitted edits included) before each.
+37. **Share with the team.** A Team view (⇄) lists teammates' shared
+    branches (`shared/<login>/<name>`, `vhil/server/team.py`, `team.js`):
+    who, when, state, and their systems and scenarios as buttons that open
+    each from there. Signed in (`vhil login`), a commit goes to a branch of
+    yours on the opened commit and is pushed right after
+    ([docs/team-store.md](../../docs/team-store.md)).
 
 ## Left for later
 

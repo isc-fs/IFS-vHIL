@@ -82,3 +82,9 @@ input {
   background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
 }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* Team sharing: the GitHub account (vhil login) and, while signing in, the code. */
+.account { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 22px; }
+.account h2 { font-size: 15px; margin: 0 0 4px; }
+.account p { margin: 0; }
+.account .code { margin-top: 6px; font-weight: 600; user-select: all; }

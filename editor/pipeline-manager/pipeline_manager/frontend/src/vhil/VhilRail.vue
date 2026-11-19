@@ -7,7 +7,9 @@ system's with none open: opening one enters REPLAY, step 9; its shell page,
 with the signals, log and artifacts REPLAY doesn't show yet, is a link) and
 Tests (step 11: the open system's scenarios, or every system's, with their
 last run's state and expects; opening one selects it and replays that run on
-the Scenario tab, ▶ runs it).
+the Scenario tab, ▶ runs it) and Team (teammates' shared systems, scenarios
+and catalogue entries, team.js: Sync fetches them, a click opens one from its
+branch, Share pushes one of yours).
 -->
 
 <template>
@@ -92,6 +94,62 @@ the Scenario tab, ▶ runs it).
                 </label>
                 <button type="submit" class="vhil-btn">Create</button>
             </form>
+        </div>
+
+        <div v-if="layout.view === 'team'" class="vhil-runs vhil-team">
+            <div class="vhil-runs-head">
+                <span class="muted">{{ team.me ? `You: ${team.me}` : 'Not signed in' }}</span>
+                <button
+                    type="button" class="vhil-btn --small" :disabled="team.busy"
+                    title="Fetch what teammates shared"
+                    @click="syncTeam"
+                >{{ team.busy ? 'Syncing…' : 'Sync' }}</button>
+            </div>
+            <p v-if="!team.me" class="muted">
+                Sign in to share your systems and tests: the desktop app's Sign in, or
+                <span class="mono">vhil login</span>. Teammates' work opens without it.
+            </p>
+            <p v-if="team.error" class="vhil-team-error" role="alert">{{ team.error }}</p>
+            <p v-if="!team.items.length" class="muted">
+                Nothing shared yet. A commit while signed in is shared with the team.
+            </p>
+            <ul class="vhil-list" aria-label="Shared work">
+                <li v-for="it in team.items" :key="it.branch" class="vhil-team-item">
+                    <div class="vhil-team-head">
+                        <strong>{{ it.mine ? 'you' : it.owner }}</strong>
+                        <span class="mono muted">{{ shortName(it) }}</span>
+                        <span class="muted vhil-team-when">{{ (it.date || '').slice(0, 10) }}</span>
+                    </div>
+                    <div class="vhil-list-sub muted" :title="it.sha">{{ it.subject }}</div>
+                    <div class="vhil-team-open">
+                        <button
+                            v-for="id in it.systems" :key="`s-${id}`" type="button"
+                            class="vhil-btn --small mono" :title="`Open ${id} from ${it.branch}`"
+                            @click="openSystem(id, it.branch)"
+                        >☰ {{ id }}</button>
+                        <button
+                            v-for="t in it.scenarios" :key="`t-${t.system}/${t.name}`" type="button"
+                            class="vhil-btn --small mono"
+                            :title="`Open test ${t.system}/${t.name} from ${it.branch}`"
+                            @click="openShared(t, it.branch)"
+                        >✓ {{ t.system }}/{{ t.name }}</button>
+                        <span
+                            v-if="it.catalog.length" class="muted"
+                            :title="it.catalog.join('\n')"
+                        >+{{ it.catalog.length }} catalogue</span>
+                    </div>
+                    <div class="vhil-team-foot muted">
+                        <span v-if="stateText(it)">{{ stateText(it) }}</span>
+                        <span v-if="it.behind">{{ it.behind }} behind {{ team.base }}</span>
+                        <button
+                            v-if="it.mine && team.can_share && ['local', 'ahead'].includes(it.state)"
+                            type="button" class="vhil-btn --small"
+                            :title="`Push ${it.branch} to GitHub for the team`"
+                            @click="shareOne(it.branch)"
+                        >Share</button>
+                    </div>
+                </li>
+            </ul>
         </div>
 
         <div v-if="layout.view === 'tests'" class="vhil-runs vhil-tests">
@@ -211,6 +269,9 @@ import {
 import { bundleUrl, call, runPage } from './api.js';
 import { loadScenarios, scen } from './scenarios.js';
 import { replay } from './replay.js';
+import {
+    share, stateText, syncTeam, team,
+} from './team.js';
 import StateBadge from './VhilStateBadge.vue';
 
 const VIEWS = [
@@ -225,6 +286,9 @@ const VIEWS = [
     },
     {
         id: 'tests', label: 'Tests', short: 'Tests', glyph: '✓',
+    },
+    {
+        id: 'team', label: 'Team', short: 'Team', glyph: '⇄',
     },
 ];
 
@@ -241,6 +305,7 @@ export default defineComponent({
             if (id === 'runs') loadRuns();
             // eslint-disable-next-line no-use-before-define
             if (id === 'tests') loadTests();
+            if (id === 'team') syncTeam();
         };
         const fromId = ref('');
         // The open system, else the first, once they are known.
@@ -252,6 +317,12 @@ export default defineComponent({
         const openSystem = (id, branch = '') => (id ? open(id, { branch }) : undefined);
         const openFrom = () => openSystem(fromId.value || ws.id, fromBranch.value.trim());
         const create = () => { if (newId.value) newSystem(newId.value.trim()); };
+        // Team: a teammate's test opens its system from their branch.
+        const openShared = (t, branch) => open(t.system, { branch, scenario: t.name });
+        const shortName = (it) => it.branch.split('/').slice(2).join('/');
+        const shareOne = async (branch) => {
+            try { await share(branch); } catch (e) { team.error = e.message || String(e); }
+        };
         // Tests: the open system's scenarios (scenarios.js keeps them), or
         // every system's.
         const every = ref([]);
@@ -328,6 +399,12 @@ export default defineComponent({
             newId,
             openSystem,
             openFrom,
+            team,
+            syncTeam,
+            stateText,
+            openShared,
+            shortName,
+            shareOne,
             create,
             loadRuns,
             openRun,
