@@ -93,6 +93,48 @@ def test_a_local_base_lists_the_last_build_per_board(tmp_path):
                    "built=ecu=/vhil/fw/b/ecu.elf", "built=ams=/vhil/fw/a/ams.elf"]
 
 
+def test_a_working_tree_build_counts_only_for_the_run_that_builds_that_tree(tmp_path):
+    """A firmware repository's window built ecu@local last: a run of yours
+    (no FW_LOCAL) keeps the catalogue's ecu, the window's own gets its tree,
+    and another window's tree (ams@local) is never anyone else's."""
+    _keys_or_skip()
+    built = (r"ecu=/vhil/fw/ecu+1234.x/build/ECU08.elf\nams=/vhil/fw/ams+5678.x/build/AMS.elf\n"
+             r"ams=/vhil/fw/ams@local/build/AMS.elf\necu=/vhil/fw/ecu@local/build/ECU08.elf\n")
+    stub = dict(STUB_UP="1", STUB_LOCAL="1", STUB_BUILT=built)
+    _, out, _ = status(tmp_path, **stub)
+    assert [l for l in out if l.startswith("built=")] == [
+        "built=ecu=/vhil/fw/ecu+1234.x/build/ECU08.elf", "built=ams=/vhil/fw/ams+5678.x/build/AMS.elf"]
+    tree = tmp_path / "IFS08-CE-ECU"
+    tree.mkdir()
+    _, out, _ = status(tmp_path, FW_LOCAL=f"ecu={tree}", **stub)
+    assert [l for l in out if l.startswith("built=")] == [
+        "built=ecu=/vhil/fw/ecu@local/build/ECU08.elf", "built=ams=/vhil/fw/ams+5678.x/build/AMS.elf"]
+
+
+def test_the_containers_elf_uses_the_same_rule(tmp_path):
+    """The prelude's elf() (sim, scenarios, smoke): built.txt as above."""
+    fw = tmp_path / "fw"
+    fw.mkdir()
+    (fw / "built.txt").write_text("ecu=/vhil/fw/ecu+1/ECU08.elf\necu=/vhil/fw/ecu@local/ECU08.elf\n"
+                                  "ecu.bootloader=/vhil/fw/bootloader+2/bl.elf\n")
+    text = SCRIPT.read_text()
+    usable = text.split("usable_built='", 1)[1].split("'\n", 1)[0]
+    prelude = text.split("prelude='", 1)[1].split("\n'\n", 1)[0]
+    prelude = prelude.replace("'\"'$usable_built'\"'", "'" + usable + "'").replace("/vhil/fw/built.txt",
+                                                                                     str(fw / "built.txt"))
+
+    def elf(board, sources=""):
+        r = subprocess.run(["bash", "-c", prelude + f"\nelf {board}"], env={**os.environ, "FW_SOURCES": sources},
+                           capture_output=True, text=True, check=True)
+        return r.stdout.strip()
+
+    assert elf("ecu") == "/vhil/fw/ecu+1/ECU08.elf"
+    assert elf("ecu", "ecu=/src/ecu") == "/vhil/fw/ecu@local/ECU08.elf"
+    assert elf("ecu", "ams=/src/ams") == "/vhil/fw/ecu+1/ECU08.elf"
+    assert elf("ecu.bootloader", "ecu=/src/ecu") == "/vhil/fw/bootloader+2/bl.elf"
+    assert elf("udv") == ""
+
+
 def test_no_data_volume_starts_no_container(tmp_path):
     # `docker run -v vhil-data:...` would create the volume: status must not.
     k = _keys_or_skip()

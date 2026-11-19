@@ -113,13 +113,14 @@ run_args=()
 vcan_args=(--privileged --network host)
 [ "${VHIL_DOCKER_VCAN:-0}" = 1 ] && run_args=("${vcan_args[@]}")
 # A local firmware tree per FW_LOCAL entry, read-only at /src/<id>.
-src_args=() fw_sources=
+src_args=() fw_sources= local_ids=
 for pair in ${FW_LOCAL:-}; do
     id=${pair%%=*} dir=${pair#*=}
     case $dir in /*) ;; *) echo "error: FW_LOCAL $pair: the path must be absolute" >&2; exit 2;; esac
     [ -d "$dir" ] || { echo "error: FW_LOCAL $pair: no such directory" >&2; exit 2; }
     src_args+=(-v "$dir:/src/$id:ro")
     fw_sources+="${fw_sources:+ }$id=/src/$id"
+    local_ids+="${local_ids:+ }$id"
 done
 cpu_args=()
 if [ -n "${VHIL_DOCKER_CPUS:-}" ]; then
@@ -184,6 +185,14 @@ published() {
     return 2
 }
 
+# The board=elf lines of built.txt a run may use: a working tree's build
+# (/vhil/fw/<id>@local/...) only for a run that builds that tree (FW_LOCAL,
+# its ids in `ids`), never another window's, or one left by an earlier run.
+# It holds no single quote: the prelude embeds it in the container's script.
+usable_built='BEGIN { n = split(ids, a, " "); for (i = 1; i <= n; i++) mine[a[i]] = 1 }
+    { p = substr($0, index($0, "=") + 1)
+      if (match(p, /^\/vhil\/fw\/[^\/]+@local\//)) { id = substr(p, 10, RLENGTH - 16); if (!(id in mine)) next }
+      print }'
 # The board=elf lines of built.txt, the last per board, in first-seen order.
 last_per_board='{ if (!($1 in last)) order[n++] = $1; last[$1] = $0 }
     END { for (i = 0; i < n; i++) print last[order[i]] }'
@@ -403,9 +412,10 @@ in_container() {
         bash -c "$1" vhil "${@:2}"
 }
 
-# ELF paths of the last firmware build, as board=elf lines.
+# The ELF a run uses for a board: the last usable build of it (usable_built).
 prelude='set -euo pipefail
-elf() { sed -n "s/^$1=//p" /vhil/fw/built.txt 2>/dev/null | tail -1; }
+local_ids=; for r in $FW_SOURCES; do local_ids+=" ${r%%=*}"; done
+elf() { awk -v ids="$local_ids" '"'$usable_built'"' /vhil/fw/built.txt 2>/dev/null | sed -n "s/^$1=//p" | tail -1; }
 need_elf() { [ -n "$(elf "$1")" ] || { echo "no $1 firmware: run \`scripts/vhil-docker.sh fw $1\` first" >&2; exit 1; }; }
 '
 
@@ -442,7 +452,7 @@ status() {
         && "${docker[@]}" volume inspect vhil-data >/dev/null 2>&1; then
         { "${docker[@]}" run --rm -v vhil-data:/vhil "$base_image:$base" \
             cat /vhil/fw/built.txt 2>/dev/null || true; } \
-            | awk -F= "$last_per_board" | sed 's/^/built=/'
+            | awk -v ids="$local_ids" "$usable_built" | awk -F= "$last_per_board" | sed 's/^/built=/'
     fi
 }
 
