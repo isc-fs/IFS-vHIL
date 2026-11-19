@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { barOf, findings, groupId, Health, imagesCost, imagesNeeded, parseStatus, scenarioSystem } from "../src/status";
+import { barOf, findings, groupId, Health, holdBack, HOLD_BACK_S, imagesCost, imagesNeeded, parseStatus, scenarioSystem } from "../src/status";
 
 test("the status bar: Docker down asks to diagnose, idle and results run the tests", () => {
   const down = barOf({ kind: "down", context: "desktop-linux" });
@@ -115,4 +115,13 @@ test("images cost: an unpublished editor builds, even on a published base", () =
   assert.match(imagesCost("published", "missing"), /pull several GB.*editor image .*builds/);
   assert.match(imagesCost("local", "missing"), /editor image .*builds/);
   assert.match(imagesCost("missing", "missing"), /~30 min/);
+});
+
+test("the checkout waits for a new commit's images, but not for ever", () => {
+  assert.equal(holdBack({ base: "published", editor: "missing", ageS: 600 }), true);
+  assert.equal(holdBack({ base: "missing", editor: "missing", ageS: 600 }), true);
+  assert.equal(holdBack({ base: "published", editor: "published", ageS: 600 }), false);
+  assert.equal(holdBack({ base: "local", editor: "local", ageS: 600 }), false);
+  assert.equal(holdBack({ base: "unknown", editor: "unknown", ageS: 600 }), false); // can't tell: move
+  assert.equal(holdBack({ base: "missing", editor: "missing", ageS: HOLD_BACK_S + 1 }), false);
 });

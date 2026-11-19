@@ -27,7 +27,7 @@ import {
 } from "./firmware";
 import { boardsOf as debugBoards, debugConfig, entryBreakpoint, Ready } from "./debug";
 import {
-  barOf, DebuggerHealth, findings, Fix, GROUP, groupId, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
+  barOf, DebuggerHealth, findings, Fix, GROUP, groupId, holdBack, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
 } from "./status";
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
@@ -171,8 +171,15 @@ async function firmwareRepo(context: vscode.ExtensionContext,
 
 const UPDATED_KEY = "vhil.checkoutUpdated";
 
-/** Clone the extension's vHIL checkout, or bring it to the configured ref. */
-async function updateCheckout(context: vscode.ExtensionContext, checkout: string): Promise<{ ok: boolean; error?: string }> {
+/**
+ * Clone the extension's vHIL checkout, or bring it to the configured ref.
+ * With `env` (vhil-docker.sh's settings), a ref whose newest commit has no
+ * images yet keeps the commit it was on (holdBack): the new commit's own
+ * `vhil-docker.sh status` says, after the reset, and a hold resets back.
+ */
+async function updateCheckout(context: vscode.ExtensionContext, checkout: string,
+                              env?: NodeJS.ProcessEnv,
+                              log?: (line: string) => void): Promise<{ ok: boolean; error?: string }> {
   const { url, ref } = vhilRepo();
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `vHIL: fetching ${repoSlug(url) ?? url}@${ref}` },
@@ -182,8 +189,24 @@ async function updateCheckout(context: vscode.ExtensionContext, checkout: string
         fs.mkdirSync(path.dirname(checkout), { recursive: true });
         r = await git(path.dirname(checkout), ["clone", "-q", "--depth", "1", "-b", ref, url, checkout], 300000);
       } else {
+        const before = (await git(checkout, ["rev-parse", "HEAD"])).out.trim();
         r = await git(checkout, ["fetch", "-q", "--depth", "1", url, ref], 300000);
         if (r.ok) r = await git(checkout, ["reset", "-q", "--hard", "FETCH_HEAD"]);
+        const after = r.ok ? (await git(checkout, ["rev-parse", "HEAD"])).out.trim() : "";
+        if (r.ok && env && before && after && after !== before) {
+          const tip = await tipImages(checkout, env);
+          if (tip && holdBack(tip)) {
+            const back = await git(checkout, ["reset", "-q", "--hard", before]);
+            if (back.ok) {
+              const line = `${ref}'s newest commit ${after.slice(0, 7)} has no published images yet ` +
+                           `(they publish minutes after a push): staying on ${before.slice(0, 7)}.`;
+              log?.(line);
+              void vscode.window.showInformationMessage(`vHIL: ${line} Update again later.`);
+              // Not marked updated: the next start tries again.
+              return { ok: true };
+            }
+          }
+        }
       }
       if (!r.ok) {
         void vscode.window.showErrorMessage(`vHIL: couldn't fetch ${url}@${ref}: ${r.out.trim()}`);
@@ -194,6 +217,17 @@ async function updateCheckout(context: vscode.ExtensionContext, checkout: string
     });
 }
 
+
+/** The checkout's image states (its own vhil-docker.sh status) and its HEAD's age. */
+async function tipImages(checkout: string, env: NodeJS.ProcessEnv) {
+  const text = await new Promise<string>((resolve) =>
+    cp.execFile("bash", [path.join(checkout, SCRIPT), "status"], { env, cwd: checkout, timeout: 60000 },
+      (_err, stdout) => resolve(stdout ?? "")));
+  const status = parseStatus(text);
+  const time = Number((await git(checkout, ["log", "-1", "--format=%ct", "HEAD"])).out.trim());
+  if (!status || !time) return undefined;
+  return { base: status.baseState, editor: status.editorState, ageS: Date.now() / 1000 - time };
+}
 
 export function deactivate() {}
 
@@ -1475,7 +1509,7 @@ class Vhil implements vscode.Disposable {
       void vscode.window.showInformationMessage("vHIL: this is your own checkout: update it with git.");
       return;
     }
-    if ((await updateCheckout(this.context, this.repo)).ok) {
+    if ((await updateCheckout(this.context, this.repo, this.env(), (l) => this.log.appendLine(l))).ok) {
       this.readSystems();
       await this.refresh();
     }
