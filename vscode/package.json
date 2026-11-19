@@ -104,6 +104,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "vhil.newPart",
+        "title": "New part\u2026",
+        "category": "vHIL"
+      },
+      {
         "command": "vhil.openSystemYaml",
         "title": "Open the system file",
         "category": "vHIL",
@@ -264,6 +269,10 @@
         {
           "command": "vhil.newSystem",
           "when": "vhil.active"
+        },
+        {
+          "command": "vhil.newPart",
+          "when": "vhil.active && !vhil.firmwareRepo"
         },
         {
           "command": "vhil.openSystemYaml",

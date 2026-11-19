@@ -140,6 +140,13 @@ Set up / Retry**, to try again.
   to switch, or, with an editor that can't, asks before reloading it. The
   tab's **Open in the browser** button opens the same page outside VS Code,
   and the tab offers it too when the editor doesn't load in 15 s.
+- **vHIL: New part…** (the vHIL repository only): a sensor or chip on a
+  bus. It asks for its id, name, buses (I2C, SPI, UART), I2C address and ID
+  register, and optionally a system, board and bus to wire it to, then runs
+  `python -m vhil.part new` in the container: its model, tests, test marker
+  and CI rule are written, and the model and tests open. Its tests pass as
+  generated; the datasheet's behaviour goes in the TODOs
+  (`docs/development/adding-a-part.md`).
 - **vHIL: Tools…** (the vHIL repository only): a shell in the container,
   an IFS_HIL suite, coverage, speed, a smoke suite, validating a system,
   pruning firmware builds, exporting and importing a web app run.

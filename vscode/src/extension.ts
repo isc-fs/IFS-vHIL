@@ -32,6 +32,9 @@ import {
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
 import { TRACE_VIEW, TracePanel } from "./tracePanel";
+import {
+  addressError, busError, partArgs, partFiles, partIdError, pinError, Protocol, PROTOCOLS, whoAmIError,
+} from "./part";
 import { newSystemError, Row, rows } from "./systemsView";
 import { SystemsView } from "./systemsTree";
 
@@ -363,6 +366,7 @@ class Vhil implements vscode.Disposable {
         if (id) await this.openEditor(id);
       }),
       command("vhil.newSystem", () => this.newSystem()),
+      command("vhil.newPart", () => this.newPart()),
       command("vhil.openSystemYaml", async (item?: Row | string) => {
         const id = systemOf(item) ?? await this.pickSystem("Open which system file?");
         if (id) await vscode.window.showTextDocument(vscode.Uri.file(path.join(this.repo, "systems", `${id}.yaml`)));
@@ -1469,6 +1473,99 @@ class Vhil implements vscode.Disposable {
       validateInput: (v) => newSystemError(v.trim(), existing),
     });
     if (id) await this.openEditor(id.trim(), true);
+  }
+
+  /**
+   * A new part (a sensor or chip on a bus): its id, name, buses and ID
+   * register, optionally wired into a system, then `python -m vhil.part new`
+   * in the container writes its model, tests, marker and CI rule
+   * (docs/development/adding-a-part.md) and the model and tests open.
+   */
+  private async newPart() {
+    if (this.local) {
+      void vscode.window.showInformationMessage(
+        "vHIL: a new part goes into the vHIL repository: open your IFS-vHIL checkout to add one.");
+      return;
+    }
+    const title = (step: number) => `vHIL: new part (${step}/5)`;
+    const models = path.join(this.repo, "catalog", "models");
+    const existing = fs.existsSync(models)
+      ? fs.readdirSync(models).filter((f) => f.endsWith(".yaml")).map((f) => f.slice(0, -5)) : [];
+    const id = (await vscode.window.showInputBox({
+      title: title(1), prompt: "Its id: catalog/models/<id>.yaml, the chip's part number.",
+      placeHolder: "bme280", validateInput: (v) => partIdError(v.trim(), existing),
+    }))?.trim();
+    if (!id) return;
+    const name = (await vscode.window.showInputBox({
+      title: title(2), prompt: "What it is, as the docs and the CI rule will name it.",
+      placeHolder: "Bosch BME280 pressure sensor", validateInput: (v) => (v.trim() ? undefined : "a name"),
+    }))?.trim();
+    if (!name) return;
+    const picked = await vscode.window.showQuickPick(
+      PROTOCOLS.map((p) => ({ label: p.toUpperCase(), protocol: p, picked: p === "i2c" })),
+      { title: title(3), placeHolder: "The buses it speaks (a device wires one)", canPickMany: true });
+    if (!picked?.length) return;
+    const protocols: Protocol[] = picked.map((p) => p.protocol);
+    let address: string | undefined;
+    if (protocols.includes("i2c")) {
+      address = (await vscode.window.showInputBox({
+        title: title(4), prompt: "Its 7-bit I2C address (the datasheet's).", value: "0x40",
+        validateInput: (v) => addressError(v),
+      }))?.trim();
+      if (!address) return;
+    }
+    const whoAmI = await vscode.window.showInputBox({
+      title: title(4), prompt: "Its ID register and the value it reads, <register>=<value>; empty: none yet.",
+      placeHolder: "0xD0=0x60", validateInput: (v) => whoAmIError(v, protocols),
+    });
+    if (whoAmI === undefined) return;
+    const place = await this.placePart(title(5), protocols);
+    if (place === null) return;
+    const args = partArgs({ id, name, protocols, address, whoAmI, place });
+    const code = await this.task(`New part ${id}`, ["run", "python", "-m", "vhil.part", ...args]);
+    if (code !== 0) return;
+    for (const [i, rel] of partFiles(id).entries()) {
+      const file = path.join(this.repo, rel);
+      if (fs.existsSync(file)) {
+        await vscode.window.showTextDocument(vscode.Uri.file(file), { preview: false, preserveFocus: i > 0 });
+      }
+    }
+    if (place) this.readSystems();
+    await this.refresh();
+    void vscode.window.showInformationMessage(
+      `vHIL: ${id} written. Fill its TODOs from the datasheet; its tests run as generated.`, "The guide")
+      .then((a) => a && vscode.env.openExternal(vscode.Uri.file(
+        path.join(this.repo, "docs", "development", "adding-a-part.md"))));
+  }
+
+  /** Where a new part goes: a system, its board, bus and (on SPI) CS; undefined: nowhere; null: cancelled. */
+  private async placePart(title: string, protocols: Protocol[]) {
+    const none = { label: "Not now", description: "add it to a system later (devices:)", id: "" };
+    const pick = await vscode.window.showQuickPick(
+      [none, ...this.systems.map((s) => ({ label: s.id, description: s.boards.map((b) => b.name).join(", "), id: s.id }))],
+      { title, placeHolder: "Wire it into a system?" });
+    if (!pick) return null;
+    if (!pick.id) return undefined;
+    const boards = this.systems.find((s) => s.id === pick.id)?.boards ?? [];
+    const board = boards.length === 1 ? boards[0].name : (await vscode.window.showQuickPick(
+      boards.map((b) => ({ label: b.name, description: b.role ? `${b.board}, ${b.role}` : b.board })),
+      { title, placeHolder: "On which board?" }))?.label;
+    if (!board) return null;
+    const bus = (await vscode.window.showInputBox({
+      title, prompt: `The bus of ${board} it is on.`,
+      placeHolder: protocols.includes("i2c") ? "I2C2" : protocols.includes("spi") ? "SPI1" : "USART2",
+      validateInput: (v) => busError(v, protocols),
+    }))?.trim();
+    if (!bus) return null;
+    let cs: string | undefined;
+    if (/^spi/i.test(bus)) {
+      cs = (await vscode.window.showInputBox({
+        title, prompt: `The pin of ${board} its chip select is on.`, placeHolder: "PA4",
+        validateInput: (v) => pinError(v),
+      }))?.trim();
+      if (!cs) return null;
+    }
+    return { system: pick.id, board, bus, cs };
   }
 
   /** A system's scenarios (its group in the Testing panel), as a run from the panel. */
