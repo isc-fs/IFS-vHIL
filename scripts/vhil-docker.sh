@@ -352,7 +352,7 @@ worktree_git
 # RunRequest.local): FW_LOCAL's first entry, mounted at /src/local in the
 # worker. Compose reads both; empty, a run builds no working tree.
 stack_local() {
-    local pair=${FW_LOCAL%% *}
+    local pair=${FW_LOCAL:-}; pair=${pair%% *}
     [ -n "$pair" ] || return 0
     [ "$pair" = "${FW_LOCAL:-}" ] || echo "note: the editor's runs build ${pair%%=*}'s working tree only (FW_LOCAL's first entry)" >&2
     export VHIL_LOCAL_SOURCES="${pair%%=*}=/src/local" VHIL_LOCAL_DIR=${pair#*=}
