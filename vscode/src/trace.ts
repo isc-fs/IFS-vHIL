@@ -59,6 +59,17 @@ export function hostPath(file: string, m: PathMap): string | undefined {
   return undefined;
 }
 
+/** A posix path without `.` and `..` segments. */
+function normalise(path: string): string {
+  const parts: string[] = [];
+  for (const p of path.split("/")) {
+    if (p === "" || p === ".") continue;
+    if (p === "..") parts.pop();
+    else parts.push(p);
+  }
+  return "/" + parts.join("/");
+}
+
 function join(dir: string, rel: string): string {
   return dir.replace(/\/+$/, "") + "/" + rel;
 }
@@ -117,16 +128,29 @@ export interface Diagnostic {
 
 /**
  * The errors and warnings of a build's output (gcc's `file:line:col:
- * severity: message`), those in files on the host only. A linker error
+ * severity: message`), those in files on the host only. A relative path
+ * (a Makefile build) is resolved against make's directory. A linker error
  * names no line: it stays in the build's output.
  */
 export function compilerDiagnostics(text: string, m: PathMap): Diagnostic[] {
   const out: Diagnostic[] = [];
   const seen = new Set<string>();
-  for (const line of text.split(/\r?\n/)) {
-    const g = /^(\/[^:\s]+):(\d+):(\d+): (fatal error|error|warning): (.*)$/.exec(line.trim());
+  // A Makefile build (CubeMX's) names sources relative to the directory
+  // make runs in: make's "Entering directory" says which, else the open
+  // working tree's build copy is.
+  let cwd = m.firmware ? `/vhil/fw/${m.firmware}@local` : undefined;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    const enter = /^make(?:\[\d+\])?: Entering directory [`'](.*)'$/.exec(line);
+    if (enter) { cwd = enter[1]; continue; }
+    const g = /^((?:[A-Za-z]:)?[^:\s][^:]*?):(\d+):(\d+): (fatal error|error|warning): (.*)$/.exec(line);
     if (!g) continue;
-    const file = hostPath(g[1], m);
+    let path = g[1];
+    if (!path.startsWith("/") && !/^[A-Za-z]:/.test(path)) {
+      if (!cwd) continue;
+      path = normalise(`${cwd}/${path}`);
+    }
+    const file = hostPath(path, m);
     if (!file) continue;
     const d: Diagnostic = { file, line: +g[2], column: +g[3],
                             severity: g[4] === "warning" ? "warning" : "error", message: g[5] };

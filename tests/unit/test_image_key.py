@@ -3,7 +3,20 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def _git_reachable():
+    """A git worktree's .git is a file naming its git dir by host path; in a
+    container that mounts only the checkout, git can't follow it. (The
+    vhil-docker.sh jobs mount that dir too; other harnesses may not.)"""
+    ok = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
+                        capture_output=True).returncode == 0
+    if not ok and (REPO / ".git").is_file():
+        pytest.skip("git worktree: its .git points to a host path")
 
 
 def keys():

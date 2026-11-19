@@ -7,6 +7,10 @@
 #   scripts/vhil-docker.sh vm                    create/start the VM, with vcan
 #   scripts/vhil-docker.sh pull                  pull the published images of this checkout
 #   scripts/vhil-docker.sh image                 (re)build the images (docker/) locally
+#   scripts/vhil-docker.sh images                get what a run needs: pull the published images,
+#                                                build the ones that aren't (as a run would)
+#   scripts/vhil-docker.sh status                what's there, read-only (never pulls, builds
+#                                                or changes anything): key=value lines, below
 #   scripts/vhil-docker.sh fw [ecu ams udv ...]  build firmware from systems/<s>.yaml
 #   scripts/vhil-docker.sh unit                  tests/unit + validate every system
 #   scripts/vhil-docker.sh smoke <ecu|ams>       tests/<s>_smoke.robot
@@ -64,7 +68,18 @@
 # (scripts/image-key.sh). When they aren't local, it pulls them from
 # $VHIL_REGISTRY (default ghcr.io/isc-fs, published by
 # .github/workflows/image.yml) and builds them only when none is published
-# or docker/ has uncommitted changes.
+# or docker/ has uncommitted changes. Each image on its own: a published base
+# with an unpublished editor builds just the editor (a few minutes), on the
+# base. A registry that doesn't answer is an error, not a reason to build;
+# VHIL_BUILD_ON_PULL_FAIL=1 builds then instead.
+#
+# `status` prints, for callers such as the VS Code extension (a contract:
+# keep it stable):
+#   docker=up|down|nocli
+#   base=<key> base_state=local|published|missing|unknown
+#   editor=<key> editor_state=local|published|missing|unknown
+#   clean=true|false
+#   built=<board>=<elf>      one per board, only when docker=up and the base is local
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 profile=${VHIL_COLIMA_PROFILE:-vhil}
@@ -138,12 +153,30 @@ vm() {
 base='' editor='' clean=''
 image_keys() {
     local out
-    out=$("$repo/scripts/image-key.sh")
+    out=$("$repo/scripts/image-key.sh") || return 1
     base=$(sed -n 's/^base=//p' <<<"$out")
     editor=$(sed -n 's/^editor=//p' <<<"$out")
     clean=$(sed -n 's/^clean=//p' <<<"$out")
 }
 have() { "${docker[@]}" image inspect "$1" >/dev/null 2>&1; }
+
+# Whether $registry/<name>:<key> is published, from its manifest alone (no
+# pull, no daemon: the docker CLI asks the registry): 0 yes, 1 not found,
+# 2 couldn't tell (network, auth, rate limit), with the error in published_err.
+published_err=''
+published() {
+    local out
+    if out=$(docker manifest inspect "$registry/$1:$2" 2>&1 >/dev/null); then return 0; fi
+    published_err=$out
+    case $out in
+    *"manifest unknown"*|*"not found"*|*"no such manifest"*) return 1 ;;
+    esac
+    return 2
+}
+
+# The board=elf lines of built.txt, the last per board, in first-seen order.
+last_per_board='{ if (!($1 in last)) order[n++] = $1; last[$1] = $0 }
+    END { for (i = 0; i < n; i++) print last[order[i]] }'
 
 build_images() {
     image_keys
@@ -156,40 +189,82 @@ build_images() {
     fi
 }
 
+# One image of this checkout (ifs-vhil or ifs-vhil-editor) by its key: kept
+# when local, else pulled when published. Returns 1 when none is published
+# (the caller builds it, or not); exits on a failed pull or a registry that
+# doesn't answer, rather than starting a ~30 min build over a network blip.
+fetch_image() {
+    local name=$1 key=$2 local_image=$base_image rc=0
+    [ "$name" = ifs-vhil-editor ] && local_image=$editor_image
+    have "$local_image:$key" && return 0
+    published "$name" "$key" || rc=$?
+    case $rc in
+    0)
+        echo "pulling $registry/$name:$key" >&2
+        if ! "${docker[@]}" pull "$registry/$name:$key"; then
+            echo "error: pulling $registry/$name:$key failed: retry, or check free disk with \`bin/vhil doctor\`" >&2
+            exit 1
+        fi
+        "${docker[@]}" tag "$registry/$name:$key" "$local_image:$key" ;;
+    1) return 1 ;;
+    *)
+        echo "$published_err" >&2
+        if [ "${VHIL_BUILD_ON_PULL_FAIL:-0}" = 1 ]; then
+            echo "can't reach $registry for $name:$key: building it (VHIL_BUILD_ON_PULL_FAIL=1)" >&2
+            return 1
+        fi
+        echo "error: can't tell whether $registry/$name:$key is published (above): retry, or set VHIL_BUILD_ON_PULL_FAIL=1 to build it" >&2
+        exit 1 ;;
+    esac
+}
+
 # The published images of this checkout, tagged locally as the images and as
-# their keys. Fails when docker/ has uncommitted changes or none is published.
+# their keys. Fails when docker/ has uncommitted changes or one isn't
+# published (any job then builds just that one).
 pull_images() {
     image_keys
     if [ "$clean" != true ]; then
         echo "docker/ or the editor's sources have uncommitted changes: build them (\`image\`)" >&2
         return 1
     fi
-    local name key
-    for name in ifs-vhil ifs-vhil-editor; do
-        key=$base; [ "$name" = ifs-vhil-editor ] && key=$editor
-        "${docker[@]}" pull "$registry/$name:$key" || return 1
-    done
-    "${docker[@]}" tag "$registry/ifs-vhil:$base" "$base_image:$base"
-    "${docker[@]}" tag "$registry/ifs-vhil-editor:$editor" "$editor_image:$editor"
-    "${docker[@]}" tag "$base_image:$base" "$base_image"
-    "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
+    local rc=0
+    if fetch_image ifs-vhil "$base"; then
+        "${docker[@]}" tag "$base_image:$base" "$base_image"
+    else
+        echo "ifs-vhil:$base isn't published" >&2; rc=1
+    fi
+    if fetch_image ifs-vhil-editor "$editor"; then
+        "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
+    else
+        echo "ifs-vhil-editor:$editor isn't published" >&2; rc=1
+    fi
+    return $rc
 }
 
-# The images of this checkout: local by key, else pulled, else built.
+# The images of this checkout, each on its own: local by key, else pulled,
+# else built. Once per invocation (`fw` asks, then in_container again).
+images_ready=false
 ensure_images() {
+    [ "$images_ready" = true ] && return
     image_keys
     if [ "$clean" != true ]; then
         echo "docker/ or the editor's sources have uncommitted changes: using the local \`latest\` images" >&2
         if ! have "$base_image" || ! have "$editor_image"; then build_images; fi
-        base_tag=latest editor_tag=latest
+        base_tag=latest editor_tag=latest images_ready=true
         return
     fi
-    if ! have "$base_image:$base" || ! have "$editor_image:$editor"; then
-        echo "pulling the images of this checkout ($registry, ifs-vhil:$base)" >&2
-        pull_images || {
-            echo "no published image for this checkout: building it (Renode from source, ~30 min)" >&2
-            build_images
-        }
+    local built_base=false
+    if ! fetch_image ifs-vhil "$base"; then
+        echo "building ifs-vhil:$base (Renode from source, ~30 min)" >&2
+        "${docker[@]}" build -t "$base_image:$base" "$repo/docker"
+        built_base=true
+    fi
+    # An editor built on a base built here: a published one sits on a
+    # published base, which this one isn't.
+    if [ "$built_base" = true ] || ! fetch_image ifs-vhil-editor "$editor"; then
+        echo "building ifs-vhil-editor:$editor on the $([ "$built_base" = true ] && echo local || echo published) base (a few minutes)" >&2
+        "${docker[@]}" build -t "$editor_image:$editor" --build-arg BASE="$base_image:$base" \
+            -f "$repo/docker/editor.Dockerfile" "$repo"
     fi
     if ! have "$base_image:$base" || ! have "$editor_image:$editor"; then
         echo "error: no ifs-vhil:$base / ifs-vhil-editor:$editor after pulling or building" >&2
@@ -198,7 +273,7 @@ ensure_images() {
     # `latest` follows the last checkout used, for docker compose run by hand.
     "${docker[@]}" tag "$base_image:$base" "$base_image"
     "${docker[@]}" tag "$editor_image:$editor" "$editor_image"
-    base_tag=$base editor_tag=$editor
+    base_tag=$base editor_tag=$editor images_ready=true
 }
 
 # The x86 image of this checkout for `fw` on an arm64 host (#351): sets
@@ -212,6 +287,13 @@ x86_fw() {
         why="the images are a local build (docker/ has uncommitted changes)"
     else
         local ref=$base_image:$base-amd64
+        # Whether this Docker runs amd64, asked once per base key (a
+        # container start through Rosetta or qemu on every `fw` otherwise).
+        local stamp=${XDG_CACHE_HOME:-$HOME/.cache}/vhil/x86-ok-$context-$base
+        if have "$ref" && [ -f "$stamp" ]; then
+            fw_ref=$ref fw_platform=(--platform linux/amd64)
+            return
+        fi
         if ! have "$ref"; then
             echo "pulling the x86 image ($registry/ifs-vhil:$base) to build firmware as CI does (#351)" >&2
             if "${docker[@]}" pull -q --platform linux/amd64 "$registry/ifs-vhil:$base" >/dev/null; then
@@ -223,12 +305,34 @@ x86_fw() {
         elif ! "${docker[@]}" run --rm --platform linux/amd64 "$ref" true >/dev/null 2>&1; then
             why="this Docker can't run x86 images (Colima: colima start $profile --vz-rosetta)"
         else
+            mkdir -p "$(dirname "$stamp")" && touch "$stamp" || true
             fw_ref=$ref fw_platform=(--platform linux/amd64)
             return
         fi
     fi
     echo "warning: building firmware natively: $why. The uDV image then differs from CI's" >&2
     echo "  (the Arm toolchain's prebuilt C library differs by host, #351); VHIL_FW_NATIVE=1 silences this." >&2
+}
+
+# A git worktree's .git is a file pointing at the main checkout's git dir on
+# the host: mounted alone at /work, git there finds no repository. Sets
+# git_common to that dir when it lies outside the checkout, else empty.
+git_common=''
+worktree_git() {
+    [ -f "$repo/.git" ] || return 0
+    local common
+    common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+    case $common in "$repo"|"$repo"/*) ;; *) git_common=$common ;; esac
+}
+worktree_git
+
+# The compose stack mounts the checkout alone (docker/compose.yaml), so its
+# git dir isn't there: refuse up front rather than fail inside, where the
+# api's git says "the workspace has no commits".
+no_worktree() {
+    [ -z "$git_common" ] && return
+    echo "error: the $1 can't run from a git worktree yet (its git dir $git_common isn't visible in the containers): start it from the main checkout" >&2
+    exit 1
 }
 
 # Run a script in the container. For vcan jobs, host networking puts
@@ -239,8 +343,12 @@ in_container() {
     local ref=$base_image:$base_tag
     [ "$image" = "$editor_image" ] && ref=$editor_image:$editor_tag
     [ -n "$fw_ref" ] && ref=$fw_ref
-    local tty=()
+    local tty=() git_args=()
     [ -t 0 ] && [ -t 1 ] && tty=(-it)
+    # A worktree: its git dir at the same path, read-only (jobs only read
+    # git), trusted though another uid owns it there.
+    [ -n "$git_common" ] && git_args=(-v "$git_common:$git_common:ro"
+        -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*')
     # VHIL_DEBUG=<board>:<port>: that board waits for a GDB on the host's
     # 127.0.0.1:<port> (vhil/debugattach.py, the VS Code Debug profile).
     local debug_args=()
@@ -255,7 +363,7 @@ in_container() {
         ${VHIL_DOCKER_NAME:+--name "$VHIL_DOCKER_NAME"} \
         ${debug_args[@]+"${debug_args[@]}"} \
         ${cpu_args[@]+"${cpu_args[@]}"} ${src_args[@]+"${src_args[@]}"} \
-        -v "$repo:/work" -v vhil-data:/vhil \
+        -v "$repo:/work" ${git_args[@]+"${git_args[@]}"} -v vhil-data:/vhil \
         -e FW_SOURCES="$fw_sources" -e FW_LOCAL_ONLY="${FW_LOCAL_ONLY:-0}" \
         -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" \
         -e VHIL_SYSTEM="${VHIL_SYSTEM:-}" -e VHIL_DUT="${VHIL_DUT:-ecu}" \
@@ -273,11 +381,49 @@ elf() { sed -n "s/^$1=//p" /vhil/fw/built.txt 2>/dev/null | tail -1; }
 need_elf() { [ -n "$(elf "$1")" ] || { echo "no $1 firmware: run \`scripts/vhil-docker.sh fw $1\` first" >&2; exit 1; }; }
 '
 
+# Read-only: no ensure_images, no pull, no build (the format: header).
+status() {
+    local state=up
+    if ! command -v docker >/dev/null; then state=nocli
+    elif ! "${docker[@]}" info >/dev/null 2>&1; then state=down
+    fi
+    echo "docker=$state"
+    if ! image_keys 2>/dev/null; then
+        echo "error: scripts/image-key.sh failed (is this a git checkout?)" >&2
+        return 1
+    fi
+    local name key local_image st rc base_st=
+    for name in ifs-vhil ifs-vhil-editor; do
+        key=$base local_image=$base_image
+        [ "$name" = ifs-vhil-editor ] && key=$editor local_image=$editor_image
+        rc=0
+        if [ "$state" = up ] && have "$local_image:$key"; then st=local
+        elif [ "$state" = nocli ]; then st=unknown
+        else
+            published "$name" "$key" || rc=$?
+            case $rc in 0) st=published ;; 1) st=missing ;; *) st=unknown ;; esac
+        fi
+        if [ "$name" = ifs-vhil ]; then echo "base=$key base_state=$st"; base_st=$st
+        else echo "editor=$key editor_state=$st"
+        fi
+    done
+    echo "clean=$clean"
+    # Only an existing volume: `docker run -v` would create it.
+    if [ "$state" = up ] && [ "$base_st" = local ] \
+        && "${docker[@]}" volume inspect vhil-data >/dev/null 2>&1; then
+        { "${docker[@]}" run --rm -v vhil-data:/vhil "$base_image:$base" \
+            cat /vhil/fw/built.txt 2>/dev/null || true; } \
+            | awk -F= "$last_per_board" | sed 's/^/built=/'
+    fi
+}
+
 cmd=${1:-help}; shift || true
 case "$cmd" in
 vm) vm ;;
 pull) pull_images ;;
 image) build_images ;;
+images) ensure_images ;;
+status) status ;;
 fw)
     [ $# -gt 0 ] || set -- ecu ams
     ensure_images
@@ -380,6 +526,7 @@ editor)
     # proxy (docker/compose.yaml; the api comes up with it, for the login
     # check). It publishes no port of its own. Run is the web app's, which
     # the worker executes: it comes up too, or a run here stays queued (#393).
+    no_worktree "system editor"
     ensure_images
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy worker ;;
 export-run|import-run)
@@ -410,6 +557,7 @@ server)
     # the auth settings pass through when set (docs/development/web-app.md).
     # The api listens on 0.0.0.0 in its container, reached only through the
     # proxy, whose port is on the host's 127.0.0.1 only (docker/compose.yaml).
+    no_worktree "web app"
     ensure_images
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up api proxy ;;
 worker)

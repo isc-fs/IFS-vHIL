@@ -72,3 +72,21 @@ def test_a_run_reports_each_test_as_it_starts_and_ends(tmp_path):
     # A failing fixture fails its test, with where it raised.
     broken = results["test_x.py::test_setup_error"]
     assert broken["outcome"] == "failed" and "setup broke" in broken["message"]
+
+
+def test_a_failure_in_a_helper_is_anchored_at_the_test_line_that_called_it(tmp_path):
+    (tmp_path / "helpers.py").write_text("def check(x):\n    raise AssertionError(f'bad {x}')\n")
+    (tmp_path / "test_y.py").write_text(textwrap.dedent('''
+        from helpers import check
+
+        def test_calls_a_helper():
+            check(1)
+    '''))
+    out = tmp_path / "out" / "y.jsonl"
+    subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", str(tmp_path),
+                    "-p", "vhil.pytest_vscode", "--vscode-out", str(out), "test_y.py"],
+                   cwd=tmp_path, env={"PYTHONPATH": f"{REPO}:{tmp_path}"}, capture_output=True, text=True)
+    results = {r["id"]: r for r in map(json.loads, out.read_text().splitlines()) if r["kind"] == "result"}
+    failed = results["test_y.py::test_calls_a_helper"]
+    assert (failed["file"], failed["line"]) == ("test_y.py", 5)  # the call, not helpers.py:2
+    assert failed["short"] == "AssertionError: bad 1"

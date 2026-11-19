@@ -51,3 +51,20 @@ test("compiler errors land at the working tree's lines, once each", () => {
       message: "unused variable 'x' [-Wunused-variable]" },
   ]);
 });
+
+test("a relative compiler path resolves against the open tree's build copy or make's directory", () => {
+  const udv = { repo: "/w/vhil", firmware: "udv", dir: "/w/uDV" };
+  assert.deepEqual(compilerDiagnostics("Core/Src/main.c:10:5: error: x", udv), [
+    { file: "/w/uDV/Core/Src/main.c", line: 10, column: 5, severity: "error", message: "x" },
+  ]);
+  const out = [
+    "make[1]: Entering directory '/vhil/fw/udv@local/Debug'",
+    "../Core/Src/./can.c:3:1: warning: y",
+    "make[1]: Leaving directory '/vhil/fw/udv@local/Debug'",
+  ].join("\n");
+  assert.deepEqual(compilerDiagnostics(out, udv), [
+    { file: "/w/uDV/Core/Src/can.c", line: 3, column: 1, severity: "warning", message: "y" },
+  ]);
+  // No open firmware and no make directory: nowhere to resolve it.
+  assert.deepEqual(compilerDiagnostics("Core/Src/main.c:10:5: error: x", { repo: "/w/vhil" }), []);
+});
