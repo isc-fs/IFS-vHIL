@@ -12,7 +12,12 @@ What it does, each step a `bin/vhil` command a teammate could run by hand:
 2. **vHIL files:** clones this repository into the app's data folder
    (`~/Library/Application Support/org.iscfs.vhil/IFS-vHIL`) at the app's
    release tag (`dev` for a dev build), and moves it on **Update**. Settings
-   can point it at your own clone instead.
+   can point it at your own clone instead: the app then fetches it on each
+   launch (`bin/vhil-clone`, carried by the app) and, instead of opening the
+   vHIL straight away, says when your branch is behind its upstream
+   (**Update**: a fast-forward, never a merge) or already merged into `dev`
+   (**Switch to dev**, when nothing is uncommitted). Open then restarts the
+   vHIL on the new code.
 3. **Docker:** on macOS starts the Colima VM (`vhil vm`), on its own on later
    launches; elsewhere checks that Docker answers.
 4. **Images and firmware:** `vhil setup`, with `vhil doctor --json` as the
