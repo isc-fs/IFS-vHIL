@@ -64,7 +64,14 @@
 			X-Frame-Options SAMEORIGIN
 		}
 		@pm_hashed path_regexp \.[0-9a-f]{8}\.(js|css)$
-		header @pm_hashed Cache-Control "public, max-age=31536000, immutable"
+		# Only on a 200: a 404 (an old index naming an old bundle) or an auth
+		# redirect must not be cached for a year.
+		header @pm_hashed {
+			Cache-Control "public, max-age=31536000, immutable"
+			match {
+				status 200
+			}
+		}
 		@pm_other not path_regexp \.[0-9a-f]{8}\.(js|css)$
 		header @pm_other Cache-Control "no-cache"
 		forward_auth api:8080 {
