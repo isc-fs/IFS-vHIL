@@ -1859,3 +1859,70 @@ def test_a_plant_signal_reads_the_plant_records():
     bad, = vexpect.evaluate([{"check": "always", "at_ms": 5600, "signal": "plant:ts.air_pos_close_ratio",
                               "op": ">=", "value": 0.96}], recs, None, 11_000_000)
     assert ok["passed"] and not bad["passed"]
+
+
+# -- a developer's working tree (RunRequest.local, LOCAL_REF) ---------------------
+
+def test_local_sources_come_from_the_environment():
+    from vhil.server.runs import local_sources
+    assert local_sources({"VHIL_LOCAL_SOURCES": "ecu=/src/local ams=relative bad"}) == {
+        "ecu": Path("/src/local")}
+    assert local_sources({}) == {}
+
+
+def test_a_local_run_builds_the_working_tree_every_time_and_keeps_it_out_of_built_txt(
+        tmp_path, monkeypatch):
+    """Every image of a firmware with a working tree is built from it (its
+    edits since the last run), with --source, never resolved to a commit;
+    the bootloader keeps its ref and is reused once built."""
+    import vhil.worker as vw
+    from vhil.system import local_source_dir
+    from vhil.worker import LOCAL_REF, resolve_commits
+    system = System(ECU)
+    monkeypatch.setenv("VHIL_LOCAL_SOURCES", "ecu=/src/local")
+    calls = []
+
+    def build(cmd, on_line=None):
+        calls.append(cmd)
+        out = []
+        only = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--only"]
+        for key in only:
+            fw, ref = vw.image_ref(system, key, {})
+            elf = (local_source_dir(tmp_path, fw) / fw["build"]["elf"] if key == "ecu"
+                   else image_path(tmp_path, fw, ref))
+            elf.parent.mkdir(parents=True, exist_ok=True)
+            elf.write_bytes(b"\x7fELF")
+            out.append(f"{key}={elf}")
+        return "\n".join(out) + "\n"
+
+    monkeypatch.setattr(vw, "run_build", build)
+    refs = {"ecu": LOCAL_REF}
+    assert resolve_commits(system, refs, lister=None)["ecu"] == {"ref": LOCAL_REF, "commit": None}
+    resolver = FirmwareResolver(tmp_path, log=lambda m: None)
+    first = resolver.resolve(system, refs)
+    assert first["ecu"] == (local_source_dir(tmp_path, system.boards["ecu"].firmware) / "build/ECU08.elf").resolve()
+    assert "--source" in calls[0] and "ecu=/src/local" in calls[0]
+    assert "--ref" in calls[0] and "ecu.bootloader=" in " ".join(calls[0])
+    assert "@local/" not in (tmp_path / "built.txt").read_text()
+    resolver.resolve(system, refs)
+    second = calls[1]                                                    # just ecu, again
+    assert [second[i + 1] for i, c in enumerate(second) if c == "--only"] == ["ecu"]
+
+
+def test_post_local_maps_the_working_trees_images(client, monkeypatch):
+    monkeypatch.setenv("VHIL_LOCAL_SOURCES", "ecu=/src/local")
+    r = post(client, local=True)
+    assert r.status_code == 201, r.text
+    run = client.get(f"/api/runs/{r.json()['run_id']}").json()
+    assert run["firmware"] == {"ecu": "@local"}
+    # Not a ref a client may send itself, and nothing to build locally is an error.
+    assert post(client, firmware={"ecu": "@local"}).status_code == 422
+    monkeypatch.setenv("VHIL_LOCAL_SOURCES", "udv=/src/local")
+    r = post(client, local=True)
+    assert r.status_code == 422 and "no image of ecu" in r.text
+
+
+def test_config_names_the_working_trees_firmware(client, monkeypatch):
+    assert client.get("/api/config").json()["local_firmware"] == []
+    monkeypatch.setenv("VHIL_LOCAL_SOURCES", "ecu=/src/local")
+    assert client.get("/api/config").json()["local_firmware"] == ["ecu"]

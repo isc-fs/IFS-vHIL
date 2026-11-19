@@ -439,6 +439,24 @@ class PytestScenario(_Model):
 
 Scenario = Annotated[Union[RunScenario, PytestScenario], Field(discriminator="kind")]
 
+# An image's ref when the run builds it from a developer's working tree, the
+# one this server was started with (VHIL_LOCAL_SOURCES): uncommitted edits
+# included, rebuilt (incrementally) before every run that asks for it.
+LOCAL_REF = "@local"
+
+
+def local_sources(env: Optional[dict] = None) -> dict[str, Path]:
+    """Firmware id -> its working tree in the container, from
+    VHIL_LOCAL_SOURCES ("<id>=<dir> ...", scripts/vhil-docker.sh editor sets
+    it from FW_LOCAL, the VS Code extension's firmware repository)."""
+    text = (os.environ if env is None else env).get("VHIL_LOCAL_SOURCES", "")
+    out = {}
+    for pair in text.split():
+        fid, sep, d = pair.partition("=")
+        if sep and fid and d.startswith("/"):
+            out[fid] = Path(d)
+    return out
+
 
 class RunRequest(_Model):
     system: str
@@ -446,6 +464,10 @@ class RunRequest(_Model):
     # image key (System.images: "<board>", "<board>.bootloader") -> firmware
     # ref; missing or null = the catalogue firmware's default ref.
     firmware: dict[str, Optional[str]] = {}
+    # Build every image of a firmware this server has a working tree of
+    # (VHIL_LOCAL_SOURCES: the VS Code extension's firmware repository) from
+    # that tree instead, uncommitted edits included (vhil.worker.LOCAL_REF).
+    local: bool = False
     scenario: Scenario
 
     @field_validator("system")
@@ -474,6 +496,19 @@ def firmware_commits(request, system: System, refs: dict) -> dict[str, dict]:
     from vhil.worker import resolve_commits
     return resolve_commits(system, {k: v for k, v in refs.items() if v}, _refs(request),
                            log=lambda m: log.warning("run firmware: %s", m))
+
+
+def local_images(system: System) -> dict[str, str]:
+    """Image key -> LOCAL_REF for each image whose firmware this server has a
+    working tree of (local_sources)."""
+    from vhil.worker import image_ref
+    trees = local_sources()
+    out = {}
+    for key in system.images():
+        fw, _ = image_ref(system, key, {})
+        if fw is not None and fw["id"] in trees:
+            out[key] = LOCAL_REF
+    return out
 
 
 def check_against_system(req: RunRequest, system: System, workspace: Path) -> list[str]:
@@ -1241,6 +1276,11 @@ def submit(req: RunRequest, request: Request, settings, workspace, store: "RunSt
         except SystemError as e:
             raise HTTPException(422, f"system '{req.system}' does not validate: {e}")
     errors = check_against_system(req, system, workspace.root)
+    if req.local:
+        req.firmware = {**req.firmware, **local_images(system)}
+        if not any(v == LOCAL_REF for v in req.firmware.values()):
+            errors.append(f"local: no image of {system.id} is a firmware this server has a working "
+                          f"tree of ({', '.join(local_sources()) or 'none'})")
     if errors:
         raise HTTPException(422, errors)
     # Each image's ref as the commit it is at now: the run builds and

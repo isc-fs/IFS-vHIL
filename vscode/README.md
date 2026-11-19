@@ -149,6 +149,10 @@ Set up / Retry**, to try again.
   built from source), firmware, the system editor and the debugger, each
   with its fix (start the VM, pull images, build firmware, change a
   setting, open the editor).
+- **The editor's Run** in a firmware repository runs your working tree too:
+  the top bar's `<id>@local` toggle (on) builds it, uncommitted edits
+  included, before each Run, Live or pytest run; off, the catalogue's or
+  the board's refs.
 - **vHIL: Open the system editor** opens it in a tab, started if needed
   (on localhost:8080 for your own vHIL checkout, `VHIL_WEB_PORT` if set; in
   a firmware repository the extension's checkout has a port of its own, so

@@ -33,6 +33,9 @@ services:
       VHIL_WORKSPACE: /work
       VHIL_DATA: ${VHIL_SERVER_DATA:-/vhil/server}
       VHIL_AUTH: ${VHIL_AUTH:-dev}
+      # A firmware working tree a run may build (scripts/vhil-docker.sh
+      # editor, from FW_LOCAL): "<id>=/src/local", else none.
+      VHIL_LOCAL_SOURCES: ${VHIL_LOCAL_SOURCES:-}
       # Read only with VHIL_AUTH=dev: the api is reached through the proxy,
       # whose port is on 127.0.0.1 only.
       VHIL_ALLOW_DEV_ON_NETWORK: "1"
@@ -64,11 +67,14 @@ services:
     volumes:
       - ..:/work
       - vhil-data:/vhil
+      # That working tree, read-only (unset: the checkout, never read).
+      - ${VHIL_LOCAL_DIR:-..}:/src/local:ro
     environment:
       VHIL_WORKSPACE: /work
       VHIL_DATA: ${VHIL_SERVER_DATA:-/vhil/server}
       VHIL_AUTH: dev
       VHIL_FW_DIR: /vhil/fw
+      VHIL_LOCAL_SOURCES: ${VHIL_LOCAL_SOURCES:-}
   editor:
     image: ${VHIL_IMAGE:-ifs-vhil}-editor:${VHIL_EDITOR_TAG:-latest}
     command: scripts/editor.sh

@@ -42,7 +42,7 @@ from vhil.server.githost import (BranchDetails, CachedRefs, GitHost, GitHubBranc
                                  active_branches, commit_of, repo_slug)
 from vhil.server.gitstore import (OWNER_TRAILER, TAKEOVER_TRAILER, BadBranch, Conflict, GitError,
                                   GitStore)
-from vhil.server.runs import DEFAULT_VIRTUAL_MS
+from vhil.server.runs import DEFAULT_VIRTUAL_MS, local_sources
 from vhil.server.workspace import SYSTEM_ID
 from vhil.system import (ID, REF, SCHEMA, System, SystemError, built_images, find_build,
                          format_schema_error, yaml_error,
@@ -341,6 +341,9 @@ def config(request: Request):
             "base_branch": _store(request).base,
             "auth": request.app.state.settings.auth,
             "can_open_pr": bool(host.token) if isinstance(host, GitHubHost) else True,
+            # Firmware a run can build from a developer's working tree
+            # (RunRequest.local; the VS Code extension's firmware repository).
+            "local_firmware": sorted(local_sources()),
             "run_virtual_ms": DEFAULT_VIRTUAL_MS}
 
 

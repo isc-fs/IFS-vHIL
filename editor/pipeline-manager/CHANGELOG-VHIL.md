@@ -750,6 +750,11 @@ from `git archive 04613679` except as listed below.
     extension offers to push the branch with the host's git and open its
     pull request, and lists unpushed ones in its view. The PR dialog says
     so instead of "by hand".
+36. **Run your working tree.** With a working tree on the server
+    (`/api/config` `local_firmware`: the VS Code extension's firmware
+    repository), the top bar has a `<id>@local` toggle, on by default:
+    Run, Live and a pytest run send `local: true`, and the worker builds
+    that firmware from the tree (uncommitted edits included) before each.
 
 ## Left for later
 

@@ -348,6 +348,16 @@ worktree_git
 # The compose stack mounts the checkout alone (docker/compose.yaml), so its
 # git dir isn't there: refuse up front rather than fail inside, where the
 # api's git says "the workspace has no commits".
+# The stack's working tree, for the editor's Run (vhil/server/runs.py
+# RunRequest.local): FW_LOCAL's first entry, mounted at /src/local in the
+# worker. Compose reads both; empty, a run builds no working tree.
+stack_local() {
+    local pair=${FW_LOCAL%% *}
+    [ -n "$pair" ] || return 0
+    [ "$pair" = "${FW_LOCAL:-}" ] || echo "note: the editor's runs build ${pair%%=*}'s working tree only (FW_LOCAL's first entry)" >&2
+    export VHIL_LOCAL_SOURCES="${pair%%=*}=/src/local" VHIL_LOCAL_DIR=${pair#*=}
+}
+
 # The web port, unless this checkout's own stack holds it: another stack on it
 # (another checkout's, or one from before per-checkout projects) is named.
 web_port_free() {
@@ -567,6 +577,7 @@ editor)
     # the worker executes: it comes up too, or a run here stays queued (#393).
     no_worktree "system editor"
     web_port_free
+    stack_local
     ensure_images
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy worker ;;
 export-run|import-run)
@@ -599,6 +610,7 @@ server)
     # proxy, whose port is on the host's 127.0.0.1 only (docker/compose.yaml).
     no_worktree "web app"
     web_port_free
+    stack_local
     ensure_images
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up api proxy ;;
 worker)
