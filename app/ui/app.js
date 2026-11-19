@@ -192,6 +192,36 @@ listen("done", (e) => {
   refresh();
 });
 
+// Team sharing: the GitHub account the team store shares as (`vhil login`,
+// GitHub's device flow). Signing in prints the code to enter on GitHub.
+let login = null;
+async function refreshAccount() {
+  login = await invoke("account").catch(() => null);
+  $("#account-status").textContent = login
+    ? `Signed in as ${login}: systems and tests you commit in the editor are shared with the team (its Team view).`
+    : "Sign in to share the systems and tests you make with the team. Teammates' work opens without it.";
+  $("#account-btn").textContent = login ? "Sign out" : "Sign in with GitHub";
+  $("#account-btn").disabled = Boolean(running);
+}
+$("#account-btn").onclick = () => runTask(login ? "logout" : "login");
+listen("log", (e) => {
+  const m = /^Open (\S+) and enter (\S+)$/.exec(e.payload.line);
+  if (!m) return;
+  const p = $("#account-code");
+  p.textContent = `Open ${m[1]} in your browser and enter ${m[2]}`;
+  p.hidden = false;
+  navigator.clipboard?.writeText(m[2]).catch(() => {});
+});
+listen("done", (e) => {
+  if (e.payload.task !== "login" && e.payload.task !== "logout") return;
+  $("#account-code").hidden = true;
+  refreshAccount();
+  // The running vHIL got its account when it started.
+  if (e.payload.code === 0 && e.payload.task === "login") {
+    $("#open-status").textContent = "Signed in: an open vHIL shares from its next start (Stop the App's Containers, then Open).";
+  }
+});
+
 $("#open").onclick = openApp;
 $("#ws-save").onclick = async () => {
   try {
@@ -236,6 +266,7 @@ async function checkUpdate() {
 // After an update the app's own copy moves to the new release first.
 async function start() {
   await refresh();
+  refreshAccount();
   if (info.managed && info.present && !info.synced && !running) runTask("workspace");
   checkUpdate();
 }

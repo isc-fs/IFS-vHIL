@@ -358,9 +358,22 @@ async fn doctor(app: AppHandle) -> Result<serde_json::Value, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The GitHub account the team store shares as (`bin/vhil whoami`), or None.
+#[tauri::command]
+async fn account(app: AppHandle) -> Option<String> {
+    let ws = workspace(&app).ok()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = vhil(&ws, &["whoami"]).stdin(Stdio::null()).output().ok()?;
+        let login = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !login.is_empty()).then_some(login)
+    })
+    .await
+    .ok()?
+}
+
 /// The long tasks: `tools` (macOS: Homebrew installs colima and docker),
-/// `workspace` (clone, or move the app's clone to its ref), `vm` (macOS) and
-/// `setup`.
+/// `workspace` (clone, or move the app's clone to its ref), `vm` (macOS),
+/// `setup`, and `login` / `logout` (the team store's GitHub account).
 #[tauri::command]
 fn run(app: AppHandle, task: String) -> Result<(), String> {
     let cmd = match task.as_str() {
@@ -394,6 +407,8 @@ fn run(app: AppHandle, task: String) -> Result<(), String> {
         }
         "vm" => vhil(&workspace(&app)?, &["vm"]),
         "setup" => vhil(&workspace(&app)?, &["setup"]),
+        "login" => vhil(&workspace(&app)?, &["login"]),
+        "logout" => vhil(&workspace(&app)?, &["logout"]),
         _ => return Err(format!("unknown task {task}")),
     };
     if task == "workspace" {
@@ -664,6 +679,7 @@ fn main() {
             info,
             set_workspace,
             doctor,
+            account,
             run,
             open_app,
             check_update,
