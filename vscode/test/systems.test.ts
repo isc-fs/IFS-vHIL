@@ -55,3 +55,11 @@ test("each vHIL checkout's web app has its port: 8080 for yours, its own for the
   assert.equal(webPort("/storage/a/vhil", true, "9000"), 9000); // VHIL_WEB_PORT wins
   assert.equal(webPort("/home/me/IFS-vHIL", false, "nope"), 8080);
 });
+
+test("the vhil command's directory, as the desktop app picks it; Windows needs WSL", async () => {
+  const { cliDirs, needsWsl } = await import("../src/systems");
+  assert.deepEqual(cliDirs("darwin", "/Users/me"), ["/opt/homebrew/bin", "/usr/local/bin"]);
+  assert.deepEqual(cliDirs("linux", "/home/me"), ["/home/me/.local/bin"]);
+  assert.equal(needsWsl("win32"), true);
+  assert.equal(needsWsl("linux"), false); // a Remote-WSL window
+});

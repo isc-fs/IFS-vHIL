@@ -1,8 +1,8 @@
 {
   "name": "vhil-tests",
   "displayName": "ISC vHIL",
-  "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel against your working tree, in the vHIL's Docker image.",
-  "version": "0.6.0",
+  "description": "The vHIL in VS Code: run its tests against your working tree, edit systems in its editor, share them with the team, and keep the stack and your clone up to date, in the vHIL's Docker images.",
+  "version": "0.7.0",
   "publisher": "isc-fs",
   "private": true,
   "repository": {
@@ -114,6 +114,11 @@
       {
         "command": "vhil.setUpStack",
         "title": "Set up the vHIL (VM, images, firmware)",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.installCli",
+        "title": "Install the vhil command (terminal)",
         "category": "vHIL"
       },
       {
@@ -295,6 +300,10 @@
         },
         {
           "command": "vhil.setUpStack",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.installCli",
           "when": "vhil.active"
         },
         {

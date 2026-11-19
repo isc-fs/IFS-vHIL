@@ -15,6 +15,7 @@ import * as cp from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as net from "net";
+import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -31,7 +32,9 @@ import {
 } from "./status";
 import { cloneAdvice, CloneStatus, parseClone } from "./clone";
 import { judge, parseStack, StackInfo, stackId } from "./stack";
-import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems, webPort } from "./systems";
+import {
+  boardsOf, cliDirs, descriptionOf, ifsHilArgs, needsWsl, SystemInfo, ToolId, TOOLS, validationProblems, webPort,
+} from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
 import { TRACE_VIEW, TracePanel } from "./tracePanel";
 import {
@@ -129,6 +132,13 @@ async function setup(context: vscode.ExtensionContext, retry: boolean) {
     return;
   }
   const folders = vscode.workspace.workspaceFolders ?? [];
+  if (needsWsl(process.platform)) {
+    // Native Windows: the scripts and Docker are WSL's. Say so for a folder
+    // the vHIL would serve, instead of failing on the first bash call.
+    const ours = folders.find((f) => fs.existsSync(path.join(f.uri.fsPath, SCRIPT)) || hasIoc(f.uri.fsPath));
+    if (ours) wslNeeded(context, ours.name, retry);
+    return;
+  }
   const own = folders.find((f) => fs.existsSync(path.join(f.uri.fsPath, SCRIPT)));
   if (own) {
     start(context, new Vhil(own.uri.fsPath, own, context));
@@ -156,6 +166,35 @@ async function setup(context: vscode.ExtensionContext, retry: boolean) {
   notSetUp.tooltip = `${why}\nClick to retry (vHIL: Set up / Retry).`;
   notSetUp.show();
   if (retry) void vscode.window.showErrorMessage(`vHIL: not set up: ${why}`);
+}
+
+/**
+ * On Windows the vHIL runs in WSL: the folder, cloned in WSL's filesystem,
+ * opened through VS Code's WSL extension (README, "Windows").
+ */
+function wslNeeded(context: vscode.ExtensionContext, folder: string, retry: boolean) {
+  const why = `${folder}: on Windows the vHIL runs in WSL. Clone it in WSL (e.g. ~/src) and open it there ` +
+    "with VS Code's WSL extension (WSL: Reopen Folder in WSL, or `code .` in a WSL terminal).";
+  if (!notSetUp) {
+    notSetUp = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+    notSetUp.text = "$(remote) vHIL: open in WSL";
+    notSetUp.command = "vhil.setup";
+    context.subscriptions.push(notSetUp);
+  }
+  notSetUp.tooltip = why;
+  notSetUp.show();
+  const key = "vhil.wslAdvised";
+  if (!retry && context.workspaceState.get<boolean>(key)) return;
+  void context.workspaceState.update(key, true);
+  void vscode.window.showWarningMessage(`vHIL: ${why}`, "Reopen in WSL", "Get the WSL extension").then((a) => {
+    if (a === "Reopen in WSL") {
+      void Promise.resolve(vscode.commands.executeCommand("remote-wsl.reopenInWSL")).catch(() =>
+        vscode.commands.executeCommand("workbench.extensions.search", "ms-vscode-remote.remote-wsl"));
+    }
+    if (a === "Get the WSL extension") {
+      void vscode.commands.executeCommand("workbench.extensions.search", "ms-vscode-remote.remote-wsl");
+    }
+  });
 }
 
 function hasIoc(dir: string): boolean {
@@ -462,6 +501,7 @@ class Vhil implements vscode.Disposable {
       command("vhil.updateClone", () => this.moveClone("update")),
       command("vhil.switchToDev", () => this.moveClone("switch")),
       command("vhil.setUpStack", () => this.setUpStack()),
+      command("vhil.installCli", () => this.installCli()),
     );
     if (local) {
       this.log.appendLine(`${local.dir}: ${local.firmware.id} (${local.firmware.repo}), ` +
@@ -1752,6 +1792,35 @@ class Vhil implements vscode.Disposable {
       this.editorReady = false;
       void this.waitForEditor();
     }
+  }
+
+  /**
+   * Link bin/vhil onto PATH (the desktop app's Install the vhil command): the
+   * first writable of cliDirs, replacing an older link there.
+   */
+  private async installCli() {
+    const target = path.join(this.repo, "bin", "vhil");
+    if (!fs.existsSync(target)) {
+      void vscode.window.showErrorMessage("vHIL: this checkout has no bin/vhil: update it first.");
+      return;
+    }
+    for (const dir of cliDirs(process.platform, os.homedir())) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.accessSync(dir, fs.constants.W_OK);
+        const link = path.join(dir, "vhil");
+        fs.rmSync(link, { force: true });
+        fs.symlinkSync(target, link);
+      } catch {
+        continue;
+      }
+      const onPath = (process.env.PATH ?? "").split(path.delimiter).includes(dir);
+      void vscode.window.showInformationMessage(`vHIL: \`vhil\` is in ${dir}` +
+        (onPath ? ": open a new terminal." : `, which is not on your PATH: add it (e.g. in ~/.profile).`));
+      return;
+    }
+    void vscode.window.showErrorMessage(`vHIL: no writable bin directory (${cliDirs(process.platform, os.homedir()).join(", ")}): ` +
+      `add ${path.dirname(target)} to your PATH.`);
   }
 
   /** bin/vhil setup: the VM (macOS), the images and the firmware, then doctor (the app's Run set-up). */
