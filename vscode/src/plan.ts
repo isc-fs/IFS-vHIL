@@ -4,6 +4,8 @@
 // Every command goes through scripts/vhil-docker.sh, as CI's jobs do, and
 // pytest writes its results with vhil/pytest_vscode.py (JSON lines).
 
+import { Snapshot } from "./trace";
+
 /** The test folders the extension lists, and the vhil-docker.sh job each runs under. */
 export const SUITES = [
   { root: "tests/unit", job: "unit" },
@@ -87,11 +89,13 @@ export interface Result {
   short?: string;
   file?: string | null;
   line?: number; // 1-based
+  trace?: string; // its bus trace (.trace.jsonl), repo-relative: docs/test-trace.md
 }
 
 export type Record =
   | Item
   | Result
+  | Snapshot
   | { kind: "start"; id: string }
   | { kind: "error"; id: string; message: string }
   | { kind: "done"; exitstatus: number };

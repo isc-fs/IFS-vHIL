@@ -1,7 +1,8 @@
 // The vHIL in VS Code: every test of tests/unit, tests/sim and
-// tests/scenarios in the Testing panel, and a vHIL sidebar (Status, Systems,
-// Runs, Tools), all run in the vHIL's Docker image through
-// scripts/vhil-docker.sh, as CI runs them (vscode/README.md).
+// tests/scenarios in the Testing panel, one status bar item (state, and a
+// click runs the tests again), and the system editor in a tab; all run in
+// the vHIL's Docker image through scripts/vhil-docker.sh, as CI runs them
+// (vscode/README.md). VS Code's own Test Results keep the run history.
 //
 // Two ways in: the IFS-vHIL checkout open as a folder, or a firmware
 // repository the catalogue builds (IFS08-CE-ECU, ...). In a firmware
@@ -21,11 +22,10 @@ import {
 import {
   buildSystem, Firmware, firmwareForRepo, firmwareOf, repoSlug, systemsOf, testRuns,
 } from "./firmware";
-import {
-  boardsOf, descriptionOf, ifsHilArgs, keepRuns, RunRecord, runDescription, runOk, SystemInfo,
-  systemTests, ToolId, TOOLS,
-} from "./sidebar";
-import { node, Node, Tree } from "./views";
+import { barOf, findings, Fix, GROUP, groupId, Phase, scenarioSystem } from "./status";
+import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS } from "./systems";
+import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
+import { TRACE_VIEW, TracePanel } from "./tracePanel";
 
 const SCRIPT = "scripts/vhil-docker.sh";
 // Where the plugin's JSON lines go: results/ is git-ignored and inside /work.
@@ -33,9 +33,6 @@ const OUT_DIR = "results/vscode";
 // Firmware the sim and scenario jobs need (scripts/vhil-docker.sh need_elf).
 const NEEDED_FW = ["ecu", "ams", "ecu.bootloader"];
 const EDITOR_URL = "http://localhost:8080/editor/";
-const RUNS_KEY = "vhil.runs";
-// A test run's output kept for Show output, per run.
-const MAX_OUTPUT = 4 * 1024 * 1024;
 
 export async function activate(context: vscode.ExtensionContext) {
   const folders = vscode.workspace.workspaceFolders ?? [];
@@ -54,8 +51,10 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 function start(context: vscode.ExtensionContext, vhil: Vhil) {
-  // The sidebar's views show only where the extension found something to test.
+  // What the palette offers: the maintainer tools in the vHIL repository,
+  // updating the checkout in a firmware one.
   void vscode.commands.executeCommand("setContext", "vhil.active", true);
+  void vscode.commands.executeCommand("setContext", "vhil.firmwareRepo", !!vhil.isFirmwareRepo);
   context.subscriptions.push(vhil);
   void vhil.refresh();
   void vhil.checkStatus();
@@ -125,15 +124,15 @@ async function updateCheckout(context: vscode.ExtensionContext, checkout: string
     });
 }
 
+
 export function deactivate() {}
 
-/** What a test run counted, for the Runs view. */
+/** What a test run counted, for the status bar. */
 interface Tally {
   passed: number;
   failed: Set<string>;
   skipped: number;
-  output: string[];
-  size: number;
+  total: number;
 }
 
 class Vhil implements vscode.Disposable {
@@ -147,13 +146,10 @@ class Vhil implements vscode.Disposable {
   private refreshing: Promise<void> | undefined;
   private refreshTimer: NodeJS.Timeout | undefined;
 
-  // The sidebar's state.
-  private readonly statusTree = new Tree(() => this.statusNodes());
-  private readonly systemsTree = new Tree(() => this.systemNodes());
-  private readonly runsTree = new Tree(() => this.runNodes());
-  private readonly toolsTree = new Tree(() => this.toolNodes());
-  private vmUp: boolean | undefined;
-  private branch = "";
+  private phase: Phase = { kind: "checking" };
+  private busy = false; // a run owns the status bar
+  private lastRequest: vscode.TestRunRequest | undefined;
+  private dockerUp: boolean | undefined;
   private dirty = false;
   private built = new Map<string, string>();
   private editorUp = false;
@@ -163,15 +159,16 @@ class Vhil implements vscode.Disposable {
   private editorPage = EDITOR_URL;
   private editorReady = false;
   private checking: Promise<void> | undefined;
-  private checked = 0;
   private systems: SystemInfo[] = [];
-  private runs: RunRecord[];
-  private readonly outputs = new Map<string, string>();
+  // A test's bus trace (.trace.jsonl, absolute) and its failure snapshots.
+  private readonly traces = new Map<string, string>();
+  private readonly snapshots = new Map<string, Snapshot[]>();
+  private readonly tracePanel: TracePanel;
+  private readonly problems = vscode.languages.createDiagnosticCollection("vHIL firmware build");
 
   constructor(repo: string, private readonly folder: vscode.WorkspaceFolder,
               private readonly context: vscode.ExtensionContext, private readonly local?: Local) {
     this.repo = repo;
-    this.runs = context.workspaceState.get<RunRecord[]>(RUNS_KEY, []);
     this.controller = vscode.tests.createTestController("vhil", "vHIL");
     this.controller.refreshHandler = () => this.refresh();
     this.controller.createRunProfile("Run", vscode.TestRunProfileKind.Run,
@@ -179,18 +176,11 @@ class Vhil implements vscode.Disposable {
 
     this.log = vscode.window.createOutputChannel("vHIL");
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
-    this.status.command = "vhil.menu";
-    this.status.text = "$(beaker) vHIL";
+    this.status.command = "vhil.statusClick";
+    this.setPhase(this.phase);
     this.status.show();
-
-    const statusView = vscode.window.createTreeView("vhil.status", { treeDataProvider: this.statusTree });
-    const views = [
-      statusView,
-      vscode.window.createTreeView("vhil.systems", { treeDataProvider: this.systemsTree }),
-      vscode.window.createTreeView("vhil.runs", { treeDataProvider: this.runsTree }),
-      vscode.window.createTreeView("vhil.tools", { treeDataProvider: this.toolsTree }),
-    ];
     this.readSystems();
+    this.tracePanel = new TracePanel(context.extensionUri);
 
     // The extension's own checkout changes only when it updates it.
     const watch = (glob: string) => vscode.workspace.createFileSystemWatcher(
@@ -201,57 +191,41 @@ class Vhil implements vscode.Disposable {
     const reread = () => this.readSystems();
     const command = (id: string, f: (...a: any[]) => unknown) => vscode.commands.registerCommand(id, f);
     this.disposables.push(
-      this.controller, this.status, this.log, tests, systems, ...views,
-      this.statusTree, this.systemsTree, this.runsTree, this.toolsTree,
+      this.controller, this.status, this.log, tests, systems, this.problems,
+      vscode.window.registerWebviewViewProvider(TRACE_VIEW, this.tracePanel,
+        { webviewOptions: { retainContextWhenHidden: true } }),
       tests.onDidChange(later), tests.onDidCreate(later), tests.onDidDelete(later),
       systems.onDidChange(reread), systems.onDidCreate(reread), systems.onDidDelete(reread),
-      statusView.onDidChangeVisibility((e) => {
-        if (e.visible && Date.now() - this.checked > 15000) void this.checkStatus();
-      }),
       vscode.tasks.onDidEndTaskProcess((e) => {
         if (e.execution === this.editorTask) this.editorTask = undefined;
         if (e.execution.task.source === "vHIL") void this.checkStatus();
       }),
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("vhil")) this.statusTree.refresh();
+        if (e.affectsConfiguration("vhil")) void this.checkStatus();
       }),
 
+      command("vhil.statusClick", () => this.statusClick()),
+      command("vhil.diagnose", () => this.diagnose()),
       command("vhil.refreshTests", () => this.refresh()),
-      command("vhil.checkStatus", () => this.checkStatus()),
-      command("vhil.menu", () => this.menu()),
       command("vhil.startVm", () => this.task("Start the Docker VM", ["vm"])),
       command("vhil.pullImages", () => this.task("Pull images", ["pull"])),
       command("vhil.buildImages", () => this.task("Build images", ["image"])),
       command("vhil.buildFirmware", () => this.buildFirmware()),
-      command("vhil.rebuildBoard", (n: Node) => this.task(`Build firmware: ${n.data}`, ["fw", String(n.data)])),
       command("vhil.openEditor", () => this.openEditor()),
-      command("vhil.openSystemInEditor", (n: Node) => this.openEditor(this.systemOf(n).id)),
+      // From a scenario system's group in the Testing panel, or the palette.
+      command("vhil.openSystemInEditor", async (item?: vscode.TestItem) => {
+        const id = item?.id.startsWith(GROUP) ? item.id.split("/").pop() : await this.pickSystem("Open in the system editor");
+        if (id) await this.openEditor(id);
+      }),
       command("vhil.stopEditor", () => this.editorTask?.terminate()),
-      command("vhil.openSettings", (key?: string) =>
-        vscode.commands.executeCommand("workbench.action.openSettings", typeof key === "string" ? key : "vhil.")),
-
-      command("vhil.openSystemFile", (n: Node) =>
-        vscode.window.showTextDocument(vscode.Uri.file(path.join(this.repo, `systems/${this.systemOf(n).id}.yaml`)))),
-      command("vhil.validateSystem", (n: Node) => {
-        const s = this.systemOf(n);
-        return this.task(`Validate ${s.id}`, ["run", "python", "-m", "vhil.system", "validate", `systems/${s.id}.yaml`]);
+      command("vhil.tools", () => this.tools()),
+      // From the Testing panel (a test item), or a failure's link (its id).
+      command("vhil.showTrace", (item?: vscode.TestItem | string) => {
+        const id = typeof item === "string" ? item : item?.id;
+        const file = id ? this.traces.get(id) : undefined;
+        if (id && file) return this.tracePanel.show(file, labelOf(id), true);
+        void vscode.window.showInformationMessage("vHIL: no bus trace for that test: run it first.");
       }),
-      command("vhil.runSystemSim", (n: Node) => this.runSystem(this.systemOf(n), "sim")),
-      command("vhil.runSystemScenarios", (n: Node) => this.runSystem(this.systemOf(n), "scenarios")),
-      command("vhil.runSystemSmoke", (n: Node) => {
-        const s = this.systemOf(n);
-        return this.task(`Smoke: ${s.id}`, ["smoke", s.id]);
-      }),
-
-      command("vhil.runAgain", (n: Node) => this.runAgain(n.data as RunRecord, false)),
-      command("vhil.rerunFailed", (n: Node) => this.runAgain(n.data as RunRecord, true)),
-      command("vhil.showRunOutput", (n: Node) => this.showOutput(n.data as RunRecord)),
-      command("vhil.clearRuns", () => this.setRuns([])),
-      command("vhil.revealTest", (id: string) => {
-        const item = this.byId.get(id);
-        if (item) return vscode.commands.executeCommand("vscode.revealTestInExplorer", item);
-      }),
-      command("vhil.tool", (id: ToolId) => this.tool(id)),
       command("vhil.updateVhil", () => this.updateVhil()),
     );
     if (local) {
@@ -261,6 +235,10 @@ class Vhil implements vscode.Disposable {
       const updated = context.globalState.get<number>(UPDATED_KEY, 0);
       if (Date.now() - updated > 24 * 3600 * 1000) void this.updateVhil();
     }
+  }
+
+  get isFirmwareRepo(): boolean {
+    return !!this.local;
   }
 
   dispose() {
@@ -295,6 +273,11 @@ class Vhil implements vscode.Disposable {
     return { ...process.env, ...this.overrides(), ...extra };
   }
 
+  /** Where the container's files are on the host. */
+  private pathMap(): PathMap {
+    return { repo: this.repo, firmware: this.local?.firmware.id, dir: this.local?.dir };
+  }
+
   /** Run vhil-docker.sh with `args`; `onData` gets its output as it comes. */
   private script(args: string[], env: NodeJS.ProcessEnv,
                  onData?: (text: string) => void): { done: Promise<number>; proc: cp.ChildProcess } {
@@ -311,16 +294,13 @@ class Vhil implements vscode.Disposable {
 
   /**
    * A vhil-docker.sh command as a VS Code task: in the terminal panel, where
-   * it can be watched and stopped. Resolves with its exit code; a finished
-   * command goes in the Runs view unless `record` is false.
+   * it can be watched and stopped. Resolves with its exit code.
    */
-  private async task(label: string, args: string[], extraEnv: { [key: string]: string } = {},
-                     record = true): Promise<number | undefined> {
+  private async task(label: string, args: string[], extraEnv: { [key: string]: string } = {}): Promise<number | undefined> {
     const env = { ...this.overrides(), ...extraEnv };
     const t = new vscode.Task({ type: "vhil", args }, this.folder, label, "vHIL",
       new vscode.ShellExecution(`./${SCRIPT}`, args, { cwd: this.repo, env }));
     t.presentationOptions = { reveal: vscode.TaskRevealKind.Always, panel: vscode.TaskPanelKind.Dedicated, clear: true };
-    const started = Date.now();
     let execution: vscode.TaskExecution | undefined;
     const ended = new Promise<number | undefined>((resolve) => {
       const sub = vscode.tasks.onDidEndTaskProcess((e) => {
@@ -330,16 +310,8 @@ class Vhil implements vscode.Disposable {
       });
     });
     execution = await vscode.tasks.executeTask(t);
-    if (args[0] === "editor") {
-      this.editorTask = execution;
-      setTimeout(() => void this.checkStatus(), 15000);
-    }
-    const exit = await ended;
-    if (record) {
-      this.addRun({ id: crypto.randomUUID(), label, kind: "task", started, ms: Date.now() - started,
-                    args, env: extraEnv, exit });
-    }
-    return exit;
+    if (args[0] === "editor") this.editorTask = execution;
+    return ended;
   }
 
   private outFile(name: string): { rel: string; abs: string } {
@@ -349,6 +321,118 @@ class Vhil implements vscode.Disposable {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.rmSync(abs, { force: true });
     return { rel, abs };
+  }
+
+  // -- the status bar ---------------------------------------------------------
+
+  private setPhase(p: Phase) {
+    this.phase = p;
+    const bar = barOf(p);
+    this.status.text = bar.text;
+    this.status.tooltip = bar.tooltip;
+    this.status.backgroundColor = bar.warn ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
+  }
+
+  /** The bar's phase when no run owns it: from the last check. */
+  private idlePhase(): Phase {
+    if (this.dockerUp === undefined) return { kind: "checking" };
+    if (!this.dockerUp) return { kind: "down", context: this.config().context };
+    return { kind: "idle", firmware: this.local?.firmware.id, dirty: this.dirty, missing: this.missingFirmware() };
+  }
+
+  private async statusClick() {
+    const action = barOf(this.phase).action;
+    if (action === "diagnose") return this.diagnose();
+    if (action !== "run") return;
+    // The last run again, else every listed test.
+    const request = this.lastRequest ?? new vscode.TestRunRequest();
+    const cts = new vscode.CancellationTokenSource();
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "vHIL: running the tests", cancellable: true },
+      (_, token) => {
+        token.onCancellationRequested(() => cts.cancel());
+        return this.run(request, cts.token);
+      });
+  }
+
+  async checkStatus(): Promise<void> {
+    this.checking ??= this.check().finally(() => { this.checking = undefined; });
+    return this.checking;
+  }
+
+  private async check() {
+    const { context } = this.config();
+    const [up, editor] = await Promise.all([
+      new Promise<boolean>((resolve) =>
+        cp.execFile("docker", ["--context", context, "info", "--format", "{{.ServerVersion}}"],
+          { timeout: 15000 }, (err) => resolve(!err))),
+      editorAnswers(),
+    ]);
+    this.dockerUp = up;
+    this.editorUp = editor;
+    if (this.local) {
+      const status = await git(this.local.dir, ["status", "--porcelain"]);
+      this.dirty = status.ok && !!status.out.trim();
+    }
+    if (up) {
+      let text = "";
+      const code = await this.script(["run", "sh", "-c", "cat /vhil/fw/built.txt 2>/dev/null || true"],
+        this.env(), (t) => { text += t; }).done;
+      this.built = builtFirmware(code === 0 ? text : "");
+    }
+    if (!this.busy) this.setPhase(this.idlePhase());
+  }
+
+  private missingFirmware(): string[] {
+    return NEEDED_FW.filter((b) => !this.built.get(b));
+  }
+
+  /** Each check with its fix: what replaces a status view. */
+  private async diagnose() {
+    await this.checkStatus();
+    const { context } = this.config();
+    const list = findings({
+      context, startsVm: startsVm(context), dockerUp: !!this.dockerUp, built: this.built,
+      needed: NEEDED_FW, editorUp: this.editorUp,
+    });
+    const fixes: { [f in Fix]: string } = {
+      startVm: "Start the Docker VM", pullImages: "Pull the images", buildFirmware: "Build firmware",
+      openSettings: "Change the Docker context", openEditor: "Open the system editor",
+    };
+    const pick = await vscode.window.showQuickPick(list.map((f) => ({
+      label: `$(${f.ok ? "pass" : "warning"}) ${f.label}`,
+      description: f.detail,
+      detail: f.fix ? `Fix: ${fixes[f.fix]}` : undefined,
+      fix: f.fix,
+    })), { title: "vHIL: diagnose", placeHolder: "Pick one to fix it" });
+    switch (pick?.fix) {
+      case "startVm": return this.task("Start the Docker VM", ["vm"]);
+      case "pullImages": return this.task("Pull images", ["pull"]);
+      case "buildFirmware": return this.buildFirmware();
+      case "openSettings": return vscode.commands.executeCommand("workbench.action.openSettings", "vhil.dockerContext");
+      case "openEditor": return this.openEditor();
+    }
+  }
+
+  /**
+   * Docker up before a run: the Colima VM is started here (vhil-docker.sh
+   * pulls the images and builds missing firmware itself); any other context
+   * is the user's to start. Listing tests on open (`start` false) only
+   * checks: the status bar then says Docker is down.
+   */
+  private async ensureDocker(start = true): Promise<boolean> {
+    await this.checkStatus();
+    if (this.dockerUp) return true;
+    if (!start) return false;
+    const { context } = this.config();
+    if (startsVm(context)) {
+      await this.task("Start the Docker VM", ["vm"]);
+      await this.checkStatus();
+      if (this.dockerUp) return true;
+    }
+    void vscode.window.showErrorMessage(`vHIL: Docker (context ${context}) doesn't answer.`, "Diagnose")
+      .then((a) => { if (a) void this.diagnose(); });
+    return false;
   }
 
   // -- the test tree ----------------------------------------------------------
@@ -364,6 +448,7 @@ class Vhil implements vscode.Disposable {
   }
 
   private async collect() {
+    if (!(await this.ensureDocker(false))) return;
     const out = this.outFile("collect");
     const roots = SUITES.map((s) => s.root).filter((r) => !this.local || r !== "tests/unit");
     const job = this.script(collectArgs(out.rel, roots), this.env(), (t) => this.log.append(t));
@@ -376,19 +461,11 @@ class Vhil implements vscode.Disposable {
       .filter((r) => !this.local || testRuns(r, this.local.firmware.id, systems));
     if (!items.length) {
       this.log.show(true);
-      const { context } = this.config();
-      if (startsVm(context)) {
-        void vscode.window.showErrorMessage(
-          `vHIL: listing the tests failed (exit ${code}). Is the Docker VM up? See the vHIL output.`,
-          "Start VM").then((a) => { if (a) void this.task("Start the Docker VM", ["vm"]); });
-      } else {
-        void vscode.window.showErrorMessage(
-          `vHIL: listing the tests failed (exit ${code}). Is Docker (context ${context}) running? See the vHIL output.`);
-      }
+      void vscode.window.showErrorMessage(`vHIL: listing the tests failed (exit ${code}). See the vHIL output.`,
+        "Diagnose").then((a) => { if (a) void this.diagnose(); });
       return;
     }
     this.build(items, records);
-    this.systemsTree.refresh();
   }
 
   private tag(marker: string): vscode.TestTag {
@@ -397,6 +474,10 @@ class Vhil implements vscode.Disposable {
     return t;
   }
 
+  /**
+   * The tree: the suites, their files and tests; the scenarios grouped by
+   * system (a group's id is not pytest's: a run expands it to its tests).
+   */
   private build(items: Item[], records: Record[]) {
     this.byId.clear();
     const roots: vscode.TestItem[] = [];
@@ -407,20 +488,24 @@ class Vhil implements vscode.Disposable {
       this.byId.set(suite.root, root);
       roots.push(root);
     }
-    const files = new Map<string, vscode.TestItem>();
+    const parents = new Map<string, vscode.TestItem>();
     for (const item of items) {
       const root = this.byId.get(SUITES.find((s) => item.id.startsWith(s.root + "/"))?.root ?? "");
       if (!root) continue;
-      const file = fileOf(item.id);
       const uri = vscode.Uri.file(path.join(this.repo, item.file));
-      let parent = files.get(file);
+      const system = scenarioSystem(item.id);
+      const key = system ? groupId(system) : fileOf(item.id);
+      let parent = parents.get(key);
       if (!parent) {
-        parent = this.controller.createTestItem(file, path.relative(root.id, file), uri);
-        files.set(file, parent);
-        this.byId.set(file, parent);
+        parent = system
+          ? this.controller.createTestItem(key, system, vscode.Uri.file(path.join(this.repo, "systems", `${system}.yaml`)))
+          : this.controller.createTestItem(key, path.relative(root.id, key), uri);
+        parents.set(key, parent);
+        this.byId.set(key, parent);
         root.children.add(parent);
       }
-      const test = this.controller.createTestItem(item.id, labelOf(item.id), uri);
+      const label = system ? labelOf(item.id).replace(/^test_scenario\[[^/]+\/(.*)\]$/, "$1") : labelOf(item.id);
+      const test = this.controller.createTestItem(item.id, label, uri);
       test.range = new vscode.Range(item.line - 1, 0, item.line - 1, 0);
       test.tags = item.markers.map((m) => this.tag(m));
       parent.children.add(test);
@@ -436,13 +521,6 @@ class Vhil implements vscode.Disposable {
     this.controller.items.replace(roots);
   }
 
-  /** Every listed test with its markers. */
-  private listed(): { id: string; markers: string[] }[] {
-    return [...this.byId.values()]
-      .filter((t) => t.children.size === 0 && t.id.includes("::"))
-      .map((t) => ({ id: t.id, markers: t.tags.map((g) => g.id) }));
-  }
-
   // -- runs -------------------------------------------------------------------
 
   private leaves(item: vscode.TestItem, into: vscode.TestItem[] = []): vscode.TestItem[] {
@@ -451,41 +529,54 @@ class Vhil implements vscode.Disposable {
     return into;
   }
 
-  private async run(request: vscode.TestRunRequest, token: vscode.CancellationToken, label?: string) {
-    if (!this.byId.size) await this.refresh();
+  private async run(request: vscode.TestRunRequest, token: vscode.CancellationToken) {
+    if (!this.byId.size) {
+      if (!(await this.ensureDocker())) return;
+      await this.refresh();
+    }
+    this.lastRequest = request;
     const included = request.include ?? [...this.controller.items].map(([, i]) => i);
     const excluded = request.exclude ?? [];
     const excludedIds = new Set(excluded.flatMap((e) => this.leaves(e)).map((e) => e.id));
-    const run = this.controller.createTestRun(request, label);
+    const run = this.controller.createTestRun(request);
     const all = included.flatMap((i) => this.leaves(i)).filter((t) => !excludedIds.has(t.id));
     for (const t of all) run.enqueued(t);
 
-    const started = Date.now();
-    const tally: Tally = { passed: 0, failed: new Set(), skipped: 0, output: [], size: 0 };
-    const groups = plan(included.map((i) => i.id));
+    const tally: Tally = { passed: 0, failed: new Set(), skipped: 0, total: all.length };
+    // A scenario group isn't a pytest id: its tests are.
+    const ids = included.flatMap((i) => i.id.startsWith(GROUP) ? this.leaves(i).map((l) => l.id) : [i.id]);
+    const groups = plan(ids);
     const c = this.config();
+    this.busy = true;
     try {
-      if (this.local && [...groups.keys()].some((j) => j !== "unit") &&
-          !(await this.buildLocal(run, tally, all, token))) return;
-      for (const [job, ids] of groups) {
+      if (!(await this.ensureDocker())) {
+        for (const t of all) run.skipped(t);
+        return;
+      }
+      if (this.local && [...groups.keys()].some((j) => j !== "unit")) {
+        this.setPhase({ kind: "building", firmware: `${this.local.firmware.id}@local` });
+        if (!(await this.buildLocal(run, tally, all, token))) return;
+      }
+      this.progress(tally);
+      for (const [job, jobIds] of groups) {
         if (token.isCancellationRequested) break;
-        const mine = all.filter((t) => ids.some((id) => t.id === id || t.id.startsWith(id + "/") || t.id.startsWith(id + "::")));
-        const deselect = [...excludedIds].filter((id) => ids.some((g) => id.startsWith(g + "/") || id.startsWith(g + "::")));
-        await this.runJob(run, tally, job, ids, deselect, mine, c.pytestArgs, c.context, token);
+        const mine = all.filter((t) => jobIds.some((id) => t.id === id || t.id.startsWith(id + "/") || t.id.startsWith(id + "::")));
+        const deselect = [...excludedIds].filter((id) => jobIds.some((g) => id.startsWith(g + "/") || id.startsWith(g + "::")));
+        await this.runJob(run, tally, job, jobIds, deselect, mine, c.pytestArgs, c.context, token);
       }
     } finally {
       run.end();
-      const id = crypto.randomUUID();
-      this.outputs.set(id, tally.output.join(""));
-      this.addRun({
-        id, kind: "tests", started, ms: Date.now() - started,
-        label: label ?? (request.include?.length === 1 ? request.include[0].id
-                         : request.include ? `${all.length} tests` : "All tests"),
-        passed: tally.passed, failed: [...tally.failed], skipped: tally.skipped,
-        cancelled: token.isCancellationRequested || undefined,
-        include: included.map((i) => i.id),
-      });
+      this.busy = false;
+      // The first failure's buses, in the panel, without taking focus.
+      const failed = all.find((t) => tally.failed.has(t.id) && this.traces.has(t.id));
+      if (failed) void this.tracePanel.show(this.traces.get(failed.id)!, labelOf(failed.id), false);
+      this.setPhase({ kind: "result", passed: tally.passed, failed: tally.failed.size, skipped: tally.skipped,
+                      cancelled: token.isCancellationRequested || undefined });
     }
+  }
+
+  private progress(tally: Tally) {
+    this.setPhase({ kind: "running", done: tally.passed + tally.failed.size + tally.skipped, total: tally.total });
   }
 
   private async runJob(run: vscode.TestRun, tally: Tally, job: Job, ids: string[], deselect: string[],
@@ -494,13 +585,7 @@ class Vhil implements vscode.Disposable {
     const name = `vhil-vscode-${crypto.randomBytes(4).toString("hex")}`;
     const out = this.outFile(name);
     const args = runArgs(job, ids, deselect, out.rel, extra);
-    const write = (t: string) => {
-      run.appendOutput(t.replace(/\r?\n/g, "\r\n"));
-      if (tally.size < MAX_OUTPUT) {
-        tally.output.push(t);
-        tally.size += t.length;
-      }
-    };
+    const write = (t: string) => run.appendOutput(t.replace(/\r?\n/g, "\r\n"));
     write(`$ ${SCRIPT} ${args.map(shellQuote).join(" ")}\n`);
     let text = "";
     const proc = this.script(args, this.env({ VHIL_DOCKER_NAME: name }), (t) => {
@@ -565,14 +650,12 @@ class Vhil implements vscode.Disposable {
     if (!system) return true;
     // First run: what the sim and scenario jobs need besides this firmware,
     // from its refs, in the same build.
-    await this.checkStatus();
     const missing = this.missingFirmware().length > 0;
     const args = missing ? ["fw", ...new Set(["ecu", "ams", system])] : ["fw", system];
     let text = "";
     const write = (t: string) => {
       text += t;
       run.appendOutput(t.replace(/\r?\n/g, "\r\n"));
-      if (tally.size < MAX_OUTPUT) { tally.output.push(t); tally.size += t.length; }
     };
     const only = missing ? "0" : "1";
     write(`$ FW_LOCAL=${fw}=${this.local!.dir} FW_LOCAL_ONLY=${only} ${SCRIPT} ${args.join(" ")}\n`);
@@ -584,12 +667,34 @@ class Vhil implements vscode.Disposable {
     const code = await proc.done;
     cancel.dispose();
     void this.checkStatus();
+    // The compiler's errors and warnings in Problems, at the working tree's lines.
+    const diags = compilerDiagnostics(text, this.pathMap());
+    this.problems.clear();
+    const byFile = new Map<string, vscode.Diagnostic[]>();
+    for (const d of diags) {
+      const range = new vscode.Range(d.line - 1, Math.max(d.column - 1, 0), d.line - 1, Math.max(d.column - 1, 0));
+      const v = new vscode.Diagnostic(range, d.message,
+        d.severity === "error" ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning);
+      v.source = `vHIL build (${fw})`;
+      byFile.set(d.file, [...(byFile.get(d.file) ?? []), v]);
+    }
+    for (const [file, list] of byFile) this.problems.set(vscode.Uri.file(file), list);
     if (code === 0) return true;
-    const tail = text.trim().split("\n").slice(-20).join("\n");
+    const errors = diags.filter((d) => d.severity === "error");
+    const why = errors.length
+      ? new vscode.TestMessage(`Building ${fw} failed: ${errors.length} error${errors.length > 1 ? "s" : ""}, see Problems.\n\n` +
+          `${path.relative(this.local!.dir, errors[0].file)}:${errors[0].line}: ${errors[0].message}`)
+      : new vscode.TestMessage(`Building ${fw} from ${this.local!.dir} failed (exit ${code}):\n\n` +
+          text.trim().split("\n").slice(-20).join("\n"));
+    if (errors.length) {
+      why.location = new vscode.Location(vscode.Uri.file(errors[0].file),
+        new vscode.Position(errors[0].line - 1, Math.max(errors[0].column - 1, 0)));
+      void vscode.commands.executeCommand("workbench.actions.view.problems");
+    }
     for (const t of tests) {
       if (token.isCancellationRequested) run.skipped(t);
       else {
-        run.errored(t, new vscode.TestMessage(`Building ${fw} from ${this.local!.dir} failed (exit ${code}):\n\n${tail}`));
+        run.errored(t, why);
         tally.failed.add(t.id);
       }
     }
@@ -600,12 +705,21 @@ class Vhil implements vscode.Disposable {
     if (r.kind === "start") {
       const t = this.byId.get(r.id);
       if (t) run.started(t);
+      this.snapshots.delete(r.id);
+      return;
+    }
+    if (r.kind === "snapshot") {
+      this.snapshots.set(r.id, [...(this.snapshots.get(r.id) ?? []), r]);
       return;
     }
     if (r.kind !== "result") return;
     const t = this.byId.get(r.id);
     if (!t) return;
     reported.add(r.id);
+    if (r.trace) {
+      this.traces.set(r.id, path.isAbsolute(r.trace) ? r.trace : path.join(this.repo, r.trace));
+      void vscode.commands.executeCommand("setContext", "vhil.traced", [...this.traces.keys()]);
+    }
     const ms = r.duration * 1000;
     if (r.outcome === "passed") {
       run.passed(t, ms);
@@ -614,7 +728,7 @@ class Vhil implements vscode.Disposable {
       run.skipped(t);
       tally.skipped++;
     } else {
-      const msg = new vscode.TestMessage(r.message ?? r.short ?? "failed");
+      const msg = this.failure(r);
       if (r.file && r.line) {
         msg.location = new vscode.Location(vscode.Uri.file(path.join(this.repo, r.file)),
           new vscode.Position(r.line - 1, 0));
@@ -622,133 +736,40 @@ class Vhil implements vscode.Disposable {
       run.failed(t, msg, ms);
       tally.failed.add(r.id);
     }
+    this.progress(tally);
   }
 
-  /** Run `ids` from the sidebar, with a notification to follow and cancel it. */
-  private async runTests(label: string, ids: string[]) {
-    if (!this.byId.size) await this.refresh();
-    const items = ids.map((id) => this.byId.get(id)).filter((t): t is vscode.TestItem => !!t);
-    if (!items.length) {
-      void vscode.window.showInformationMessage(`vHIL: no tests to run for ${label}.`);
-      return;
+  /**
+   * A failed test's message: the assertion, then where each board's firmware
+   * was (its C frames, clickable in the working tree) and the last frames on
+   * its buses, with a link to the whole trace. Without a snapshot, pytest's
+   * text as before.
+   */
+  private failure(r: Extract<Record, { kind: "result" }>): vscode.TestMessage {
+    const snaps = this.snapshots.get(r.id) ?? [];
+    this.snapshots.delete(r.id);
+    if (!snaps.length && !r.trace) return new vscode.TestMessage(r.message ?? r.short ?? "failed");
+    const md = new vscode.MarkdownString();
+    md.appendCodeblock(r.short ?? r.message ?? "failed", "text");
+    if (snaps.length) md.appendMarkdown("\n" + snapshotMarkdown(snaps));
+    if (r.trace) {
+      const args = encodeURIComponent(JSON.stringify([r.id]));
+      md.appendMarkdown(`\n[Show the bus trace](command:vhil.showTrace?${args})`);
+      md.isTrusted = { enabledCommands: ["vhil.showTrace"] };
     }
-    await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `vHIL: ${label}`, cancellable: true },
-      (_, token) => this.run(new vscode.TestRunRequest(items), token, label));
+    const msg = new vscode.TestMessage(md);
+    const map = this.pathMap();
+    msg.stackTrace = snaps.flatMap((s) => s.frames.map((f) => {
+      const host = f.file ? hostPath(f.file, map) : undefined;
+      const where = f.file ? ` ${f.file.split("/").pop()}:${f.line}` : ` ${f.address}`;
+      return new vscode.TestMessageStackFrame(`${s.board}: ${f.symbol}${host ? "" : where}`,
+        host ? vscode.Uri.file(host) : undefined,
+        host && f.line ? new vscode.Position(f.line - 1, 0) : undefined);
+    }));
+    return msg;
   }
 
-  // -- the sidebar: Status ----------------------------------------------------
-
-  async checkStatus(): Promise<void> {
-    this.checking ??= this.check().finally(() => { this.checking = undefined; this.checked = Date.now(); });
-    return this.checking;
-  }
-
-  private async check() {
-    const { context } = this.config();
-    this.status.text = "$(sync~spin) vHIL";
-    const [up, editor] = await Promise.all([
-      new Promise<boolean>((resolve) =>
-        cp.execFile("docker", ["--context", context, "info", "--format", "{{.ServerVersion}}"],
-          { timeout: 15000 }, (err) => resolve(!err))),
-      editorAnswers(),
-    ]);
-    this.vmUp = up;
-    this.editorUp = editor;
-    if (this.local) {
-      const [branch, status] = await Promise.all([
-        git(this.local.dir, ["branch", "--show-current"]), git(this.local.dir, ["status", "--porcelain"])]);
-      this.branch = branch.ok ? branch.out.trim() : "";
-      this.dirty = status.ok && !!status.out.trim();
-    }
-    if (up) {
-      let text = "";
-      const code = await this.script(["run", "sh", "-c", "cat /vhil/fw/built.txt 2>/dev/null || true"],
-        this.env(), (t) => { text += t; }).done;
-      this.built = builtFirmware(code === 0 ? text : "");
-    }
-    this.statusTree.refresh();
-    this.updateStatusBar();
-  }
-
-  private missingFirmware(): string[] {
-    return NEEDED_FW.filter((b) => !this.built.get(b));
-  }
-
-  private updateStatusBar() {
-    const { context } = this.config();
-    if (!this.vmUp) {
-      this.status.text = "$(debug-disconnect) vHIL: VM down";
-      this.status.tooltip = `Docker context ${context} doesn't answer. Click for actions.`;
-      this.status.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-      return;
-    }
-    const missing = this.missingFirmware();
-    this.status.backgroundColor = missing.length
-      ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
-    const mine = this.local ? ` · ${this.local.firmware.id}: local${this.dirty ? " (uncommitted)" : ""}` : "";
-    this.status.text = missing.length ? `$(beaker) vHIL: no firmware${mine}` : `$(beaker) vHIL${mine}`;
-    this.status.tooltip = new vscode.MarkdownString(
-      `**vHIL** on Docker context \`${context}\`\n\n` +
-      (this.local ? `Testing **${this.local.firmware.id}** from \`${this.local.dir}\`` +
-                    `${this.branch ? ` (${this.branch}${this.dirty ? ", uncommitted changes" : ""})` : ""}: ` +
-                    "built before each run.\n\n" : "") +
-      (this.built.size ? [...this.built].map(([b, elf]) => `- ${b}: \`${sourceOf(elf)}\``).join("\n")
-                       : "No firmware built: sim and scenario tests need ecu, ams and the bootloader.") +
-      "\n\nClick for actions.");
-  }
-
-  private statusNodes(): Node[] {
-    const c = this.config();
-    const checking = this.vmUp === undefined;
-    const vm = node("Docker VM", {
-      description: `${c.context} · ${checking ? "checking…" : this.vmUp ? "up" : "down"}`,
-      icon: this.vmUp ? "vm-running" : "vm-outline",
-      color: this.vmUp === false ? "problemsWarningIcon.foreground" : undefined,
-      tooltip: this.vmUp !== false ? undefined : startsVm(c.context)
-        ? `Docker context ${c.context} doesn't answer: start the VM.`
-        : `Docker context ${c.context} doesn't answer: start Docker.`,
-      // Only a Colima context gets the inline Start button (vm.down).
-      context: this.vmUp ? "vm.up" : startsVm(c.context) ? "vm.down" : "vm.external",
-    });
-    const images = node("Images", {
-      description: "pull or rebuild", icon: "package", context: "images",
-      tooltip: "The vHIL's Docker images: pull the published ones of this checkout, or build them from docker/.",
-    });
-    const names = [...new Set([...NEEDED_FW, ...this.built.keys()])].sort();
-    const boards = names.map((b) => {
-      const elf = this.built.get(b);
-      return node(b, {
-        description: elf ? sourceOf(elf) : "not built",
-        tooltip: elf ?? `No ${b} firmware: build it.`,
-        icon: elf ? "pass" : "warning",
-        color: elf ? "testing.iconPassed" : "problemsWarningIcon.foreground",
-        // A board rebuilds by its system's name; a bootloader comes with its board.
-        context: b.includes(".") ? "fw.part" : "fw.board",
-        data: b,
-      });
-    });
-    const missing = this.missingFirmware();
-    const firmware = node("Firmware", {
-      description: !this.vmUp ? "" : missing.length ? `missing ${missing.join(", ")}` : `${this.built.size} built`,
-      icon: "circuit-board", context: "firmware", children: boards, expanded: true,
-      tooltip: "What the last `fw` left in /vhil/fw/built.txt: what sim, scenario and smoke tests run.",
-    });
-    const ours = !!this.editorTask;
-    const editor = node("System editor", {
-      description: this.editorUp ? "running · localhost:8080" : ours ? "starting…" : "stopped",
-      icon: "type-hierarchy",
-      context: this.editorUp ? (ours ? "editor.up.ours" : "editor.up") : ours ? "editor.down.ours" : "editor.down",
-      command: { command: "vhil.openEditor", title: "Open" },
-    });
-    const refs = node("Firmware refs", {
-      description: `IFS_HIL ${c.ifsHilRef || "dev"}${c.firmwareRefs ? ` · ${c.firmwareRefs}` : ""}`,
-      icon: "git-branch",
-      tooltip: "The IFS_HIL ref and firmware refs firmware builds use: click to change.",
-      command: { command: "vhil.openSettings", title: "Settings", arguments: ["vhil.ifsHilRef"] },
-    });
-    return [vm, images, firmware, editor, refs];
-  }
+  // -- firmware, the system editor, systems -----------------------------------
 
   private async buildFirmware() {
     const pick = await vscode.window.showQuickPick(
@@ -787,10 +808,7 @@ class Vhil implements vscode.Disposable {
     panel.webview.html = editorHtml(undefined, "Starting the system editor…");
     const deadline = Date.now() + 5 * 60_000;
     while (open && !(await editorAnswers())) {
-      if (!this.editorTask) {
-        void this.task("System editor", ["editor"], {}, false);
-        this.statusTree.refresh();
-      }
+      if (!this.editorTask) void this.task("System editor", ["editor"]);
       if (Date.now() > deadline) {
         panel.webview.html = editorHtml(undefined,
           "The system editor didn't start in 5 minutes. See the System editor terminal.");
@@ -803,10 +821,7 @@ class Vhil implements vscode.Disposable {
     const url = await vscode.env.asExternalUri(vscode.Uri.parse(this.editorPage));
     panel.webview.html = editorHtml(url.toString(true));
     this.editorReady = true;
-    void this.checkStatus();
   }
-
-  // -- the sidebar: Systems ---------------------------------------------------
 
   private readSystems() {
     const dir = path.join(this.repo, "systems");
@@ -820,12 +835,19 @@ class Vhil implements vscode.Disposable {
         smoke: fs.existsSync(path.join(this.repo, `tests/${id}_smoke.robot`)),
       };
     });
-    this.systemsTree.refresh();
   }
 
   /** The systems shown: in a firmware repository, those that run its firmware. */
   private mySystems(): SystemInfo[] {
     return this.local ? systemsOf(this.systems, this.local.firmware.id) : this.systems;
+  }
+
+  private async pickSystem(title: string, only?: (s: SystemInfo) => boolean): Promise<string | undefined> {
+    const pick = await vscode.window.showQuickPick(
+      this.mySystems().filter((s) => !only || only(s)).map((s) => ({
+        label: s.id, description: s.boards.map((b) => b.name).join(", "), detail: s.description,
+      })), { title: `vHIL: ${title}` });
+    return pick?.label;
   }
 
   private async updateVhil() {
@@ -839,107 +861,33 @@ class Vhil implements vscode.Disposable {
     }
   }
 
-  private systemOf(n: Node): SystemInfo {
-    return n.data as SystemInfo;
-  }
+  // -- the palette's tools (the vHIL repository) ------------------------------
 
-  private systemNodes(): Node[] {
-    const listed = this.byId.size ? this.listed() : undefined;
-    return this.mySystems().map((s) => {
-      const counts = listed ? systemTests(listed, s.id) : undefined;
-      const parts = [s.boards.map((b) => b.name).join(", ")];
-      if (counts) {
-        parts.push(`${counts.sim.length} sim`);
-        if (s.scenarios) parts.push(`${counts.scenarios.length} scenarios`);
-      }
-      const boards = s.boards.map((b) => node(b.name, {
-        description: b.role ? `${b.board} · ${b.role}` : b.board, icon: "chip",
-      }));
-      return node(s.id, {
-        description: parts.join(" · "),
-        tooltip: new vscode.MarkdownString(`**systems/${s.id}.yaml**\n\n${s.description}`),
-        icon: "circuit-board",
-        context: ["system", s.scenarios && "scenarios", s.smoke && "smoke"].filter(Boolean).join("."),
-        children: boards,
-        data: s,
-      });
-    });
-  }
-
-  private async runSystem(s: SystemInfo, kind: "sim" | "scenarios") {
-    if (!this.byId.size) await this.refresh();
-    const ids = systemTests(this.listed(), s.id)[kind];
-    await this.runTests(`${s.id}: ${kind === "sim" ? "sim tests" : "scenarios"}`, ids);
-  }
-
-  // -- the sidebar: Runs ------------------------------------------------------
-
-  private addRun(r: RunRecord) {
-    this.setRuns(keepRuns(this.runs, r));
-  }
-
-  private setRuns(runs: RunRecord[]) {
-    this.runs = runs;
-    const kept = new Set(runs.map((r) => r.id));
-    for (const id of this.outputs.keys()) if (!kept.has(id)) this.outputs.delete(id);
-    void this.context.workspaceState.update(RUNS_KEY, runs);
-    this.runsTree.refresh();
-  }
-
-  private runNodes(): Node[] {
-    const now = Date.now();
-    return this.runs.map((r) => {
-      const ok = runOk(r);
-      const failed = (r.failed ?? []).map((id) => node(labelOf(id), {
-        description: fileOf(id), icon: "error", color: "testing.iconFailed",
-        command: { command: "vhil.revealTest", title: "Show", arguments: [id] },
-      }));
-      const output = this.outputs.has(r.id);
-      return node(r.label, {
-        description: runDescription(r, now),
-        tooltip: `${new Date(r.started).toLocaleString()}${r.args ? `\n${SCRIPT} ${r.args.join(" ")}` : ""}`,
-        icon: ok === undefined ? "circle-slash" : ok ? "pass" : "error",
-        color: ok === undefined ? undefined : ok ? "testing.iconPassed" : "testing.iconFailed",
-        context: ["run", r.kind, r.failed?.length && "failed", output && "output"].filter(Boolean).join("."),
-        children: failed, data: r,
-        command: output ? { command: "vhil.showRunOutput", title: "Output", arguments: [{ data: r }] } : undefined,
-      });
-    });
-  }
-
-  private async runAgain(r: RunRecord, onlyFailed: boolean) {
-    if (r.kind === "task") {
-      await this.task(r.label, r.args ?? [], r.env ?? {});
-      return;
-    }
-    const ids = onlyFailed ? r.failed ?? [] : r.include ?? [];
-    await this.runTests(onlyFailed ? `${r.label} (failures)` : r.label, ids);
-  }
-
-  private async showOutput(r: RunRecord) {
-    const text = this.outputs.get(r.id);
-    if (text === undefined) return;
-    const doc = await vscode.workspace.openTextDocument({ content: text, language: "log" });
-    await vscode.window.showTextDocument(doc, { preview: true });
-  }
-
-  // -- the sidebar: Tools -----------------------------------------------------
-
-  private toolNodes(): Node[] {
-    return TOOLS.map((t) => node(t.label, {
-      icon: t.icon, tooltip: t.detail,
-      command: { command: "vhil.tool", title: t.label, arguments: [t.id] },
-    }));
+  private async tools() {
+    const pick = await vscode.window.showQuickPick(
+      TOOLS.map((t) => ({ label: `$(${t.icon}) ${t.label}`, detail: t.detail, id: t.id })),
+      { title: "vHIL: tools" });
+    if (pick) await this.tool(pick.id);
   }
 
   private async tool(id: ToolId) {
     switch (id) {
       case "shell":
-        await this.task("Shell", ["shell"], {}, false);
+        await this.task("Shell", ["shell"]);
         return;
       case "speed":
         await this.task("Speed", ["speed"]);
         return;
+      case "smoke": {
+        const s = await this.pickSystem("smoke suite of which system?", (x) => x.smoke);
+        if (s) await this.task(`Smoke: ${s}`, ["smoke", s]);
+        return;
+      }
+      case "validate": {
+        const s = await this.pickSystem("validate which system?");
+        if (s) await this.task(`Validate ${s}`, ["run", "python", "-m", "vhil.system", "validate", `systems/${s}.yaml`]);
+        return;
+      }
       case "ifs-hil": {
         const dut = await vscode.window.showQuickPick(
           [{ label: "ecu", description: "IFS_HIL's ECU suite" }, { label: "ams", description: "IFS_HIL's AMS suite" }],
@@ -983,25 +931,8 @@ class Vhil implements vscode.Disposable {
       }
     }
   }
-
-  private async menu() {
-    const actions: { label: string; run: () => unknown }[] = [
-      { label: "$(beaker) Show the vHIL sidebar", run: () => vscode.commands.executeCommand("workbench.view.extension.vhil") },
-      { label: "$(refresh) Refresh tests", run: () => this.refresh() },
-      ...(startsVm(this.config().context)
-        ? [{ label: "$(vm) Start the Docker VM", run: () => this.task("Start the Docker VM", ["vm"]) }] : []),
-      { label: "$(tools) Build firmware…", run: () => this.buildFirmware() },
-      { label: "$(type-hierarchy) Open the system editor", run: () => this.openEditor() },
-      { label: "$(pulse) Check VM and firmware", run: () => this.checkStatus() },
-      ...(this.local ? [{ label: "$(cloud-download) Update the vHIL", run: () => this.updateVhil() }] : []),
-      { label: "$(gear) Settings", run: () => vscode.commands.executeCommand("workbench.action.openSettings", "vhil.") },
-    ];
-    const pick = await vscode.window.showQuickPick(actions, { title: "vHIL" });
-    await pick?.run();
-  }
 }
 
-/** Whether the system editor answers on its proxy. */
 /** The editor panel's page: the editor framed at `url`, else `message`. */
 function editorHtml(url: string | undefined, message = ""): string {
   const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -1018,13 +949,9 @@ p { padding: 1em; font-family: var(--vscode-font-family); color: var(--vscode-fo
 </head><body>${body}</body></html>`;
 }
 
+/** Whether the system editor answers on its proxy. */
 function editorAnswers(): Promise<boolean> {
   return fetch(EDITOR_URL, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
-}
-
-/** Which build an image is: its directory under /vhil/fw (ecu@local, ams@dev, ...). */
-function sourceOf(elf: string): string {
-  return /\/vhil\/fw\/([^/]+)/.exec(elf)?.[1] ?? path.basename(elf);
 }
 
 function shellQuote(s: string): string {
