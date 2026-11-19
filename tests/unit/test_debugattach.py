@@ -26,6 +26,19 @@ def test_ready_info_copies_the_images_and_names_their_build_trees(tmp_path):
     assert (out / "ams.elf").read_bytes() == b"app"
     assert (out / "ams.bootloader.elf").read_bytes() == b"bl"
     assert json.loads(json.dumps(info))["port"] == 3333
+    assert info["entry"] is None        # not an ELF: no main to stop at
+
+
+def test_the_entry_is_the_apps_main_not_the_bootloaders(tmp_path):
+    from tests.unit.test_elf import _elf
+    fw = tmp_path / "fw"
+    fw.mkdir()
+    app = _elf(fw / "AMS.elf", [("main", 0x08020F01, 64, 2)])
+    bl = _elf(fw / "CAN_BL.elf", [("main", 0x08000401, 64, 2)])
+    out = tmp_path / "out"
+    out.mkdir()
+    assert d.ready_info("ams", 1, "ams", [app, bl], out)["entry"] == 0x08020F00
+    assert d.entry_of(_elf(tmp_path / "x.elf", [("g", 4, 4, 1)])) is None
 
 
 def test_the_build_tree_of_a_vhil_fw_image():

@@ -93,9 +93,10 @@ Set up / Retry**, to try again.
    C/C++ extension: set breakpoints in your C, continue, step. Every board
    stops while one is held, so no firmware timeout fires. Stop debugging and
    the test runs on to its result. With no breakpoint in a C, C++ or
-   assembly file (or on a function), it stops at the bootloader's `main`
-   (every board powers on through its CAN bootloader, which runs first):
-   set breakpoints in the app, then Continue. A vHIL checkout from before
+   assembly file (or on a function), it stops at the app's `main`, after
+   the CAN bootloader every board powers on through has handed over (a
+   breakpoint on its address the session adds and removes): set
+   breakpoints, then Continue. A vHIL checkout from before
    the debug hold says so instead of running. Limits: no memory or register
    writes (docs/debugger.md).
 

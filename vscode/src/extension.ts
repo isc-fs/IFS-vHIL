@@ -25,7 +25,7 @@ import {
 import {
   buildSystem, Firmware, firmwareForRepo, firmwareOf, repoSlug, systemsOf, testRuns,
 } from "./firmware";
-import { boardsOf as debugBoards, debugConfig, Ready } from "./debug";
+import { boardsOf as debugBoards, debugConfig, entryBreakpoint, Ready } from "./debug";
 import {
   barOf, DebuggerHealth, findings, Fix, GROUP, groupId, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
 } from "./status";
@@ -1189,6 +1189,7 @@ class Vhil implements vscode.Disposable {
     let session: vscode.DebugSession | undefined;
     let liveRun: vscode.TestRun | undefined;
     let attachError: unknown;
+    let entryBp: vscode.FunctionBreakpoint | undefined;
     const started = vscode.debug.onDidStartDebugSession((s) => {
       if (s.configuration.miDebuggerServerAddress === `127.0.0.1:${port}`) session = s;
     });
@@ -1212,17 +1213,27 @@ class Vhil implements vscode.Disposable {
         if (ready && ready.port === port) {
           held = true;
           const local = this.local ? { firmware: this.local.firmware.id, dir: this.local.dir } : undefined;
-          // No breakpoint firmware can hit would run the test straight through: stop at entry (main).
+          // No breakpoint firmware can hit would run the test straight through:
+          // stop at the app's main, on a breakpoint this session removes.
           const stop = debugStops(vscode.debug.breakpoints.map(bpOf));
+          const at = stop ? entryBreakpoint(ready) : undefined;
+          if (at) {
+            entryBp = new vscode.FunctionBreakpoint(at);
+            vscode.debug.addBreakpoints([entryBp]);
+          }
           const ok = await vscode.debug.startDebugging(this.folder,
             debugConfig(ready, dir, gdb, local, stop) as vscode.DebugConfiguration);
           if (!ok) {
             cts.cancel();
             void vscode.window.showErrorMessage(
               `vHIL: the debugger didn't start on ${ready.board}: the run is cancelled.`);
+          } else if (at) {
+            void vscode.window.showInformationMessage(
+              `vHIL: ${ready.board} stops at the app's main, after the bootloader hands over. ` +
+              "Set breakpoints, then Continue (F5).");
           } else if (stop) {
             void vscode.window.showInformationMessage(
-              `vHIL: ${ready.board} is paused at the bootloader's main (it runs first after power-on). ` +
+              `vHIL: ${ready.board} is paused at the bootloader's main (the app's has no symbol). ` +
               "Set breakpoints in the app, then Continue (F5).");
           }
           return;
@@ -1250,6 +1261,7 @@ class Vhil implements vscode.Disposable {
           : `vHIL: ${labelOf(test.id)} is no longer in the test listing: nothing ran.`);
       }
       if (session) await vscode.debug.stopDebugging(session);
+      if (entryBp) vscode.debug.removeBreakpoints([entryBp]);
       cts.dispose();
     }
   }

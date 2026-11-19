@@ -13,8 +13,10 @@ vhil-docker.sh publishes on the host's 127.0.0.1 (VHIL_DEBUG_PORT).
 What the debugger needs is written to VHIL_DEBUG_DIR (default
 results/vscode/debug, in /work): the board's images (`<board>.elf`, its
 bootloader `<board>.bootloader.elf`) and `ready.json` {board, port, system,
-images, sources, host_sources}, `sources` the container paths they were
-built in. A tree that lives only in the container (not an `@local` working
+images, sources, host_sources, entry}, `sources` the container paths they were
+built in, `entry` the app's `main` (Thumb bit clear, or null): where the
+extension stops a session with no breakpoints, since a plain `break main`
+also resolves in the bootloader, which runs first after power-on. A tree that lives only in the container (not an `@local` working
 tree, which the extension maps itself) has its source files copied to
 `src/<id>@<ref>` beside them, once per build; `host_sources` names that
 copy, relative to the folder, or null. The extension waits for ready.json,
@@ -35,6 +37,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from vhil import elf
 from vhil import renode as rn
 
 ENV = "VHIL_DEBUG"
@@ -115,6 +118,14 @@ def copy_sources(root: Path, dest: Path, stamp: str) -> None:
     mark.write_text(stamp)
 
 
+def entry_of(image: Path) -> Optional[int]:
+    """The address of the image's `main`, Thumb bit clear; None without one."""
+    try:
+        return elf.symbol(image, "main")[0] & ~1
+    except (KeyError, ValueError, OSError):
+        return None
+
+
 def ready_info(board: str, port: int, system: str, images: list[Path], out: Path) -> dict:
     """ready.json's content, the images copied into `out` (pure but for the copy)."""
     names = [f"{board}.elf", f"{board}.bootloader.elf"]
@@ -135,7 +146,7 @@ def ready_info(board: str, port: int, system: str, images: list[Path], out: Path
         else:
             host.append(None)
     return {"board": board, "port": port, "system": system, "images": copied, "sources": sources,
-            "host_sources": host}
+            "host_sources": host, "entry": entry_of(images[0]) if images else None}
 
 
 def maybe_attach(sim) -> None:

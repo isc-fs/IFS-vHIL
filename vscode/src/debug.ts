@@ -32,6 +32,17 @@ export interface Ready {
   images: string[]; // file names in the same folder: app, then bootloader
   sources: string[]; // their build trees in the container
   host_sources?: (string | null)[]; // copies of those trees, relative to the folder
+  entry?: number | null; // the app's main, Thumb bit clear
+}
+
+/**
+ * Where a session with no breakpoints stops: the app's main, as a function
+ * breakpoint on its address (`*0x...`). A plain `main` (cppdbg's
+ * stopAtEntry) also resolves in the bootloader, which runs first. Undefined
+ * without an address: debugConfig falls back to stopAtEntry.
+ */
+export function entryBreakpoint(ready: Ready): string | undefined {
+  return typeof ready.entry === "number" ? `*0x${ready.entry.toString(16)}` : undefined;
 }
 
 /**
@@ -48,8 +59,9 @@ export function gdbQuote(p: string): string {
  * mapped to sources the host has (the open firmware's working tree, else
  * the copy debugattach took). Launching with a server address connects and
  * continues: the stub has the board stopped before its first instruction,
- * so the breakpoints go in first. With none set (`stop`), it stops at main
- * (the bootloader's, the first to run) instead of running the test through.
+ * so the breakpoints go in first. With none set (`stop`), the caller adds
+ * entryBreakpoint (the app's main); without one, stopAtEntry stops at the
+ * first main to run, the bootloader's.
  */
 export function debugConfig(ready: Ready, dir: string, gdb: string,
                             local?: { firmware: string; dir: string },
@@ -82,7 +94,7 @@ export function debugConfig(ready: Ready, dir: string, gdb: string,
     targetArchitecture: "arm",
     miDebuggerPath: gdb,
     miDebuggerServerAddress: `127.0.0.1:${ready.port}`,
-    stopAtEntry: stop,
+    stopAtEntry: stop && !entryBreakpoint(ready),
     externalConsole: false,
     setupCommands: setup,
     sourceFileMap: map,
