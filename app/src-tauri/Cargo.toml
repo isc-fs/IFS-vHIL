@@ -1,6 +1,6 @@
 [package]
 name = "vhil-app"
-version = "0.2.5"
+version = "0.2.6"
 description = "vHIL desktop app"
 edition = "2021"
 publish = false
