@@ -115,6 +115,9 @@ function render() {
     : "Use your own clone of the repository (empty: the app's own copy)";
   if (!info.managed && !$("#ws").value) $("#ws").value = where;
 
+  // Sign in is a task too: one at a time (main.rs `busy`).
+  $("#account-btn").disabled = Boolean(running);
+
   if (ready && !fwMissing && !stay && !autoOpened && !running) {
     autoOpened = true;
     openApp();
@@ -201,7 +204,6 @@ async function refreshAccount() {
     ? `Signed in as ${login}: systems and tests you commit in the editor are shared with the team (its Team view).`
     : "Sign in to share the systems and tests you make with the team. Teammates' work opens without it.";
   $("#account-btn").textContent = login ? "Sign out" : "Sign in with GitHub";
-  $("#account-btn").disabled = Boolean(running);
 }
 $("#account-btn").onclick = () => runTask(login ? "logout" : "login");
 listen("log", (e) => {
@@ -221,6 +223,9 @@ listen("done", async (e) => {
   if (e.payload.task !== "login" && e.payload.task !== "logout") return;
   $("#account-code").hidden = true;
   refreshAccount();
+  if (e.payload.code !== 0 && e.payload.task === "login") {
+    $("#account-status").textContent = "Sign-in failed: see Output.";
+  }
   // A running vHIL got its account when it started: restart it to share.
   if (e.payload.code === 0 && e.payload.task === "login" && await invoke("app_running")) {
     const s = $("#open-status");
