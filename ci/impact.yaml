@@ -217,7 +217,7 @@ rules:
     paths: [models/renode/VhilCaches.cs]
     select: {markers: [cpu_timing]}
   - name: the debugger
-    paths: [models/renode/VhilGdb.cs, vhil/gdb.py]
+    paths: [models/renode/VhilGdb.cs, vhil/gdb.py, vhil/debugattach.py]
     select: {markers: [debugger], importers: true}
 
   # -- plants and co-simulation -------------------------------------------------
