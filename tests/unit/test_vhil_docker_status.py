@@ -52,7 +52,8 @@ def status(tmp_path, path=None, **stub):
     r = subprocess.run(["bash", str(SCRIPT), "status"], env=env,
                        capture_output=True, text=True, timeout=60)
     calls = log.read_text().splitlines() if log.exists() else []
-    return r, r.stdout.splitlines(), calls
+    # The stack's project line: test_each_checkout_has_its_own_stack.
+    return r, [l for l in r.stdout.splitlines() if not l.startswith("project=")], calls
 
 
 def test_the_script_parses():
@@ -107,7 +108,7 @@ def test_no_docker_cli(tmp_path):
     # A PATH with what the scripts use but no docker.
     tools = tmp_path / "tools"
     tools.mkdir()
-    for t in ("bash", "git", "sed", "awk", "cut", "dirname", "cat"):
+    for t in ("bash", "git", "sed", "awk", "cut", "dirname", "cat", "cksum"):
         w = shutil.which(t)
         if w is None:
             pytest.skip(f"no {t}")
@@ -117,3 +118,15 @@ def test_no_docker_cli(tmp_path):
     assert out == ["docker=nocli", f"base={k['base']} base_state=unknown",
                    f"editor={k['editor']} editor_state=unknown", f"clean={k['clean']}"]
     assert calls == []
+
+
+def test_each_checkout_has_its_own_stack(tmp_path):
+    """Its compose project from the checkout's path, its port VHIL_WEB_PORT
+    (8080 unset); nothing started to say so."""
+    r, _, _ = status(tmp_path)
+    line = next(l for l in r.stdout.splitlines() if l.startswith("project="))
+    project, port = line.split()
+    assert project.startswith("project=ifs-vhil-") and len(project) == len("project=ifs-vhil-") + 8
+    assert port == "web_port=8080"
+    r, _, _ = status(tmp_path, VHIL_WEB_PORT="8123")
+    assert f"{project} web_port=8123" in r.stdout.splitlines()

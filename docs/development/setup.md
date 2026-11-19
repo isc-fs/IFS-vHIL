@@ -341,6 +341,14 @@ single-bus systems such as `ams` do.
 http://localhost:8080 with no login (`VHIL_AUTH=dev`). GitHub login, the
 GitHub App and their environment: [`web-app.md`](web-app.md).
 
+Each checkout runs a stack of its own: compose project `ifs-vhil-<id>` (from
+the checkout's path; `scripts/vhil-docker.sh status` prints it) with its runs
+in `/vhil/server/<id>` of the `vhil-data` volume, so another clone (or the VS
+Code extension's checkout, which takes a port of its own) never replaces this
+one's containers or claims its runs. Firmware builds stay shared. The port is
+`VHIL_WEB_PORT` (8080): a second checkout's needs another one, and the script
+names whatever holds the port when it is taken.
+
 ## Branching
 
 `main` is the release branch. Feature work lands on `dev` first, and `dev`
