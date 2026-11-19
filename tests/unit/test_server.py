@@ -124,6 +124,25 @@ def test_every_response_carries_the_security_headers(client, path):
     assert h["referrer-policy"] == "same-origin"
 
 
+@pytest.mark.parametrize("path", ["/", "/training/", "/static/app.js"])
+def test_the_shell_and_its_static_files_are_revalidated(client, path):
+    # Unhashed names: without no-cache a browser may keep a stale copy after
+    # an upgrade, heuristically fresh from Last-Modified.
+    r = client.get(path)
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    assert r.headers["etag"]
+
+
+def test_a_revalidated_static_file_answers_304(client):
+    etag = client.get("/static/app.js").headers["etag"]
+    again = client.get("/static/app.js", headers={"If-None-Match": etag})
+    assert again.status_code == 304 and again.headers["cache-control"] == "no-cache"
+
+
+def test_api_responses_are_not_marked_no_cache(client):
+    assert "cache-control" not in client.get("/api/health").headers
+
+
 def test_the_csp_frames_only_this_origin_and_names_the_public_wss(monkeypatch, tmp_path):
     """The editor is same-origin (/editor/): no other origin may be framed,
     whatever VHIL_EDITOR_URL a deployment still sets."""
