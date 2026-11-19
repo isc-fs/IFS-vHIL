@@ -124,7 +124,12 @@ doctor() {
         # || : colima may be missing (reported above), and pipefail would end doctor here.
         avail=$(colima ssh -p "$profile" -- df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc 0-9) || avail=
     else
-        avail=$(df -BG --output=avail "$("${docker[@]}" info -f '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null | tail -1 | tr -dc 0-9)
+        # Docker Desktop (WSL) keeps its root in its own VM, not in this distro:
+        # df / then, and || : pipefail would end doctor here with no message.
+        local root
+        root=$("${docker[@]}" info -f '{{.DockerRootDir}}' 2>/dev/null) || root=
+        [ -n "$root" ] && [ -d "$root" ] || root=/
+        avail=$(df -BG --output=avail "$root" 2>/dev/null | tail -1 | tr -dc 0-9) || avail=
     fi
     if [ -z "$avail" ]; then warn disk "free disk unknown"
     elif [ "$avail" -lt 10 ]; then bad disk "only ${avail} GB free for Docker (the images and firmware need ~10 GB)"
