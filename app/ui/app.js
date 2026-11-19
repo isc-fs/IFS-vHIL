@@ -224,10 +224,7 @@ listen("done", async (e) => {
   $("#account-code").hidden = true;
   refreshAccount();
   if (e.payload.code !== 0 && e.payload.task === "login") {
-    // Your own clone runs its own bin/vhil: one from before v0.2.2 has no login.
-    $("#account-status").textContent = info.managed
-      ? "Sign-in failed: see Output."
-      : "Sign-in failed: see Output. Your own clone needs a commit with `vhil login` (v0.2.2 or dev since): update it, or use the app's own copy (Settings).";
+    $("#account-status").textContent = "Sign-in failed: see Output.";
   }
   // A running vHIL got its account when it started: restart it to share.
   if (e.payload.code === 0 && e.payload.task === "login" && await invoke("app_running")) {

@@ -107,6 +107,26 @@ fn shell(script: &str, args: &[&str]) -> Command {
     c
 }
 
+/// `bin/vhil-account <verb>` (login, whoami, logout): the app's own copy,
+/// so signing in works whichever commit the workspace is at (a developer's
+/// clone from before v0.2.2 has none). The account is per user, not per
+/// checkout: ~/.config/vhil/github, in WSL on Windows, where `vhil ui` reads it.
+const ACCOUNT_SCRIPT: &str = include_str!("../../../bin/vhil-account");
+
+fn account_cmd(verb: &str) -> Command {
+    let mut c = if WSL {
+        let mut c = command("wsl.exe");
+        c.args(["-e", "bash", "-c", ACCOUNT_SCRIPT, "vhil-account"]);
+        c
+    } else {
+        let mut c = command("/bin/bash");
+        c.args(["-c", ACCOUNT_SCRIPT, "vhil-account"]);
+        c
+    };
+    c.arg(verb);
+    c
+}
+
 /// `bin/vhil <args>` in the workspace.
 fn vhil(ws: &str, args: &[&str]) -> Command {
     let mut c = if WSL {
@@ -358,12 +378,11 @@ async fn doctor(app: AppHandle) -> Result<serde_json::Value, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// The GitHub account the team store shares as (`bin/vhil whoami`), or None.
+/// The GitHub account the team store shares as (`vhil-account whoami`), or None.
 #[tauri::command]
-async fn account(app: AppHandle) -> Option<String> {
-    let ws = workspace(&app).ok()?;
+async fn account() -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let out = vhil(&ws, &["whoami"]).stdin(Stdio::null()).output().ok()?;
+        let out = account_cmd("whoami").stdin(Stdio::null()).output().ok()?;
         let login = String::from_utf8_lossy(&out.stdout).trim().to_string();
         (out.status.success() && !login.is_empty()).then_some(login)
     })
@@ -407,8 +426,8 @@ fn run(app: AppHandle, task: String) -> Result<(), String> {
         }
         "vm" => vhil(&workspace(&app)?, &["vm"]),
         "setup" => vhil(&workspace(&app)?, &["setup"]),
-        "login" => vhil(&workspace(&app)?, &["login"]),
-        "logout" => vhil(&workspace(&app)?, &["logout"]),
+        "login" => account_cmd("login"),
+        "logout" => account_cmd("logout"),
         _ => return Err(format!("unknown task {task}")),
     };
     if task == "workspace" {
