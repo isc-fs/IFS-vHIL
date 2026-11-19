@@ -6,7 +6,13 @@ extension's Testing panel needs as JSON lines, paths relative to the repo.
 With --collect-only, one `item` line per test: its node id, file, line and
 markers. Otherwise a `start` line when a test starts and a `result` line when
 it ends (passed, failed, skipped), with its duration, its failure text and
-where it failed. The file is appended and flushed line by line, so the
+where it failed. A test that used a Sim (docs/test-trace.md) adds `trace`,
+its trace file (.trace.jsonl; the candump .log sits beside it), relative to
+the repo when inside it; and, when it failed, a `snapshot` line per board
+before its result: `id`, `sim`, `board`, `time_us`, `summary`, `exception`,
+`task`, `fault` {CFSR, HFSR}, `frames` [{symbol, file, line, address}]
+(PC, then LR, resolved against the ELF) and `bus_tail` (the last decoded
+frames before the failure). The file is appended and flushed line by line, so the
 extension shows results while the run goes on. A line is one JSON object;
 the extension skips a line it can't parse (the last one, mid-write)."""
 from __future__ import annotations
@@ -77,6 +83,12 @@ class _Writer:
 
     def pytest_runtest_logfinish(self, nodeid, location):
         state = self.outcome.pop(nodeid, {"outcome": "passed", "duration": 0.0})
+        from vhil import testtrace
+        traced = testtrace.RESULTS.pop(nodeid, None)
+        if traced:
+            for snap in traced["snapshots"]:
+                self.emit(id=nodeid, **snap)
+            state["trace"] = self.rel(traced["trace"]) or str(traced["trace"])
         self.emit(kind="result", id=nodeid, **state)
 
     def pytest_sessionfinish(self, session, exitstatus):
