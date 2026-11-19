@@ -116,3 +116,13 @@ def test_the_app_carries_its_own_copy():
     ui = (REPO / "app/ui/app.js").read_text()
     for task in ('task: "update-clone"', 'task: "switch-clone"', 'invoke("clone_status")'):
         assert task in ui
+
+
+def test_the_app_never_auto_opens_its_copy_on_an_old_release():
+    """After an app update its copy is still at the previous release. The
+    page used to auto-open the vHIL as soon as doctor was green, and start()
+    then skipped moving the copy (a task was running): a teammate's app ran
+    v0.2.1's scripts under a v0.2.4 app. Auto-open now waits for the move."""
+    ui = (REPO / "app/ui/app.js").read_text()
+    assert "const cloneSettled = info.managed ? info.synced :" in ui
+    assert 'if (info.managed && info.present && !info.synced && !running) runTask("workspace");' in ui

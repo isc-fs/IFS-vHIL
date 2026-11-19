@@ -124,8 +124,11 @@ function render() {
   // Sign in is a task too: one at a time (main.rs `busy`).
   $("#account-btn").disabled = Boolean(running);
 
-  // Your clone behind GitHub: stay here, so the warning is seen (Open still works).
-  const cloneSettled = info.managed || (clone !== undefined && !cloneAttention());
+  // Never auto-open on old code: the app's copy is moved to the app's ref
+  // first (start(): after an update it is still at the previous release),
+  // and your own clone behind GitHub keeps this page up so the warning is
+  // seen (Open still works).
+  const cloneSettled = info.managed ? info.synced : (clone !== undefined && !cloneAttention());
   if (ready && !fwMissing && !stay && !autoOpened && !running && cloneSettled) {
     autoOpened = true;
     openApp();
