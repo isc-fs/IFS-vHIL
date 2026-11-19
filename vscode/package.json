@@ -78,7 +78,7 @@
       },
       {
         "command": "vhil.stopEditor",
-        "title": "Stop the system editor",
+        "title": "Stop the vHIL (its containers)",
         "category": "vHIL"
       },
       {
@@ -160,6 +160,12 @@
           "default": [],
           "markdownDescription": "Extra pytest arguments for every run, e.g. `--vhil-trace`.",
           "order": 1
+        },
+        "vhil.webPort": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Advanced. The web app's port (`VHIL_WEB_PORT`). 0: 8080 for your own checkout, a port of its own for each firmware repository. Set it to run this window's vHIL beside another one.",
+          "order": 2
         },
         "vhil.cpus": {
           "type": "number",

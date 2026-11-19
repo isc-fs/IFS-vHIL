@@ -2,6 +2,7 @@
 extension reads. Against a stub `docker` that logs every call, so nothing is
 started, pulled or built."""
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -208,3 +209,34 @@ def test_stop_downs_this_checkouts_stack_and_a_pre_446_one(tmp_path):
     downs = [l for l in log.read_text().splitlines() if l.endswith(" down")]
     assert any(f"-p {project} " in l for l in downs), downs
     assert any("-p ifs-vhil " in l for l in downs), downs
+
+
+def _stack(tmp_path, owner, **extra):
+    """vhil-docker.sh stack with a docker that says `owner` publishes the port."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "docker").write_text(f'#!/bin/sh\ncase "$*" in *" ps "*) [ -n "{owner}" ] && echo "{owner}" ;; esac\nexit 0\n')
+    (bindir / "docker").chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k not in ("VHIL_WEB_PORT", "VHIL_STACK_ID")}
+    env.update({"PATH": f"{bindir}:{os.environ['PATH']}", "VHIL_DOCKER_CONTEXT": "stub", **extra})
+    r = subprocess.run(["bash", str(REPO / "scripts/vhil-docker.sh"), "stack"], env=env,
+                       capture_output=True, text=True, timeout=60)
+    return r, dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+
+
+def test_stack_names_this_checkout_and_who_holds_the_port(tmp_path):
+    """The VS Code extension frames only this checkout's stack (vscode/src/stack.ts)."""
+    r, out = _stack(tmp_path, "")
+    assert r.returncode == 0, r.stderr
+    assert re.fullmatch(r"ifs-vhil-[0-9a-f]{8}", out["project"]) and out["port"] == "8080"
+    assert out["owner"] == ""
+    _, out = _stack(tmp_path, "ifs-vhil-99999999", VHIL_WEB_PORT="8123")
+    assert out["owner"] == "ifs-vhil-99999999" and out["port"] == "8123"
+
+
+def test_a_stack_id_replaces_the_paths(tmp_path):
+    """One stack per firmware repository over the extension's one checkout."""
+    _, out = _stack(tmp_path, "", VHIL_STACK_ID="0badf00d")
+    assert out["project"] == "ifs-vhil-0badf00d"
+    r, _ = _stack(tmp_path, "", VHIL_STACK_ID="../evil")
+    assert r.returncode == 2 and "VHIL_STACK_ID" in r.stderr
