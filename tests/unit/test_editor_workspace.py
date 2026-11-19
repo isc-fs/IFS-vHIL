@@ -319,3 +319,21 @@ def test_runs_build_the_working_tree_when_the_server_has_one():
     assert ws.count("withLocal(") == 4      # the helper, Run, Live, pytest
     bar = (VHIL / "VhilTopBar.vue").read_text()
     assert '<input v-model="ws.useLocal" type="checkbox" :disabled="live" />' in bar
+
+
+def test_the_team_view_shares_commits_on_your_own_branch():
+    """The team store (vhil/server/team.py) in the editor: a Team view that
+    syncs and opens teammates' work from their branch; signed in, a commit
+    goes to shared/<you>/... on the opened commit and is then shared."""
+    rail = (VHIL / "VhilRail.vue").read_text()
+    assert "id: 'team', label: 'Team'" in rail
+    assert "@click=\"openSystem(id, it.branch)\"" in rail
+    assert "if (id === 'team') syncTeam();" in rail
+    workspace = (VHIL / "workspace.js").read_text()
+    assert "ws.commit.branch = team.prefix ? commitBranch(id, branch, '', today())" in workspace
+    assert workspace.count("await shareCommitted(") == 2       # system, and with a scenario
+    assert "await loadTeam();" in workspace
+    team = (VHIL / "team.js").read_text()
+    for route in ("'GET', '/api/team'", "'POST', '/api/team/sync'", "'POST', '/api/team/share'"):
+        assert route in team
+    assert "if (owner) return `${team.prefix}${branch.slice(`shared/${owner}/`.length)}`;" in team

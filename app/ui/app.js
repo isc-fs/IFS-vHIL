@@ -192,6 +192,46 @@ listen("done", (e) => {
   refresh();
 });
 
+// Team sharing: the GitHub account the team store shares as (`vhil login`,
+// GitHub's device flow). Signing in prints the code to enter on GitHub.
+let login = null;
+async function refreshAccount() {
+  login = await invoke("account").catch(() => null);
+  $("#account-status").textContent = login
+    ? `Signed in as ${login}: systems and tests you commit in the editor are shared with the team (its Team view).`
+    : "Sign in to share the systems and tests you make with the team. Teammates' work opens without it.";
+  $("#account-btn").textContent = login ? "Sign out" : "Sign in with GitHub";
+  $("#account-btn").disabled = Boolean(running);
+}
+$("#account-btn").onclick = () => runTask(login ? "logout" : "login");
+listen("log", (e) => {
+  const m = /^Open (\S+) and enter (\S+)$/.exec(e.payload.line);
+  if (!m) return;
+  const p = $("#account-code");
+  p.replaceChildren(`Enter ${m[2]} on GitHub (copied). `);
+  const btn = document.createElement("button");
+  btn.textContent = "Open GitHub";
+  btn.onclick = () => invoke("open_device_page");
+  p.append(btn);
+  p.hidden = false;
+  navigator.clipboard?.writeText(m[2]).catch(() => {});
+  invoke("open_device_page").catch(() => {});
+});
+listen("done", async (e) => {
+  if (e.payload.task !== "login" && e.payload.task !== "logout") return;
+  $("#account-code").hidden = true;
+  refreshAccount();
+  // A running vHIL got its account when it started: restart it to share.
+  if (e.payload.code === 0 && e.payload.task === "login" && await invoke("app_running")) {
+    const s = $("#open-status");
+    s.replaceChildren("Signed in. The open vHIL shares after a restart. ");
+    const btn = document.createElement("button");
+    btn.textContent = "Restart the vHIL";
+    btn.onclick = () => { s.textContent = ""; running = "ui"; render(); invoke("restart_app"); };
+    s.append(btn);
+  }
+});
+
 $("#open").onclick = openApp;
 $("#ws-save").onclick = async () => {
   try {
@@ -236,6 +276,14 @@ async function checkUpdate() {
 // After an update the app's own copy moves to the new release first.
 async function start() {
   await refresh();
+  refreshAccount();
+  // The menu's Sign in / Sign Out (main.rs show_setup_for).
+  const account = new URLSearchParams(location.search).get("account");
+  if ((account === "login" || account === "logout") && !running) {
+    history.replaceState(null, "", location.pathname + "?stay=1");
+    runTask(account);
+    return;
+  }
   if (info.managed && info.present && !info.synced && !running) runTask("workspace");
   checkUpdate();
 }

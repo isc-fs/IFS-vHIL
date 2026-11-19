@@ -50,6 +50,9 @@ the repository lives in WSL at `~/IFS-vHIL`, and a clone of your own must be
 a WSL path too (`/home/<you>/...`; `/mnt/c/...` works but is slow). WSL
 forwards the vHIL's `localhost:8080` to Windows.
 
+To share the systems and tests you make with the team, **Team sharing → Sign
+in with GitHub** ([docs/team-store.md](../docs/team-store.md)).
+
 ## Build
 
 Tauri 2 (Rust + the system web view), pinned in `src-tauri/Cargo.toml` and

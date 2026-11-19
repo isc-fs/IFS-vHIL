@@ -351,3 +351,14 @@ select.vhil-input option { padding: 2px var(--sp-2); }
   color: var(--fg); background: var(--bg-0); border: 1px solid var(--border-control);
   border-radius: var(--r-control); font: inherit;
 }
+
+/* Team (team.js): one teammate's shared branch per item, what it holds as
+   buttons that open it from there. */
+.vhil-team-item { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2) 0; border-bottom: 1px solid var(--line); }
+.vhil-team-head { display: flex; gap: var(--sp-2); align-items: baseline; font-size: var(--fs-dense); }
+.vhil-team-head .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vhil-team-when { margin-left: auto; font-size: var(--fs-small); }
+.vhil-team-open { display: flex; flex-wrap: wrap; gap: var(--sp-1); align-items: center; font-size: var(--fs-small); }
+.vhil-team-foot { display: flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-small); }
+.vhil-team-foot .vhil-btn { margin-left: auto; }
+.vhil-team-error { color: var(--status-warn); font-size: var(--fs-small); }

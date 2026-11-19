@@ -26,6 +26,9 @@ import {
     beginLive, clearReplay, endLive, loadRun, replay, runRecord, store as frames,
 } from './replay.js';
 import * as session from './session.js';
+import {
+    commitBranch, isMine, loadTeam, share, syncTeam, team,
+} from './team.js';
 import { recordedDoc } from './live.js';
 /* eslint-disable import/no-unresolved, import/extensions -- copied by the build */
 import {
@@ -409,7 +412,10 @@ export function open(id, {
         });
         ws.saved = signature(saveDataflow());
         if (s.exists) ws.savedYaml = (await previewYaml()).yaml;
-        ws.commit.branch = branch || ws.commit.branch || `feat/system-${id}-${today()}`;
+        // Signed in to the team store: your own shared/<you>/... branch,
+        // built on what was opened (a teammate's included: team.js).
+        ws.commit.branch = team.prefix ? commitBranch(id, branch, '', today())
+            : branch || ws.commit.branch || `feat/system-${id}-${today()}`;
         ws.commit.message = s.exists ? `feat(systems): update ${id}` : `feat(systems): add ${id}`;
         ws.pr.title = ws.commit.message;
         refreshDirty();
@@ -632,10 +638,26 @@ export function commit({ takeover = false } = {}) {
                 : `Scenario ${scen.name}: nothing to commit`);
             await loadScenarios();
             ws.commit.scenarioMessage = `test(scenarios): update ${ws.id}/${scen.name}`;
+            // eslint-disable-next-line no-use-before-define
+            await shareCommitted(sc.changed ? sc : out);
             return out || sc;
         }
+        // eslint-disable-next-line no-use-before-define
+        await shareCommitted(out);
         return out;
     });
+}
+
+/** After a commit on one of your shared/<you>/... branches, signed in: push
+ *  it, so the team sees it (vhil/server/team.py). The commit stays either way. */
+async function shareCommitted(out) {
+    if (!out?.changed || !team.can_share || !isMine(out.branch)) return;
+    try {
+        await share(out.branch);
+        say(`Shared ${out.branch} with the team`);
+    } catch (e) {
+        say(`Committed, but not shared: ${e.message}`, 'warning');
+    }
 }
 
 async function commitSystem({ takeover = false } = {}) {
@@ -1086,6 +1108,10 @@ export async function start() {
         ws.virtualMs = Number(config.run_virtual_ms);
         ws.systems = systems;
         ws.firmware = Object.fromEntries(firmware.map((f) => [f.id, f]));
+        // Who you are in the team store before a system opens (its commit
+        // branch), then teammates' work in the background.
+        await loadTeam();
+        syncTeam();
     } catch (e) {
         say(`The vHIL API did not answer: ${e.message}`, 'error');
         return;
