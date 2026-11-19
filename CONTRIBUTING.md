@@ -102,6 +102,7 @@ To step through firmware, use [GDB](docs/debugger.md).
 | You want to… | Look at |
 |---|---|
 | add a board or a chip | [`docs/development/adding-a-board.md`](docs/development/adding-a-board.md) |
+| add a part (a sensor on a bus) | [`docs/development/adding-a-part.md`](docs/development/adding-a-part.md) (`python -m vhil.part new`) |
 | add a device model (sensor, transceiver) | `models/renode/*.cs` + `catalog/models/*.yaml`, step 3 of that guide |
 | wire boards into a system | `systems/*.yaml`; [`CLAUDE.md` "Systems are data"](CLAUDE.md#systems-are-data) |
 | understand the CAN bus model | [`docs/can-bus.md`](docs/can-bus.md) |
