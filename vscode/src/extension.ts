@@ -35,6 +35,7 @@ import { TRACE_VIEW, TracePanel } from "./tracePanel";
 import {
   addressError, busError, partArgs, partFiles, partIdError, pinError, Protocol, PROTOCOLS, whoAmIError,
 } from "./part";
+import { compareUrl, SavedBranch, systemsIn, unpushed } from "./branches";
 import { newSystemError, Row, rows } from "./systemsView";
 import { latestUrl, newer, parseLatest } from "./update";
 import { SystemsView } from "./systemsTree";
@@ -351,6 +352,8 @@ class Vhil implements vscode.Disposable {
   private editorWait: Promise<void> | undefined;
   private checking: Promise<void> | undefined;
   private systems: SystemInfo[] = [];
+  /** The editor's commits in the extension's checkout that aren't pushed (firmware repositories). */
+  private branches: SavedBranch[] = [];
   // A test's bus trace (.trace.jsonl, absolute) and its failure snapshots.
   private readonly traces = new Map<string, string>();
   private readonly snapshots = new Map<string, Snapshot[]>();
@@ -426,6 +429,7 @@ class Vhil implements vscode.Disposable {
       }),
       command("vhil.newSystem", () => this.newSystem()),
       command("vhil.newPart", () => this.newPart()),
+      command("vhil.pushSystemBranch", (branch?: string) => this.pushBranch(branch)),
       command("vhil.openSystemYaml", async (item?: Row | string) => {
         const id = systemOf(item) ?? await this.pickSystem("Open which system file?");
         if (id) await vscode.window.showTextDocument(vscode.Uri.file(path.join(this.repo, "systems", `${id}.yaml`)));
@@ -658,6 +662,7 @@ class Vhil implements vscode.Disposable {
     this.updateView();
     this.settle();
     const editor = editorAnswers(this.editorUrl);
+    void this.readBranches();
     if (this.local) {
       const status = await git(this.local.dir, ["status", "--porcelain"]);
       this.dirty = status.ok && !!status.out.trim();
@@ -1438,9 +1443,12 @@ class Vhil implements vscode.Disposable {
   /** What the editor tab's relay passes on from the framed editor. */
   private async editorMessage(panel: vscode.WebviewPanel, m: unknown) {
     if (!m || typeof m !== "object" || panel !== this.editorPanel) return;
-    const msg = m as { type?: string; url?: unknown };
+    const msg = m as { type?: string; url?: unknown; system?: unknown; branch?: unknown };
     if (msg.type === "vhil.ready") {
       this.editorHandshake = true;
+    } else if (msg.type === "vhil.saved" && typeof msg.system === "string" && typeof msg.branch === "string"
+               && /^[\w./-]+$/.test(msg.branch) && !msg.branch.startsWith("-")) {
+      await this.saved(msg.system, msg.branch);
     } else if (msg.type === "vhil.openInBrowser") {
       await vscode.commands.executeCommand("vhil.openEditorInBrowser");
     } else if (msg.type === "vhil.openExternal" && typeof msg.url === "string") {
@@ -1530,7 +1538,61 @@ class Vhil implements vscode.Disposable {
   private updateView() {
     this.systemsView.update(rows(this.mySystems(),
       { dockerUp: this.dockerUp, editorUp: this.editorUp, context: this.config().context,
-        baseState: this.baseState, editorState: this.editorState }, !this.local));
+        baseState: this.baseState, editorState: this.editorState }, !this.local, this.branches));
+  }
+
+  /** The checkout's unpushed system branches, into the Systems view (firmware repositories only). */
+  private async readBranches() {
+    if (!this.local) return;
+    const [refs, current] = await Promise.all([
+      git(this.repo, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes/origin"]),
+      git(this.repo, ["symbolic-ref", "-q", "--short", "HEAD"]),
+    ]);
+    if (!refs.ok) return;
+    const names = unpushed(refs.out, current.ok ? current.out.trim() : "");
+    this.branches = await Promise.all(names.map(async (branch) => {
+      const files = await git(this.repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", `refs/heads/${branch}`]);
+      return { branch, systems: files.ok ? systemsIn(files.out) : [] };
+    }));
+    this.updateView();
+  }
+
+  /**
+   * Push a branch the editor committed, with the host's git and credentials
+   * (the editor's server has none unless VHIL_GITHUB_TOKEN is set), then open
+   * GitHub's page for its pull request into the vHIL ref.
+   */
+  private async pushBranch(branch?: string) {
+    const name = branch ?? (await vscode.window.showQuickPick(this.branches.map((b) => ({
+      label: b.branch, description: b.systems.join(", "),
+    })), { title: "vHIL: push which system branch?" }))?.label;
+    if (!name) return;
+    const r = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `vHIL: pushing ${name}` },
+      () => git(this.repo, ["push", "origin", `refs/heads/${name}:refs/heads/${name}`], 120000));
+    // The checkout fetches its one ref, so a push records no remote-tracking ref of its own.
+    if (r.ok) await git(this.repo, ["update-ref", `refs/remotes/origin/${name}`, `refs/heads/${name}`]);
+    await this.readBranches();
+    if (!r.ok) {
+      void vscode.window.showErrorMessage(`vHIL: couldn't push ${name}: ${r.out.trim().split("\n").slice(-3).join(" ")}`);
+      return;
+    }
+    const remote = (await git(this.repo, ["remote", "get-url", "origin"])).out;
+    const url = compareUrl(remote, vhilRepo().ref, name);
+    if (url) await vscode.env.openExternal(vscode.Uri.parse(url, true));
+    else void vscode.window.showInformationMessage(`vHIL: pushed ${name}: open its pull request on ${remote.trim()}.`);
+  }
+
+  /** The editor committed `system` on `branch`: offer to push it if no remote has it. */
+  private async saved(system: string, branch: string) {
+    await this.readBranches();
+    const refs = await git(this.repo, ["for-each-ref", "--format=%(refname) %(objectname)",
+      `refs/heads/${branch}`, `refs/remotes/origin/${branch}`]);
+    if (!refs.ok || !unpushed(refs.out, "").includes(branch)) return;
+    const where = this.local ? "in the vHIL checkout VS Code keeps for this repository" : "in your vHIL checkout";
+    const a = await vscode.window.showInformationMessage(
+      `vHIL: ${system} is committed on ${branch} ${where}, on no remote yet.`, "Push and open a PR");
+    if (a) await this.pushBranch(branch);
   }
 
   /** A new system: its id, then the editor on an empty canvas (?new=1); saved by its Commit…. */

@@ -744,6 +744,12 @@ from `git archive 04613679` except as listed below.
     drops "(none)" (`NO_FIRMWARE`). The backend offers such a board only
     firmware no board of another platform claims (`vhil/editor.py`
     `firmware_for`), so the SensorHub isn't offered the MainLite's.
+35. **A commit tells VS Code, which pushes it.** Framed by VS Code with no
+    GitHub credentials on the server (`can_open_pr` false), a commit posts
+    `{type: 'vhil.saved', system, branch}` (`vhil/workspace.js`): the
+    extension offers to push the branch with the host's git and open its
+    pull request, and lists unpushed ones in its view. The PR dialog says
+    so instead of "by hand".
 
 ## Left for later
 

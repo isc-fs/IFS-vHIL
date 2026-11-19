@@ -296,3 +296,16 @@ def test_the_debug_tab():
         t = (VHIL / vue).read_text().split("<script>")[0]
         assert " style=" not in t and ":style" not in t and "v-html" not in t, vue
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", (VHIL / "debug.css").read_text())
+
+
+def test_a_commit_tells_vs_code_so_it_can_push_the_branch():
+    """Framed by VS Code with no credentials on the server, a commit posts
+    vhil.saved (vscode/src/extension.ts pushes the branch with the host's
+    git), and the PR dialog says so instead of 'by hand'."""
+    ws = (VHIL / "workspace.js").read_text()
+    assert ("if (framed && !ws.config.can_open_pr) tellVsCode({ type: 'vhil.saved', "
+            "system: ws.id, branch: out.branch });") in ws
+    dialogs = (VHIL / "VhilDialogs.vue").read_text()
+    assert '<p v-if="!ws.config.can_open_pr && framed" class="vhil-note">' in dialogs
+    ext = (REPO / "vscode/src/extension.ts").read_text()
+    assert 'msg.type === "vhil.saved"' in ext
