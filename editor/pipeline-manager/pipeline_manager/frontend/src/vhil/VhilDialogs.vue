@@ -78,7 +78,12 @@ them.
             <label>Body
                 <textarea v-model="ws.pr.body" class="vhil-input" rows="4" />
             </label>
-            <p v-if="!ws.config.can_open_pr" class="vhil-note">
+            <p v-if="!ws.config.can_open_pr && framed" class="vhil-note">
+                No GitHub credentials on the server: VS Code pushes a committed branch with
+                your git and opens its pull request (its notification, or the branch in the
+                vHIL view).
+            </p>
+            <p v-else-if="!ws.config.can_open_pr" class="vhil-note">
                 No GitHub credentials on the server (VHIL_GITHUB_TOKEN or the GitHub App):
                 committed branches stay in the workspace. Push and open the PR by hand.
             </p>
@@ -197,7 +202,7 @@ import {
     computed, defineComponent, ref, watch,
 } from 'vue';
 import {
-    ws, answer, check, commit, externalLink, loadTests, openPr, problemCount, runPytest,
+    ws, answer, check, commit, externalLink, framed, loadTests, openPr, problemCount, runPytest,
     saveSession,
 } from './workspace.js';
 import { replay } from './replay.js';
@@ -270,6 +275,7 @@ export default defineComponent({
             askText,
             answer,
             externalLink,
+            framed,
             saveDlg,
             saveName,
             doSave,
