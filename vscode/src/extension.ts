@@ -29,6 +29,7 @@ import { boardsOf as debugBoards, debugConfig, entryBreakpoint, Ready } from "./
 import {
   barOf, DebuggerHealth, findings, Fix, GROUP, groupId, holdBack, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
 } from "./status";
+import { judge, parseStack, StackInfo, stackId } from "./stack";
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems, webPort } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
 import { TRACE_VIEW, TracePanel } from "./tracePanel";
@@ -439,7 +440,7 @@ class Vhil implements vscode.Disposable {
         const url = await vscode.env.asExternalUri(vscode.Uri.parse(this.editorPage));
         await vscode.env.openExternal(url);
       }),
-      command("vhil.stopEditor", () => this.editorTask?.terminate()),
+      command("vhil.stopEditor", () => this.stopStack(true)),
       command("vhil.tools", () => this.tools()),
       // From the Testing panel (a test item), or a failure's link (its id).
       command("vhil.showTrace", (item?: vscode.TestItem | string) => {
@@ -477,6 +478,7 @@ class Vhil implements vscode.Disposable {
       firmwareRefs: c.get<string>("firmwareRefs", ""),
       cpus: c.get<number>("cpus", 0),
       pytestArgs: c.get<string[]>("pytestArgs", []),
+      webPort: c.get<number>("webPort", 0),
     };
   }
 
@@ -489,14 +491,20 @@ class Vhil implements vscode.Disposable {
     if (c.cpus > 0) env.VHIL_DOCKER_CPUS = String(c.cpus);
     // The script names its context colima-<profile>: a context set here names the profile `vm` starts.
     if (startsVm(c.context)) env.VHIL_COLIMA_PROFILE = c.context.slice("colima-".length);
-    if (this.local) env.FW_LOCAL = `${this.local.firmware.id}=${this.local.dir}`;
+    if (this.local) {
+      env.FW_LOCAL = `${this.local.firmware.id}=${this.local.dir}`;
+      // A stack per firmware repository over the one checkout (stack.ts).
+      env.VHIL_STACK_ID = stackId(this.local.dir);
+    }
     env.VHIL_WEB_PORT = String(this.webPort);
     return env;
   }
 
-  /** The web app's port: this checkout's stack (webPort). */
+  /** The web app's port: the vhil.webPort setting, else this stack's own (webPort). */
   private get webPort(): number {
-    return webPort(this.repo, !!this.local, process.env.VHIL_WEB_PORT);
+    const set = this.config().webPort;
+    return webPort(this.local?.dir ?? this.repo, !!this.local,
+                   set > 0 ? String(set) : process.env.VHIL_WEB_PORT);
   }
 
   /** The system editor's page, behind this checkout's proxy. */
@@ -1483,6 +1491,11 @@ class Vhil implements vscode.Disposable {
     if (!panel) return;
     const open = () => panel === this.editorPanel;
     panel.webview.html = editorHtml(undefined, "Starting the system editor…");
+    const why = await this.ensureOwnStack();
+    if (why) {
+      if (open()) panel.webview.html = editorHtml(undefined, why);
+      return;
+    }
     if (!(await editorAnswers(this.editorUrl))) {
       if (!this.editorTask || !this.editorEnded) {
         const t = this.startTask("System editor", ["editor"]);
@@ -1509,6 +1522,68 @@ class Vhil implements vscode.Disposable {
       }
     }
     if (open()) await this.frameEditor(panel);
+  }
+
+  /** vhil-docker.sh `stack`: this checkout's project and who holds its port. */
+  private async stackInfo(): Promise<StackInfo | undefined> {
+    let out = "";
+    const job = this.script(["stack"], this.env(), (t) => { out += t; });
+    return (await job.done) === 0 ? parseStack(out) : undefined;
+  }
+
+  /**
+   * Make the port this checkout's stack, on this checkout's code, before
+   * framing it: another stack on the port is stopped only if you say so; one
+   * of this checkout's still on older code (after a pull, a switch, Update
+   * vHIL) is restarted. Returns why not to frame, else undefined.
+   */
+  private async ensureOwnStack(): Promise<string | undefined> {
+    const info = await this.stackInfo();
+    if (!info) return undefined; // a checkout without the verb: as before
+    const health = await fetch(`http://localhost:${info.port}/api/health`, { signal: AbortSignal.timeout(2000) })
+      .then((r) => (r.ok ? r.json() as Promise<{ started_ref?: string }> : undefined), () => undefined);
+    const head = await git(this.repo, ["rev-parse", "HEAD"]);
+    const v = judge(info, health?.started_ref, head.ok ? head.out.trim() : "");
+    if (v.kind === "foreign") {
+      const stop = "Stop it and start this one";
+      const a = await vscode.window.showWarningMessage(
+        `vHIL: port ${info.port} is held by another vHIL (${v.owner}), not this checkout's. ` +
+        "Stop it, or set vhil.webPort to run this one beside it.", stop, "Settings");
+      if (a === "Settings") void vscode.commands.executeCommand("workbench.action.openSettings", "vhil.webPort");
+      if (a !== stop) return `Port ${info.port} is held by another vHIL (${v.owner}). Stop it, or set vhil.webPort.`;
+      this.log.appendLine(`stopping ${v.owner}, which held port ${info.port}`);
+      const code = await new Promise<number>((resolve) => cp.execFile("docker",
+        ["--context", this.config().context, "compose", "-p", v.owner, "down"],
+        (err) => resolve(err ? 1 : 0)));
+      if (code !== 0) return `Stopping ${v.owner} failed: see the vHIL output.`;
+    } else if (v.kind === "stale") {
+      void vscode.window.showInformationMessage(
+        `vHIL: the running vHIL started at ${v.started.slice(0, 7)}, this checkout is at ` +
+        `${v.head.slice(0, 7)}: restarting it on the new code.`);
+      await this.stopStack(false);
+    }
+    return undefined;
+  }
+
+  /**
+   * Stop this checkout's stack: vhil-docker.sh down (vhil stop), whoever
+   * started it (this window, the CLI, the desktop app). `report` says so in
+   * the editor tab and a notification (the Stop command).
+   */
+  private async stopStack(report: boolean) {
+    this.editorTask?.terminate();
+    this.editorTask = undefined;
+    this.editorEnded = undefined;
+    this.editorReady = false;
+    let out = "";
+    const code = await this.script(["down"], this.env(), (t) => { out += t; }).done;
+    if (out.trim()) this.log.append(out);
+    this.editorUp = false;
+    if (!report) return;
+    if (this.editorPanel) this.editorPanel.webview.html = editorHtml(undefined, "The vHIL is stopped: Open the system editor to start it again.");
+    if (code === 0) void vscode.window.showInformationMessage("vHIL: stopped.");
+    else void vscode.window.showErrorMessage(`vHIL: stopping failed (exit ${code}): see the vHIL output.`);
+    void this.refresh();
   }
 
   /** Frame the editor at editorPage: through asExternalUri, so a remote window reaches it through a forwarded port. */
@@ -1741,6 +1816,11 @@ class Vhil implements vscode.Disposable {
     if ((await updateCheckout(this.context, this.repo, this.env(), (l) => this.log.appendLine(l))).ok) {
       this.readSystems();
       await this.refresh();
+      // An open editor tab moves to the new code (ensureOwnStack restarts it).
+      if (this.editorPanel) {
+        this.editorReady = false;
+        void this.waitForEditor();
+      }
     }
   }
 

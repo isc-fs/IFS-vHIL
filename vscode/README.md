@@ -122,9 +122,10 @@ Set up / Retry**, to try again.
   and **Run its scenarios**. **+** makes a new system: name it, then place
   boards and wire buses on the editor's empty canvas and save it with the
   editor's **Commit…** (a branch and PR on IFS-vHIL, from a firmware
-  repository too). With no GitHub token on the editor's server (the usual
-  case), VS Code offers to push the committed branch with your git and opens
-  its pull request on GitHub; in a firmware repository, a branch committed
+  repository too). Signed in to GitHub (the editor's Team view, the desktop
+  app or `vhil login`), the editor's server pushes and opens the pull
+  request itself; signed out, VS Code offers to push the committed branch
+  with your git and opens its pull request on GitHub; in a firmware repository, a branch committed
   but not pushed stays listed in the view (**Push and open a pull
   request**), since the checkout it lives in is VS Code's own. **Tools…** at the bottom in the vHIL repository.
 - **Run on save**: the Testing panel's continuous run (the eye icon) runs
@@ -154,9 +155,16 @@ Set up / Retry**, to try again.
   included, before each Run, Live or pytest run; off, the catalogue's or
   the board's refs.
 - **vHIL: Open the system editor** opens it in a tab, started if needed
-  (on localhost:8080 for your own vHIL checkout, `VHIL_WEB_PORT` if set; in
-  a firmware repository the extension's checkout has a port of its own, so
-  its editor runs beside yours). The tab waits while its terminal runs, and
+  (on localhost:8080 for your own vHIL checkout, the `vhil.webPort` setting
+  or `VHIL_WEB_PORT` if set; each firmware repository gets a vHIL and a port
+  of its own, so its editor runs beside yours and builds its own working
+  tree). It frames only this checkout's vHIL, on this checkout's code: if
+  another vHIL holds the port (the desktop app's, another clone's) it asks
+  before stopping it, and one of this checkout's started at an older commit
+  (after a pull, a switch or **Update vHIL**) is restarted first
+  (`vhil-docker.sh stack`, `/api/health`'s `started_ref`).
+  **vHIL: Stop the vHIL** stops its containers (`vhil stop`), whoever
+  started them. The tab waits while its terminal runs, and
   says so if it exits; Retry starts it again. Opening another system in an open tab asks the editor
   to switch, or, with an editor that can't, asks before reloading it. The
   tab's **Open in the browser** button opens the same page outside VS Code,
