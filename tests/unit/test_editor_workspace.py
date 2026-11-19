@@ -309,3 +309,13 @@ def test_a_commit_tells_vs_code_so_it_can_push_the_branch():
     assert '<p v-if="!ws.config.can_open_pr && framed" class="vhil-note">' in dialogs
     ext = (REPO / "vscode/src/extension.ts").read_text()
     assert 'msg.type === "vhil.saved"' in ext
+
+
+def test_runs_build_the_working_tree_when_the_server_has_one():
+    """config.local_firmware (vhil/server/systems_write.py) shows the
+    top bar's <id>@local toggle; on, Run, Live and pytest send local."""
+    ws = (VHIL / "workspace.js").read_text()
+    assert "if (ws.useLocal && ws.config.local_firmware?.length) body.local = true;" in ws
+    assert ws.count("withLocal(") == 4      # the helper, Run, Live, pytest
+    bar = (VHIL / "VhilTopBar.vue").read_text()
+    assert '<input v-model="ws.useLocal" type="checkbox" :disabled="live" />' in bar
