@@ -362,7 +362,7 @@ in_container() {
         ${debug_args[@]+"${debug_args[@]}"} \
         ${cpu_args[@]+"${cpu_args[@]}"} ${src_args[@]+"${src_args[@]}"} \
         -v "$repo:/work" ${git_args[@]+"${git_args[@]}"} -v vhil-data:/vhil \
-        -e FW_SOURCES="$fw_sources" -e LAST_PER_BOARD="$last_per_board" -e FW_LOCAL_ONLY="${FW_LOCAL_ONLY:-0}" \
+        -e FW_SOURCES="$fw_sources" -e FW_LOCAL_ONLY="${FW_LOCAL_ONLY:-0}" \
         -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" \
         -e VHIL_SYSTEM="${VHIL_SYSTEM:-}" -e VHIL_DUT="${VHIL_DUT:-ecu}" \
         ${VHIL_FAST_FORWARD:+-e VHIL_FAST_FORWARD="$VHIL_FAST_FORWARD"} \
@@ -406,7 +406,9 @@ status() {
         fi
     done
     echo "clean=$clean"
-    if [ "$state" = up ] && [ "$base_st" = local ]; then
+    # Only an existing volume: `docker run -v` would create it.
+    if [ "$state" = up ] && [ "$base_st" = local ] \
+        && "${docker[@]}" volume inspect vhil-data >/dev/null 2>&1; then
         { "${docker[@]}" run --rm -v vhil-data:/vhil "$base_image:$base" \
             cat /vhil/fw/built.txt 2>/dev/null || true; } \
             | awk -F= "$last_per_board" | sed 's/^/built=/'
@@ -431,10 +433,6 @@ fw)
         for s in "$@"; do
             python -m vhil.system build "systems/$s.yaml" --workdir /vhil/fw "${refs[@]}" \
                 | tee -a /vhil/fw/built.txt
-            # Only the last line per board counts (elf): keep just those, so
-            # the file stays small. Atomically: a reader never sees it half written.
-            t=$(mktemp /vhil/fw/built.txt.XXXXXX)
-            awk -F= "$LAST_PER_BOARD" /vhil/fw/built.txt > "$t" && mv "$t" /vhil/fw/built.txt
         done' "$@" ;;
 unit)
     in_container "$prelude"'

@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts/vhil-docker.sh"
 
 # The stub: `info` and `image inspect` answer per $STUB_UP / $STUB_LOCAL,
-# `manifest inspect` finds only what $STUB_PUBLISHED names, `run` prints
+# `volume inspect` per $STUB_VOLUME, `manifest inspect` finds only what $STUB_PUBLISHED names, `run` prints
 # $STUB_BUILT; anything else fails loudly.
 STUB = r"""#!/bin/sh
 echo "$*" >> "$STUB_LOG"
@@ -20,6 +20,7 @@ echo "$*" >> "$STUB_LOG"
 case "$1 $2" in
 "info "*) [ "$STUB_UP" = 1 ] ;;
 "image inspect") [ "$STUB_LOCAL" = 1 ] ;;
+"volume inspect") [ "$STUB_VOLUME" = 1 ] ;;
 "manifest inspect")
     case " $STUB_PUBLISHED " in *" ${3##*/} "*) exit 0 ;; esac
     echo "manifest unknown" >&2; exit 1 ;;
@@ -46,7 +47,7 @@ def status(tmp_path, path=None, **stub):
     env = {**os.environ, "PATH": path or f"{bindir}:{os.environ['PATH']}",
            "STUB_LOG": str(log), "VHIL_DOCKER_CONTEXT": "stub",
            "XDG_CACHE_HOME": str(tmp_path / "cache"),
-           "STUB_UP": "0", "STUB_LOCAL": "0", "STUB_PUBLISHED": "", "STUB_BUILT": "",
+           "STUB_UP": "0", "STUB_LOCAL": "0", "STUB_VOLUME": "1", "STUB_PUBLISHED": "", "STUB_BUILT": "",
            **stub}
     r = subprocess.run(["bash", str(SCRIPT), "status"], env=env,
                        capture_output=True, text=True, timeout=60)
@@ -89,6 +90,16 @@ def test_a_local_base_lists_the_last_build_per_board(tmp_path):
     assert out == ["docker=up", f"base={k['base']} base_state=local",
                    f"editor={k['editor']} editor_state=local", f"clean={k['clean']}",
                    "built=ecu=/vhil/fw/b/ecu.elf", "built=ams=/vhil/fw/a/ams.elf"]
+
+
+def test_no_data_volume_starts_no_container(tmp_path):
+    # `docker run -v vhil-data:...` would create the volume: status must not.
+    k = _keys_or_skip()
+    r, out, calls = status(tmp_path, STUB_UP="1", STUB_LOCAL="1", STUB_VOLUME="0",
+                           STUB_BUILT=r"ecu=/vhil/fw/a/ecu.elf\n")
+    assert r.returncode == 0, r.stderr
+    assert out[-1] == f"clean={k['clean']}"
+    assert not any(" run " in f" {c} " for c in calls), calls
 
 
 def test_no_docker_cli(tmp_path):
