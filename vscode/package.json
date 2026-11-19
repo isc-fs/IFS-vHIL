@@ -23,8 +23,13 @@
   "contributes": {
     "commands": [
       {
+        "command": "vhil.setup",
+        "title": "Set up / Retry",
+        "category": "vHIL"
+      },
+      {
         "command": "vhil.diagnose",
-        "title": "Diagnose (Docker, images, firmware)",
+        "title": "Diagnose (Docker, images, firmware, debugger)",
         "category": "vHIL",
         "icon": "$(pulse)"
       },

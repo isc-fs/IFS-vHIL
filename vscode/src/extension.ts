@@ -19,14 +19,16 @@ import * as path from "path";
 import * as vscode from "vscode";
 
 import {
-  builtFirmware, collectArgs, dockerContext, fileOf, Item, Job, labelOf, parseLines, plan,
-  Record, runArgs, startsVm, SUITES,
+  Bp, builtLines, clip, collectArgs, debugStops, dockerContext, fileOf, FIRMWARE_SAVE_GLOB, ignoredSave, Item, Job,
+  labelOf, parseLines, plan, Record, remapItems, runArgs, startsVm, SUITES,
 } from "./plan";
 import {
   buildSystem, Firmware, firmwareForRepo, firmwareOf, repoSlug, systemsOf, testRuns,
 } from "./firmware";
 import { boardsOf as debugBoards, debugConfig, Ready } from "./debug";
-import { barOf, findings, Fix, GROUP, groupId, Phase, scenarioSystem } from "./status";
+import {
+  barOf, DebuggerHealth, findings, Fix, GROUP, groupId, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
+} from "./status";
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
 import { TRACE_VIEW, TracePanel } from "./tracePanel";
@@ -40,23 +42,69 @@ const OUT_DIR = "results/vscode";
 const NEEDED_FW = ["ecu", "ams", "ecu.bootloader"];
 const EDITOR_URL = "http://localhost:8080/editor/";
 
+let current: Vhil | undefined;
+// "vHIL: not set up": a firmware repository (a top-level .ioc) whose set-up failed, and why.
+let notSetUp: vscode.StatusBarItem | undefined;
+
 export async function activate(context: vscode.ExtensionContext) {
+  // Contributed without vhil.active: it is how a failed set-up is retried.
+  context.subscriptions.push(vscode.commands.registerCommand("vhil.setup", () => setup(context, true)));
+  await setup(context, false);
+}
+
+/**
+ * Find what the window opened: the vHIL checkout, else a firmware repository
+ * the catalogue builds. A folder with a top-level .ioc (an STM32 project)
+ * that can't be set up says why in the status bar instead of staying silent.
+ */
+async function setup(context: vscode.ExtensionContext, retry: boolean) {
+  if (current) {
+    if (retry && current.isFirmwareRepo) await vscode.commands.executeCommand("vhil.updateVhil");
+    else if (retry) void vscode.window.showInformationMessage("vHIL: set up (this is the vHIL checkout).");
+    return;
+  }
   const folders = vscode.workspace.workspaceFolders ?? [];
   const own = folders.find((f) => fs.existsSync(path.join(f.uri.fsPath, SCRIPT)));
   if (own) {
     start(context, new Vhil(own.uri.fsPath, own, context));
     return;
   }
+  let why: string | undefined;
   for (const f of folders) {
-    const local = await firmwareRepo(context, f);
-    if (local) {
-      start(context, new Vhil(local.checkout, f, context, local));
+    const r = await firmwareRepo(context, f);
+    if ("local" in r) {
+      start(context, new Vhil(r.local.checkout, f, context, r.local));
       return;
     }
+    if (!why && hasIoc(f.uri.fsPath)) why = `${f.name}: ${r.why}`;
+  }
+  if (!why) {
+    if (retry) void vscode.window.showInformationMessage("vHIL: no vHIL checkout or STM32 firmware repository open.");
+    return;
+  }
+  if (!notSetUp) {
+    notSetUp = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+    notSetUp.text = "$(warning) vHIL: not set up";
+    notSetUp.command = "vhil.setup";
+    context.subscriptions.push(notSetUp);
+  }
+  notSetUp.tooltip = `${why}\nClick to retry (vHIL: Set up / Retry).`;
+  notSetUp.show();
+  if (retry) void vscode.window.showErrorMessage(`vHIL: not set up: ${why}`);
+}
+
+function hasIoc(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir).some((f) => f.endsWith(".ioc"));
+  } catch {
+    return false;
   }
 }
 
 function start(context: vscode.ExtensionContext, vhil: Vhil) {
+  current = vhil;
+  notSetUp?.dispose();
+  notSetUp = undefined;
   // What the palette offers: the maintainer tools in the vHIL repository,
   // updating the checkout in a firmware one.
   void vscode.commands.executeCommand("setContext", "vhil.active", true);
@@ -85,30 +133,46 @@ function vhilRepo(): { url: string; ref: string } {
 }
 
 /**
- * Whether `folder` is a firmware repository the catalogue builds. Its origin
- * must be on the vHIL's GitHub owner before anything is fetched; then the
- * extension's checkout is cloned (once) and its catalogue decides.
+ * Whether `folder` is a firmware repository the catalogue builds, else why
+ * not. Its `origin` (or, in a fork, `upstream`) must be on the vHIL's GitHub
+ * owner before anything is fetched; then the extension's checkout is cloned
+ * (once) and its catalogue decides.
  */
-async function firmwareRepo(context: vscode.ExtensionContext, folder: vscode.WorkspaceFolder): Promise<Local | undefined> {
+async function firmwareRepo(context: vscode.ExtensionContext,
+                            folder: vscode.WorkspaceFolder): Promise<{ local: Local } | { why: string }> {
   const dir = folder.uri.fsPath;
-  const origin = await git(dir, ["remote", "get-url", "origin"]);
-  const slug = origin.ok ? repoSlug(origin.out) : undefined;
   const owner = repoSlug(vhilRepo().url)?.split("/")[0];
-  if (!slug || !owner || slug.split("/")[0].toLowerCase() !== owner.toLowerCase()) return undefined;
+  const slugs: string[] = [];
+  for (const remote of ["origin", "upstream"]) {
+    const r = await git(dir, ["remote", "get-url", remote]);
+    const slug = r.ok ? repoSlug(r.out) : undefined;
+    if (slug) slugs.push(slug);
+  }
+  const ours = slugs.filter((s) => owner && s.split("/")[0].toLowerCase() === owner.toLowerCase());
+  if (!ours.length) {
+    return { why: slugs.length ? `${slugs.join(", ")} is not on ${owner} (origin or upstream)`
+                               : `no GitHub origin or upstream remote on ${owner}` };
+  }
   const checkout = path.join(context.globalStorageUri.fsPath, "IFS-vHIL");
-  if (!fs.existsSync(path.join(checkout, SCRIPT)) && !(await updateCheckout(context, checkout))) return undefined;
+  if (!fs.existsSync(path.join(checkout, SCRIPT))) {
+    const r = await updateCheckout(context, checkout);
+    if (!r.ok) return { why: `cloning the vHIL failed: ${r.error}` };
+  }
   const dirFw = path.join(checkout, "catalog", "firmware");
   const catalogue = fs.readdirSync(dirFw).filter((f) => f.endsWith(".yaml"))
     .map((f) => firmwareOf(fs.readFileSync(path.join(dirFw, f), "utf8")))
     .filter((f): f is Firmware => !!f);
-  const firmware = firmwareForRepo(catalogue, slug);
-  return firmware ? { firmware, dir, checkout } : undefined;
+  for (const slug of ours) {
+    const firmware = firmwareForRepo(catalogue, slug);
+    if (firmware) return { local: { firmware, dir, checkout } };
+  }
+  return { why: `${ours.join(", ")} is not in the vHIL's catalogue (catalog/firmware)` };
 }
 
 const UPDATED_KEY = "vhil.checkoutUpdated";
 
 /** Clone the extension's vHIL checkout, or bring it to the configured ref. */
-async function updateCheckout(context: vscode.ExtensionContext, checkout: string): Promise<boolean> {
+async function updateCheckout(context: vscode.ExtensionContext, checkout: string): Promise<{ ok: boolean; error?: string }> {
   const { url, ref } = vhilRepo();
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `vHIL: fetching ${repoSlug(url) ?? url}@${ref}` },
@@ -123,15 +187,27 @@ async function updateCheckout(context: vscode.ExtensionContext, checkout: string
       }
       if (!r.ok) {
         void vscode.window.showErrorMessage(`vHIL: couldn't fetch ${url}@${ref}: ${r.out.trim()}`);
-        return false;
+        return { ok: false, error: r.out.trim().split("\n")[0] };
       }
       await context.globalState.update(UPDATED_KEY, Date.now());
-      return true;
+      return { ok: true };
     });
 }
 
 
 export function deactivate() {}
+
+/** How a run is made: the job's extra environment, and who wants its TestRun (Debug Test). */
+interface RunOptions {
+  env?: { [key: string]: string };
+  onRun?: (run: vscode.TestRun) => void;
+}
+
+/**
+ * A firmware build that failed before the compiler ran: Docker or the image,
+ * not the working tree. Its tests didn't run, so they don't fail.
+ */
+const INFRA_FAILURE = /Cannot connect to the Docker daemon|error during connect|docker: command not found|pull access denied|manifest unknown|no space left on device|failed to (solve|pull)/i;
 
 /** What a test run counted, for the status bar. */
 interface Tally {
@@ -153,17 +229,30 @@ class Vhil implements vscode.Disposable {
   private refreshTimer: NodeJS.Timeout | undefined;
 
   private phase: Phase = { kind: "checking" };
-  private busy = false; // a run owns the status bar
+  private busy = 0; // runs that own the status bar (queued behind each other)
+  // Every run goes through this queue (the Run profile, the status bar,
+  // a system's scenarios, Debug Test, run on save): two at once would share
+  // results/vscode, the firmware build and the host's cores.
+  private queue: Promise<void> = Promise.resolve();
   private lastRequest: vscode.TestRunRequest | undefined;
   private dockerUp: boolean | undefined;
+  private dockerCli = true;
+  // `docker info` on the run path: at most once per 30 s.
+  private dockerAt = 0;
+  private baseState: ImageState | undefined;
+  private editorState: ImageState | undefined;
   private dirty = false;
   private built = new Map<string, string>();
   private editorUp = false;
   private editorTask: vscode.TaskExecution | undefined;
+  private editorEnded: Promise<number | undefined> | undefined;
   private editorPanel: vscode.WebviewPanel | undefined;
   /** The page the panel frames once the editor answers, and whether it does yet. */
   private editorPage = EDITOR_URL;
   private editorReady = false;
+  /** The framed editor said vhil.ready: it opens systems without a reload. */
+  private editorHandshake = false;
+  private editorWait: Promise<void> | undefined;
   private checking: Promise<void> | undefined;
   private systems: SystemInfo[] = [];
   // A test's bus trace (.trace.jsonl, absolute) and its failure snapshots.
@@ -218,7 +307,7 @@ class Vhil implements vscode.Disposable {
       systems.onDidChange(revalidate), systems.onDidCreate(revalidate),
       systems.onDidDelete((uri) => { reread(); this.systemProblems.delete(uri); }),
       vscode.tasks.onDidEndTaskProcess((e) => {
-        if (e.execution === this.editorTask) this.editorTask = undefined;
+        if (e.execution === this.editorTask) { this.editorTask = undefined; this.editorEnded = undefined; }
         if (e.execution.task.source === "vHIL") void this.checkStatus();
       }),
       vscode.workspace.onDidChangeConfiguration((e) => {
@@ -229,7 +318,7 @@ class Vhil implements vscode.Disposable {
       command("vhil.diagnose", () => this.diagnose()),
       command("vhil.refreshTests", () => this.refresh()),
       command("vhil.startVm", () => this.task("Start the Docker VM", ["vm"])),
-      command("vhil.pullImages", () => this.task("Pull images", ["pull"])),
+      command("vhil.pullImages", () => this.pullImages()),
       command("vhil.buildImages", () => this.task("Build images", ["image"])),
       command("vhil.buildFirmware", () => this.buildFirmware()),
       command("vhil.openEditor", () => this.openEditor()),
@@ -297,6 +386,8 @@ class Vhil implements vscode.Disposable {
     if (c.ifsHilRef) env.IFS_HIL_REF = c.ifsHilRef;
     if (c.firmwareRefs) env.FW_REFS = c.firmwareRefs;
     if (c.cpus > 0) env.VHIL_DOCKER_CPUS = String(c.cpus);
+    // The script names its context colima-<profile>: a context set here names the profile `vm` starts.
+    if (startsVm(c.context)) env.VHIL_COLIMA_PROFILE = c.context.slice("colima-".length);
     if (this.local) env.FW_LOCAL = `${this.local.firmware.id}=${this.local.dir}`;
     return env;
   }
@@ -313,7 +404,9 @@ class Vhil implements vscode.Disposable {
   /** Run vhil-docker.sh with `args`; `onData` gets its output as it comes. */
   private script(args: string[], env: NodeJS.ProcessEnv,
                  onData?: (text: string) => void): { done: Promise<number>; proc: cp.ChildProcess } {
-    const proc = cp.spawn(path.join(this.repo, SCRIPT), args, { cwd: this.repo, env });
+    // Its own process group: Cancel stops the script and every child it started.
+    const proc = cp.spawn(path.join(this.repo, SCRIPT), args,
+      { cwd: this.repo, env, detached: process.platform !== "win32" });
     const out = (b: Buffer) => onData?.(b.toString());
     proc.stdout.on("data", out);
     proc.stderr.on("data", out);
@@ -325,25 +418,59 @@ class Vhil implements vscode.Disposable {
   }
 
   /**
-   * A vhil-docker.sh command as a VS Code task: in the terminal panel, where
-   * it can be watched and stopped. Resolves with its exit code.
+   * Stop a job: SIGTERM to the script's process group, then `docker kill`
+   * its container every 500 ms until the script exits (docker run doesn't
+   * pass SIGTERM on to pytest, and the container may not exist yet).
    */
-  private async task(label: string, args: string[], extraEnv: { [key: string]: string } = {}): Promise<number | undefined> {
+  private stopJob(job: { done: Promise<number>; proc: cp.ChildProcess }, name: string) {
+    const pid = job.proc.pid;
+    try {
+      if (pid) process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM");
+    } catch {
+      // Already gone.
+    }
+    let closed = false;
+    void job.done.then(() => { closed = true; });
+    const kill = () => {
+      if (closed) return;
+      cp.execFile("docker", ["--context", this.config().context, "kill", name],
+        () => { if (!closed) setTimeout(kill, 500); });
+    };
+    kill();
+  }
+
+  /**
+   * A vhil-docker.sh command as a VS Code task: in the terminal panel, where
+   * it can be watched and stopped. `ended` resolves with its exit code.
+   */
+  private startTask(label: string, args: string[], extraEnv: { [key: string]: string } = {}):
+      { execution: Thenable<vscode.TaskExecution>; ended: Promise<number | undefined> } {
     const env = { ...this.overrides(), ...extraEnv };
     const t = new vscode.Task({ type: "vhil", args }, this.folder, label, "vHIL",
       new vscode.ShellExecution(`./${SCRIPT}`, args, { cwd: this.repo, env }));
     t.presentationOptions = { reveal: vscode.TaskRevealKind.Always, panel: vscode.TaskPanelKind.Dedicated, clear: true };
     let execution: vscode.TaskExecution | undefined;
-    const ended = new Promise<number | undefined>((resolve) => {
-      const sub = vscode.tasks.onDidEndTaskProcess((e) => {
-        if (e.execution !== execution) return;
-        sub.dispose();
-        resolve(e.exitCode);
-      });
+    let end!: (code: number | undefined) => void;
+    const ended = new Promise<number | undefined>((resolve) => { end = resolve; });
+    const sub = vscode.tasks.onDidEndTaskProcess((e) => {
+      if (!execution || e.execution !== execution) return;
+      sub.dispose();
+      end(e.exitCode);
     });
-    execution = await vscode.tasks.executeTask(t);
-    if (args[0] === "editor") this.editorTask = execution;
-    return ended;
+    const started = vscode.tasks.executeTask(t);
+    // A task that never starts has ended too, so nobody waits on it forever.
+    Promise.resolve(started).then((e) => { execution = e; }, () => { sub.dispose(); end(-1); });
+    return { execution: started, ended };
+  }
+
+  private async task(label: string, args: string[], extraEnv: { [key: string]: string } = {}): Promise<number | undefined> {
+    const t = this.startTask(label, args, extraEnv);
+    await t.execution;
+    return t.ended;
+  }
+
+  private pullImages() {
+    return this.task("Pull images", ["pull"]);
   }
 
   private outFile(name: string): { rel: string; abs: string } {
@@ -369,12 +496,16 @@ class Vhil implements vscode.Disposable {
   private idlePhase(): Phase {
     if (this.dockerUp === undefined) return { kind: "checking" };
     if (!this.dockerUp) return { kind: "down", context: this.config().context };
+    if (imagesNeeded(this.baseState, this.editorState)) {
+      return { kind: "images", base: this.baseState, editor: this.editorState };
+    }
     return { kind: "idle", firmware: this.local?.firmware.id, dirty: this.dirty, missing: this.missingFirmware() };
   }
 
   private async statusClick() {
     const action = barOf(this.phase).action;
     if (action === "diagnose") return this.diagnose();
+    if (action === "pullImages") return this.pullImages();
     if (action !== "run") return;
     // The last run again, else every listed test.
     const request = this.lastRequest ?? new vscode.TestRunRequest();
@@ -392,26 +523,47 @@ class Vhil implements vscode.Disposable {
     return this.checking;
   }
 
-  private async check() {
+  /**
+   * Whether Docker answers (`docker info`), and whether the docker command
+   * exists at all. Cheap: the run path asks only this, at most every 30 s.
+   */
+  private async dockerInfo(): Promise<boolean> {
     const { context } = this.config();
-    const [up, editor] = await Promise.all([
-      new Promise<boolean>((resolve) =>
-        cp.execFile("docker", ["--context", context, "info", "--format", "{{.ServerVersion}}"],
-          { timeout: 15000 }, (err) => resolve(!err))),
-      editorAnswers(),
-    ]);
-    this.dockerUp = up;
-    this.editorUp = editor;
+    const r = await new Promise<{ up: boolean; cli: boolean }>((resolve) =>
+      cp.execFile("docker", ["--context", context, "info", "--format", "{{.ServerVersion}}"],
+        { timeout: 15000 }, (err) => resolve({ up: !err, cli: (err as NodeJS.ErrnoException | null)?.code !== "ENOENT" })));
+    this.dockerUp = r.up;
+    this.dockerCli = r.cli;
+    this.dockerAt = r.up ? Date.now() : 0;
+    return r.up;
+  }
+
+  /**
+   * The whole state, in the background: Docker first (the view and the bar
+   * update as soon as it answers), then the editor, the working tree, and
+   * `vhil-docker.sh status` (image states, built firmware), which starts no
+   * container. A checkout whose script has no `status` keeps what it knew.
+   */
+  private async check() {
+    const up = await this.dockerInfo();
+    this.updateView();
+    if (!this.busy) this.setPhase(this.idlePhase());
+    const editor = editorAnswers();
     if (this.local) {
       const status = await git(this.local.dir, ["status", "--porcelain"]);
       this.dirty = status.ok && !!status.out.trim();
     }
     if (up) {
       let text = "";
-      const code = await this.script(["run", "sh", "-c", "cat /vhil/fw/built.txt 2>/dev/null || true"],
-        this.env(), (t) => { text += t; }).done;
-      this.built = builtFirmware(code === 0 ? text : "");
+      const code = await this.script(["status"], this.env(), (t) => { text += t; }).done;
+      const status = parseStatus(text);
+      if (status && !(code !== 0 && /usage/i.test(text))) {
+        this.baseState = status.baseState;
+        this.editorState = status.editorState;
+        this.built = status.built;
+      }
     }
+    this.editorUp = await editor;
     this.updateView();
     if (!this.busy) this.setPhase(this.idlePhase());
   }
@@ -420,49 +572,74 @@ class Vhil implements vscode.Disposable {
     return NEEDED_FW.filter((b) => !this.built.get(b));
   }
 
-  /** Each check with its fix: what replaces a status view. */
+  /** The C/C++ extension and the host's GDB, for Debug Test. */
+  private async debuggerHealth(): Promise<DebuggerHealth> {
+    const gdb = this.gdbPath();
+    const version = await new Promise<string | undefined>((resolve) =>
+      cp.execFile(gdb, ["--version"], { env: this.env(), timeout: 10000 },
+        (err, stdout) => resolve(err ? undefined : stdout.split("\n")[0].trim() || gdb)));
+    return { cpptools: !!vscode.extensions.getExtension("ms-vscode.cpptools"), gdb, version };
+  }
+
+  private gdbPath(): string {
+    return vscode.workspace.getConfiguration("vhil").get<string>("gdbPath", "") || "arm-none-eabi-gdb";
+  }
+
+  /**
+   * Each check with its fix: what replaces a status view. From the last
+   * check (only `docker info` is asked when nothing was checked yet); a
+   * fresh one runs in the background for next time.
+   */
   private async diagnose() {
-    await this.checkStatus();
+    if (this.dockerUp === undefined) await this.dockerInfo();
+    void this.checkStatus();
     const { context } = this.config();
     const list = findings({
-      context, startsVm: startsVm(context), dockerUp: !!this.dockerUp, built: this.built,
-      needed: NEEDED_FW, editorUp: this.editorUp,
+      context, startsVm: startsVm(context), dockerCli: this.dockerCli, dockerUp: !!this.dockerUp,
+      baseState: this.baseState, editorState: this.editorState, built: this.built,
+      needed: NEEDED_FW, editorUp: this.editorUp, debugger: await this.debuggerHealth(),
     });
     const fixes: { [f in Fix]: string } = {
       startVm: "Start the Docker VM", pullImages: "Pull the images", buildFirmware: "Build firmware",
-      openSettings: "Change the Docker context", openEditor: "Open the system editor",
+      openSettings: "Open the setting", openEditor: "Open the system editor",
     };
     const pick = await vscode.window.showQuickPick(list.map((f) => ({
       label: `$(${f.ok ? "pass" : "warning"}) ${f.label}`,
       description: f.detail,
-      detail: f.fix ? `Fix: ${fixes[f.fix]}` : undefined,
+      detail: f.fix ? `Fix: ${fixes[f.fix]}${f.setting ? ` (${f.setting})` : ""}` : undefined,
       fix: f.fix,
+      setting: f.setting,
     })), { title: "vHIL: diagnose", placeHolder: "Pick one to fix it" });
     switch (pick?.fix) {
       case "startVm": return this.task("Start the Docker VM", ["vm"]);
-      case "pullImages": return this.task("Pull images", ["pull"]);
+      case "pullImages": return this.pullImages();
       case "buildFirmware": return this.buildFirmware();
-      case "openSettings": return vscode.commands.executeCommand("workbench.action.openSettings", "vhil.dockerContext");
+      case "openSettings":
+        return vscode.commands.executeCommand("workbench.action.openSettings", pick.setting ?? "vhil.dockerContext");
       case "openEditor": return this.openEditor();
     }
   }
 
   /**
-   * Docker up before a run: the Colima VM is started here (vhil-docker.sh
-   * pulls the images and builds missing firmware itself); any other context
-   * is the user's to start. Listing tests on open (`start` false) only
-   * checks: the status bar then says Docker is down.
+   * Docker up before a run: only `docker info` (cached 30 s), never a
+   * container. The Colima VM is started here (vhil-docker.sh pulls the
+   * images and builds missing firmware itself); any other context is the
+   * user's to start. Listing tests on open (`start` false) only checks: the
+   * status bar then says Docker is down.
    */
   private async ensureDocker(start = true): Promise<boolean> {
-    await this.checkStatus();
-    if (this.dockerUp) return true;
-    if (!start) return false;
+    if (this.dockerUp && Date.now() - this.dockerAt < 30_000) return true;
+    if (await this.dockerInfo()) return true;
+    if (!start) {
+      if (!this.busy) this.setPhase(this.idlePhase());
+      return false;
+    }
     const { context } = this.config();
     if (startsVm(context)) {
       await this.task("Start the Docker VM", ["vm"]);
-      await this.checkStatus();
-      if (this.dockerUp) return true;
+      if (await this.dockerInfo()) return true;
     }
+    this.updateView();
     void vscode.window.showErrorMessage(`vHIL: Docker (context ${context}) doesn't answer.`, "Diagnose")
       .then((a) => { if (a) void this.diagnose(); });
     return false;
@@ -482,7 +659,9 @@ class Vhil implements vscode.Disposable {
 
   /** The listed tests of this checkout's commit, from the last listing: no 20 s wait on open. */
   private cacheKey(head: string): string {
-    return `vhil.tests:${this.repo}:${head}:${this.local?.firmware.id ?? ""}`;
+    // vhil.pytestArgs change what is listed (-m, -k): a listing is theirs too.
+    const args = JSON.stringify(this.config().pytestArgs);
+    return `vhil.tests:${this.repo}:${head}:${this.local?.firmware.id ?? ""}:${args}`;
   }
 
   private async head(): Promise<string> {
@@ -502,7 +681,7 @@ class Vhil implements vscode.Disposable {
     if (!(await this.ensureDocker(false))) return;
     const out = this.outFile("collect");
     const roots = SUITES.map((s) => s.root).filter((r) => !this.local || r !== "tests/unit");
-    const job = this.script(collectArgs(out.rel, roots), this.env(), (t) => this.log.append(t));
+    const job = this.script(collectArgs(out.rel, roots, this.config().pytestArgs), this.env(), (t) => this.log.append(t));
     const code = await vscode.window.withProgress(
       { location: { viewId: "workbench.view.testing" }, title: "vHIL: listing tests" },
       () => job.done);
@@ -581,17 +760,39 @@ class Vhil implements vscode.Disposable {
     return into;
   }
 
-  private async run(request: vscode.TestRunRequest, token: vscode.CancellationToken,
-                    extraEnv: { [key: string]: string } = {}) {
+  /**
+   * Run `request` after whatever run is queued before it: one run at a time.
+   * Resolves when this one has ended.
+   */
+  private run(request: vscode.TestRunRequest, token: vscode.CancellationToken, opts: RunOptions = {}): Promise<void> {
+    const mine = this.queue.then(() => this.runNow(request, token, opts));
+    this.queue = mine.catch((e) => { this.log.appendLine(`vHIL: a run failed: ${e}`); });
+    return mine;
+  }
+
+  /** The items of the current listing for `items` (a request made before a refresh). */
+  private remap(items: readonly vscode.TestItem[]): vscode.TestItem[] {
+    return remapItems(items.map((i) => i.id), this.byId);
+  }
+
+  private async runNow(request: vscode.TestRunRequest, token: vscode.CancellationToken, opts: RunOptions) {
+    if (token.isCancellationRequested) return;
     if (!this.byId.size) {
       if (!(await this.ensureDocker())) return;
       await this.refresh();
     }
-    if (!extraEnv.VHIL_DEBUG) this.lastRequest = request;
+    // The request's items may be from before a refresh (a rerun, a run that
+    // waited in the queue): this listing's, minus what is gone.
+    const include = request.include ? this.remap(request.include) : undefined;
+    if (request.include && !include?.length) return;
+    request = new vscode.TestRunRequest(include, request.exclude ? this.remap(request.exclude) : undefined,
+      request.profile);
+    if (!opts.env?.VHIL_DEBUG) this.lastRequest = request;
     const included = request.include ?? [...this.controller.items].map(([, i]) => i);
     const excluded = request.exclude ?? [];
     const excludedIds = new Set(excluded.flatMap((e) => this.leaves(e)).map((e) => e.id));
     const run = this.controller.createTestRun(request);
+    opts.onRun?.(run);
     const all = included.flatMap((i) => this.leaves(i)).filter((t) => !excludedIds.has(t.id));
     for (const t of all) run.enqueued(t);
 
@@ -600,31 +801,54 @@ class Vhil implements vscode.Disposable {
     const ids = included.flatMap((i) => i.id.startsWith(GROUP) ? this.leaves(i).map((l) => l.id) : [i.id]);
     const groups = plan(ids);
     const c = this.config();
-    this.busy = true;
+    // Whether the run tested anything: a job ran, or the working tree didn't
+    // compile. Docker down or a build that never got to the compiler is no
+    // result: the bar goes back to saying what's wrong.
+    const tested = { started: false };
+    const skipAll = (why: string) => {
+      run.appendOutput(`${why}\r\n`);
+      for (const t of all) run.skipped(t);
+      tally.skipped = all.length;
+    };
+    this.busy++;
     try {
       if (!(await this.ensureDocker())) {
-        for (const t of all) run.skipped(t);
+        skipAll(`vHIL: Docker (context ${c.context}) doesn't answer: nothing ran.`);
         return;
       }
       if (this.local && [...groups.keys()].some((j) => j !== "unit")) {
         this.setPhase({ kind: "building", firmware: `${this.local.firmware.id}@local` });
-        if (!(await this.buildLocal(run, tally, all, token))) return;
+        const built = await this.buildLocal(run, tally, all, token);
+        if (built === "failed") tested.started = true;
+        if (built === "infra") {
+          skipAll("vHIL: the firmware build didn't get to the compiler: nothing ran.");
+          void vscode.window.showErrorMessage(
+            `vHIL: building ${this.local.firmware.id}@local failed before compiling (see the test run's output).`,
+            "Diagnose").then((a) => { if (a) void this.diagnose(); });
+        }
+        if (built !== "ok") return;
       }
       this.progress(tally);
       for (const [job, jobIds] of groups) {
         if (token.isCancellationRequested) break;
         const mine = all.filter((t) => jobIds.some((id) => t.id === id || t.id.startsWith(id + "/") || t.id.startsWith(id + "::")));
         const deselect = [...excludedIds].filter((id) => jobIds.some((g) => id.startsWith(g + "/") || id.startsWith(g + "::")));
-        await this.runJob(run, tally, job, jobIds, deselect, mine, c.pytestArgs, c.context, token, extraEnv);
+        tested.started = true;
+        await this.runJob(run, tally, job, jobIds, deselect, mine, c.pytestArgs, token, opts.env);
       }
     } finally {
       run.end();
-      this.busy = false;
+      this.busy--;
       // The first failure's buses, in the panel, without taking focus.
       const failed = all.find((t) => tally.failed.has(t.id) && this.traces.has(t.id));
       if (failed) void this.tracePanel.show(this.traces.get(failed.id)!, labelOf(failed.id), false);
-      this.setPhase({ kind: "result", passed: tally.passed, failed: tally.failed.size, skipped: tally.skipped,
-                      cancelled: token.isCancellationRequested || undefined });
+      const cancelled = token.isCancellationRequested;
+      if (!tested.started && !cancelled) {
+        if (!this.busy) this.setPhase(this.idlePhase());
+      } else {
+        this.setPhase({ kind: "result", passed: tally.passed, failed: tally.failed.size, skipped: tally.skipped,
+                        cancelled: cancelled || undefined });
+      }
     }
   }
 
@@ -633,7 +857,7 @@ class Vhil implements vscode.Disposable {
   }
 
   private async runJob(run: vscode.TestRun, tally: Tally, job: Job, ids: string[], deselect: string[],
-                       tests: vscode.TestItem[], extra: string[], context: string,
+                       tests: vscode.TestItem[], extra: string[],
                        token: vscode.CancellationToken, extraEnv: { [key: string]: string } = {}) {
     const name = `vhil-vscode-${crypto.randomBytes(4).toString("hex")}`;
     const out = this.outFile(name);
@@ -645,10 +869,7 @@ class Vhil implements vscode.Disposable {
       text += t;
       write(t);
     });
-    const cancel = token.onCancellationRequested(() => {
-      // The container, not just the script: docker run doesn't pass SIGTERM on to pytest.
-      cp.execFile("docker", ["--context", context, "kill", name], () => proc.proc.kill());
-    });
+    const cancel = token.onCancellationRequested(() => this.stopJob(proc, name));
 
     const reported = new Set<string>();
     let offset = 0;
@@ -693,14 +914,16 @@ class Vhil implements vscode.Disposable {
 
   /**
    * Build the open working tree (FW_LOCAL, FW_LOCAL_ONLY) before a run, into
-   * the run's output. On failure every test of the run errors with the
-   * build's last lines.
+   * the run's output. A compile failure ("failed") errors every test of the
+   * run with the build's errors; a build that never got to the compiler
+   * (Docker, an image pull, the script itself: "infra") is the caller's to
+   * report as nothing ran.
    */
   private async buildLocal(run: vscode.TestRun, tally: Tally, tests: vscode.TestItem[],
-                           token: vscode.CancellationToken): Promise<boolean> {
+                           token: vscode.CancellationToken): Promise<"ok" | "failed" | "infra"> {
     const fw = this.local!.firmware.id;
     const system = buildSystem(this.systems, fw);
-    if (!system) return true;
+    if (!system) return "ok";
     // First run: what the sim and scenario jobs need besides this firmware,
     // from its refs, in the same build.
     const missing = this.missingFirmware().length > 0;
@@ -714,12 +937,11 @@ class Vhil implements vscode.Disposable {
     write(`$ FW_LOCAL=${fw}=${this.local!.dir} FW_LOCAL_ONLY=${only} ${SCRIPT} ${args.join(" ")}\n`);
     const name = `vhil-vscode-${crypto.randomBytes(4).toString("hex")}`;
     const proc = this.script(args, this.env({ FW_LOCAL_ONLY: only, VHIL_DOCKER_NAME: name }), write);
-    const cancel = token.onCancellationRequested(() => {
-      cp.execFile("docker", ["--context", this.config().context, "kill", name], () => proc.proc.kill());
-    });
+    const cancel = token.onCancellationRequested(() => this.stopJob(proc, name));
     const code = await proc.done;
     cancel.dispose();
-    void this.checkStatus();
+    // What it built, from the board=elf lines `fw` prints: no container to read built.txt.
+    for (const [board, elf] of builtLines(text)) this.built.set(board, elf);
     // The compiler's errors and warnings in Problems, at the working tree's lines.
     const diags = compilerDiagnostics(text, this.pathMap());
     this.problems.clear();
@@ -732,8 +954,9 @@ class Vhil implements vscode.Disposable {
       byFile.set(d.file, [...(byFile.get(d.file) ?? []), v]);
     }
     for (const [file, list] of byFile) this.problems.set(vscode.Uri.file(file), list);
-    if (code === 0) return true;
+    if (code === 0) return "ok";
     const errors = diags.filter((d) => d.severity === "error");
+    if (!errors.length && (code === -1 || INFRA_FAILURE.test(text))) return "infra";
     const why = errors.length
       ? new vscode.TestMessage(`Building ${fw} failed: ${errors.length} error${errors.length > 1 ? "s" : ""}, see Problems.\n\n` +
           `${path.relative(this.local!.dir, errors[0].file)}:${errors[0].line}: ${errors[0].message}`)
@@ -751,7 +974,7 @@ class Vhil implements vscode.Disposable {
         tally.failed.add(t.id);
       }
     }
-    return false;
+    return "failed";
   }
 
   private report(run: vscode.TestRun, tally: Tally, r: Record, reported: Set<string>) {
@@ -759,6 +982,10 @@ class Vhil implements vscode.Disposable {
       const t = this.byId.get(r.id);
       if (t) run.started(t);
       this.snapshots.delete(r.id);
+      // The last run's trace is not this run's: Show bus trace waits for the new one.
+      if (this.traces.delete(r.id)) {
+        void vscode.commands.executeCommand("setContext", "vhil.traced", [...this.traces.keys()]);
+      }
       return;
     }
     if (r.kind === "snapshot") {
@@ -810,6 +1037,11 @@ class Vhil implements vscode.Disposable {
       md.appendMarkdown(`\n[Show the bus trace](command:vhil.showTrace?${args})`);
       md.isTrusted = { enabledCommands: ["vhil.showTrace"] };
     }
+    // pytest's whole report last: the summary above is one line of it.
+    if (r.message && r.short) {
+      md.appendMarkdown("\n\n");
+      md.appendCodeblock(clip(r.message), "text");
+    }
     const msg = new vscode.TestMessage(md);
     const map = this.pathMap();
     msg.stackTrace = snaps.flatMap((s) => s.frames.map((f) => {
@@ -828,9 +1060,9 @@ class Vhil implements vscode.Disposable {
    * vHIL's), one run at a time, until it is turned off.
    */
   private async runOnSave(request: vscode.TestRunRequest, token: vscode.CancellationToken) {
-    const glob = this.local ? "**/*.{c,h,cpp,hpp,cc,s,S,ld,ioc}" : "{vhil,models,systems,catalog,tests}/**";
-    const watcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(this.local?.dir ?? this.repo, glob));
+    const glob = this.local ? FIRMWARE_SAVE_GLOB : "{vhil,models,systems,catalog,tests}/**";
+    const base = this.local?.dir ?? this.repo;
+    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(base, glob));
     let timer: NodeJS.Timeout | undefined;
     let running: Promise<void> | undefined;
     let again = false;
@@ -846,7 +1078,7 @@ class Vhil implements vscode.Disposable {
       });
     };
     const changed = (uri: vscode.Uri) => {
-      if (/[\\/](build|results|\.git|node_modules)[\\/]/.test(uri.fsPath)) return;
+      if (ignoredSave(base, uri.fsPath)) return;
       clearTimeout(timer);
       timer = setTimeout(go, 800);
     };
@@ -884,8 +1116,14 @@ class Vhil implements vscode.Disposable {
    * runs, and its result comes in as any run's.
    */
   private async debug(request: vscode.TestRunRequest, token: vscode.CancellationToken) {
+    // A checkout from before the debug hold would run the test straight through.
+    if (!fs.existsSync(path.join(this.repo, "vhil", "debugattach.py"))) {
+      void vscode.window.showErrorMessage("vHIL: This vHIL checkout can't hold a board for a debugger yet " +
+        "(needs the debug-hold change, PR #431). Update the checkout.");
+      return;
+    }
     if (!this.byId.size) await this.refresh();
-    const tests = (request.include ?? []).flatMap((i) => this.leaves(i));
+    const tests = (request.include ?? []).flatMap((i) => this.leaves(this.byId.get(i.id) ?? i));
     if (tests.length !== 1 || !tests[0].id.includes("::") || tests[0].id.startsWith("tests/unit/")) {
       void vscode.window.showErrorMessage("vHIL: debug one sim or scenario test at a time.");
       return;
@@ -897,54 +1135,103 @@ class Vhil implements vscode.Disposable {
       if (a) await vscode.commands.executeCommand("workbench.extensions.installExtension", "ms-vscode.cpptools");
       return;
     }
+    // The host's GDB before a run that would wait on it: else a held board waits for nobody.
+    const gdb = this.gdbPath();
+    const gdbError = await new Promise<string | undefined>((resolve) =>
+      cp.execFile(gdb, ["--version"], { env: this.env(), timeout: 10000 }, (err) => resolve(err ? `${err.message}` : undefined)));
+    if (gdbError) {
+      const a = await vscode.window.showErrorMessage(
+        `vHIL: ${gdb} doesn't run (${gdbError.split("\n")[0]}). Debug Test needs the host's arm-none-eabi-gdb.`,
+        "Open setting");
+      if (a) await vscode.commands.executeCommand("workbench.action.openSettings", "vhil.gdbPath");
+      return;
+    }
     const boards = debugBoards({ id: test.id, markers: test.tags.map((t) => t.id) }, this.local?.firmware.id);
+    if (!boards.length) {
+      void vscode.window.showErrorMessage("vHIL: This test runs no MainLite a debugger can hold.");
+      return;
+    }
     const board = boards.length > 1
       ? (await vscode.window.showQuickPick(boards, { title: "vHIL: debug which board?" }))
-      : boards[0] ?? (await vscode.window.showInputBox({ title: "vHIL: debug which board?", prompt: "ecu, ams or udv" }));
+      : boards[0];
     if (!board) return;
     const port = await freePort();
     const dir = path.join(this.repo, "results", "vscode", "debug");
     const readyFile = path.join(dir, "ready.json");
-    fs.rmSync(readyFile, { force: true });
-    const gdb = vscode.workspace.getConfiguration("vhil").get<string>("gdbPath", "") || "arm-none-eabi-gdb";
+    try {
+      fs.rmSync(readyFile, { force: true });
+    } catch {
+      // A stale one is told apart by its port.
+    }
 
+    // Our own token: a debugger that doesn't start cancels the run, as Cancel does.
+    const cts = new vscode.CancellationTokenSource();
+    const linked = token.onCancellationRequested(() => cts.cancel());
     let done = false;
+    let held = false;
     let session: vscode.DebugSession | undefined;
+    let liveRun: vscode.TestRun | undefined;
+    let attachError: unknown;
     const started = vscode.debug.onDidStartDebugSession((s) => {
       if (s.configuration.miDebuggerServerAddress === `127.0.0.1:${port}`) session = s;
     });
+    const ended = vscode.debug.onDidTerminateDebugSession((s) => {
+      if (s !== session || done) return;
+      session = undefined;
+      liveRun?.appendOutput("\r\nvHIL: debugger detached: the test runs on to its result\r\n");
+    });
     // Attach once the board waits; the build and the boot to it come first.
     const attach = (async () => {
-      while (!done && !token.isCancellationRequested) {
-        if (fs.existsSync(readyFile)) {
-          try {
-            const ready = JSON.parse(fs.readFileSync(readyFile, "utf8")) as Ready;
-            const local = this.local ? { firmware: this.local.firmware.id, dir: this.local.dir } : undefined;
-            // No breakpoint would run the test straight through: stop at entry (main).
-            const stop = !vscode.debug.breakpoints.some((b) => b.enabled);
-            await vscode.debug.startDebugging(this.folder,
-              debugConfig(ready, dir, gdb, local, stop) as vscode.DebugConfiguration);
-            if (stop) {
-              void vscode.window.showInformationMessage(
-                `vHIL: ${ready.board} is paused at main (no breakpoints set). ` +
-                "Set breakpoints, then Continue (F5).");
-            }
-            return;
-          } catch {
-            // Still being written: the next poll.
+      while (!done && !cts.token.isCancellationRequested) {
+        let ready: Ready | undefined;
+        try {
+          ready = JSON.parse(fs.readFileSync(readyFile, "utf8")) as Ready;
+        } catch (e) {
+          // Not there yet (ENOENT) or still being written (SyntaxError): the next poll.
+          const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
+          if (!missing && !(e instanceof SyntaxError)) throw e;
+        }
+        // A ready.json of another debug run (an older one, another window) isn't ours.
+        if (ready && ready.port === port) {
+          held = true;
+          const local = this.local ? { firmware: this.local.firmware.id, dir: this.local.dir } : undefined;
+          // No breakpoint firmware can hit would run the test straight through: stop at entry (main).
+          const stop = debugStops(vscode.debug.breakpoints.map(bpOf));
+          const ok = await vscode.debug.startDebugging(this.folder,
+            debugConfig(ready, dir, gdb, local, stop) as vscode.DebugConfiguration);
+          if (!ok) {
+            cts.cancel();
+            void vscode.window.showErrorMessage(
+              `vHIL: the debugger didn't start on ${ready.board}: the run is cancelled.`);
+          } else if (stop) {
+            void vscode.window.showInformationMessage(
+              `vHIL: ${ready.board} is paused at the bootloader's main (it runs first after power-on). ` +
+              "Set breakpoints in the app, then Continue (F5).");
           }
+          return;
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
-    })();
+    })().catch((e) => {
+      // A held board would wait for a debugger that never comes.
+      attachError = e;
+      cts.cancel();
+    });
     try {
-      await this.run(new vscode.TestRunRequest([test], undefined, request.profile), token,
-                     { VHIL_DEBUG: `${board}:${port}` });
+      await this.run(new vscode.TestRunRequest([test], undefined, request.profile), cts.token,
+                     { env: { VHIL_DEBUG: `${board}:${port}` }, onRun: (r) => { liveRun = r; } });
     } finally {
       done = true;
       await attach;
+      if (attachError) void vscode.window.showErrorMessage(`vHIL: reading ${readyFile} failed: ${attachError}`);
       started.dispose();
+      ended.dispose();
+      linked.dispose();
+      if (!held && !attachError && !token.isCancellationRequested) {
+        void vscode.window.showWarningMessage(`vHIL: no board was held: ${board} never started in ${labelOf(test.id)}.`);
+      }
       if (session) await vscode.debug.stopDebugging(session);
+      cts.dispose();
     }
   }
 
@@ -966,39 +1253,123 @@ class Vhil implements vscode.Disposable {
    * `system` if given (the editor's ?system=; with &new=1, a new one).
    */
   private async openEditor(system?: string, isNew = false) {
-    const page = system ? `${EDITOR_URL}?system=${encodeURIComponent(system)}${isNew ? "&new=1" : ""}` : EDITOR_URL;
-    if (this.editorPanel) {
-      this.editorPanel.reveal();
-      if (system && this.editorReady) {
-        const url = await vscode.env.asExternalUri(vscode.Uri.parse(page));
-        this.editorPanel.webview.html = editorHtml(url.toString(true));
-      } else if (system) {
-        this.editorPage = page;
+    const firmware = this.local?.firmware.id;
+    const page = system
+      ? `${EDITOR_URL}?system=${encodeURIComponent(system)}${isNew ? "&new=1" : ""}` +
+        `${isNew && firmware ? `&firmware=${encodeURIComponent(firmware)}` : ""}`
+      : EDITOR_URL;
+    const panel = this.editorPanel;
+    if (panel) {
+      panel.reveal();
+      if (!this.editorReady) {
+        // Still starting, or it gave up: wait (again) for it, on this page.
+        if (system) this.editorPage = page;
+        void this.waitForEditor();
+        return;
       }
+      if (!system) return;
+      if (this.editorHandshake) {
+        // The editor opens it itself, as its own Open would (its unsaved-changes guard included).
+        void panel.webview.postMessage({ type: "vhil.open", system, isNew, ...(firmware ? { firmware } : {}) });
+        return;
+      }
+      // An editor without the handshake: only a reload opens another system.
+      const a = await vscode.window.showWarningMessage(
+        `Open ${system} in the editor tab? Uncommitted changes there are lost.`, { modal: true }, "Open");
+      if (a !== "Open" || panel !== this.editorPanel) return;
+      this.editorPage = page;
+      await this.frameEditor(panel);
       return;
     }
     this.editorPage = page;
     this.editorReady = false;
-    const panel = vscode.window.createWebviewPanel("vhil.editor", "vHIL system editor",
+    this.editorHandshake = false;
+    const created = vscode.window.createWebviewPanel("vhil.editor", "vHIL system editor",
       vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
-    this.editorPanel = panel;
-    let open = true;
-    panel.onDidDispose(() => { open = false; this.editorPanel = undefined; this.editorReady = false; });
-    panel.webview.html = editorHtml(undefined, "Starting the system editor…");
-    const deadline = Date.now() + 5 * 60_000;
-    while (open && !(await editorAnswers())) {
-      if (!this.editorTask) void this.task("System editor", ["editor"]);
-      if (Date.now() > deadline) {
-        panel.webview.html = editorHtml(undefined,
-          "The system editor didn't start in 5 minutes. See the System editor terminal.");
+    this.editorPanel = created;
+    created.onDidDispose(() => {
+      this.editorPanel = undefined;
+      this.editorReady = false;
+      this.editorHandshake = false;
+    });
+    created.webview.onDidReceiveMessage((m) => this.editorMessage(created, m));
+    void this.waitForEditor();
+  }
+
+  /** What the editor tab's relay passes on from the framed editor. */
+  private async editorMessage(panel: vscode.WebviewPanel, m: unknown) {
+    if (!m || typeof m !== "object" || panel !== this.editorPanel) return;
+    const msg = m as { type?: string; url?: unknown };
+    if (msg.type === "vhil.ready") {
+      this.editorHandshake = true;
+    } else if (msg.type === "vhil.openInBrowser") {
+      await vscode.commands.executeCommand("vhil.openEditorInBrowser");
+    } else if (msg.type === "vhil.openExternal" && typeof msg.url === "string") {
+      // Only the editor's own pages and GitHub (a PR it made): the framed page can't open anything else.
+      let origin: string;
+      try {
+        origin = new URL(msg.url).origin;
+      } catch {
         return;
       }
-      await new Promise((r) => setTimeout(r, 2000));
+      const editor = new URL(this.editorPage).origin;
+      const framed = (await vscode.env.asExternalUri(vscode.Uri.parse(this.editorPage))).toString(true);
+      if (origin === editor || origin === new URL(framed).origin || origin === "https://github.com") {
+        await vscode.env.openExternal(vscode.Uri.parse(msg.url, true));
+      }
     }
-    if (!open) return;
-    // Through asExternalUri, so a remote window reaches it through a forwarded port.
+  }
+
+  /**
+   * Wait for the editor to answer, starting its task once if it doesn't,
+   * then frame it. Polls while the task runs (a first start pulls or builds
+   * its image); if the task ends first, the tab says so and offers Retry:
+   * never a relaunch loop. One wait at a time.
+   */
+  private waitForEditor(): Promise<void> {
+    this.editorWait ??= this.waitOnce().finally(() => { this.editorWait = undefined; });
+    return this.editorWait;
+  }
+
+  private async waitOnce() {
+    const panel = this.editorPanel;
+    if (!panel) return;
+    const open = () => panel === this.editorPanel;
+    panel.webview.html = editorHtml(undefined, "Starting the system editor…");
+    if (!(await editorAnswers())) {
+      if (!this.editorTask || !this.editorEnded) {
+        const t = this.startTask("System editor", ["editor"]);
+        this.editorEnded = t.ended;
+        try {
+          this.editorTask = await t.execution;
+        } catch {
+          // ended resolves with -1: reported below.
+        }
+      }
+      let exit: number | undefined | null = null; // null: still running
+      void this.editorEnded!.then((code) => { exit = code ?? -1; });
+      while (open() && !(await editorAnswers())) {
+        if (exit !== null) {
+          panel.webview.html = editorHtml(undefined, `The system editor exited (code ${exit}): see its terminal.`);
+          void vscode.window.showErrorMessage(`vHIL: the system editor exited (code ${exit}).`, "Retry", "Diagnose")
+            .then((a) => {
+              if (a === "Retry") void this.openEditor();
+              if (a === "Diagnose") void this.diagnose();
+            });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    if (open()) await this.frameEditor(panel);
+  }
+
+  /** Frame the editor at editorPage: through asExternalUri, so a remote window reaches it through a forwarded port. */
+  private async frameEditor(panel: vscode.WebviewPanel) {
     const url = await vscode.env.asExternalUri(vscode.Uri.parse(this.editorPage));
-    panel.webview.html = editorHtml(url.toString(true));
+    if (panel !== this.editorPanel) return;
+    this.editorHandshake = false;
+    panel.webview.html = editorHtml(url.toString(true), "", crypto.randomBytes(16).toString("base64"));
     this.editorReady = true;
   }
 
@@ -1019,7 +1390,8 @@ class Vhil implements vscode.Disposable {
 
   private updateView() {
     this.systemsView.update(rows(this.mySystems(),
-      { dockerUp: this.dockerUp, editorUp: this.editorUp, context: this.config().context }, !this.local));
+      { dockerUp: this.dockerUp, editorUp: this.editorUp, context: this.config().context,
+        baseState: this.baseState, editorState: this.editorState }, !this.local));
   }
 
   /** A new system: its id, then the editor on an empty canvas (?new=1); saved by its Commit…. */
@@ -1072,7 +1444,7 @@ class Vhil implements vscode.Disposable {
       void vscode.window.showInformationMessage("vHIL: this is your own checkout: update it with git.");
       return;
     }
-    if (await updateCheckout(this.context, this.repo)) {
+    if ((await updateCheckout(this.context, this.repo)).ok) {
       this.readSystems();
       await this.refresh();
     }
@@ -1150,6 +1522,13 @@ class Vhil implements vscode.Disposable {
   }
 }
 
+/** A VS Code breakpoint as debugStops sees it. */
+function bpOf(b: vscode.Breakpoint): Bp {
+  if (b instanceof vscode.SourceBreakpoint) return { enabled: b.enabled, kind: "source", path: b.location.uri.fsPath };
+  if (b instanceof vscode.FunctionBreakpoint) return { enabled: b.enabled, kind: "function" };
+  return { enabled: b.enabled, kind: "other" };
+}
+
 /** The system a command was given: a Systems view row, a scenario group, or its id. */
 function systemOf(item?: vscode.TestItem | Row | string): string | undefined {
   if (typeof item === "string") return item;
@@ -1158,18 +1537,49 @@ function systemOf(item?: vscode.TestItem | Row | string): string | undefined {
   return item.id.startsWith(GROUP) ? item.id.split("/").pop() : undefined;
 }
 
-/** The editor panel's page: the editor framed at `url`, else `message`. */
-function editorHtml(url: string | undefined, message = ""): string {
+/**
+ * The editor panel's page: the editor framed at `url`, else `message`. With
+ * a frame, a nonce'd script relays between the extension and the editor:
+ * vhil.open in (open a system without reloading the page), vhil.ready and
+ * vhil.openExternal out, only from the framed editor's origin. With no
+ * vhil.ready in 15 s it offers the browser (a VS Code build that won't frame it).
+ */
+function editorHtml(url: string | undefined, message = "", nonce = ""): string {
   const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
   const origin = url ? new URL(url).origin : "";
-  const csp = `default-src 'none'; style-src 'unsafe-inline'${origin ? `; frame-src ${origin}` : ""}`;
+  const csp = `default-src 'none'; style-src 'unsafe-inline'` +
+    (origin ? `; frame-src ${origin}; script-src 'nonce-${nonce}'` : "");
   const body = url
-    ? `<iframe src="${esc(url)}" allow="clipboard-read; clipboard-write"></iframe>`
+    ? `<div id="slow" hidden>Editor not loading here? <button id="browser">Open in browser</button></div>
+<iframe src="${esc(url)}" allow="clipboard-read; clipboard-write"></iframe>
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+const frame = document.querySelector("iframe");
+const origin = ${JSON.stringify(origin)};
+const slow = document.getElementById("slow");
+let ready = false;
+window.addEventListener("message", (e) => {
+  const m = e.data;
+  if (!m || typeof m !== "object") return;
+  if (e.source === frame.contentWindow) {
+    if (e.origin !== origin) return;
+    if (m.type === "vhil.ready") { ready = true; slow.hidden = true; vscode.postMessage({ type: "vhil.ready" }); }
+    else if (m.type === "vhil.openExternal" && typeof m.url === "string") vscode.postMessage({ type: "vhil.openExternal", url: m.url });
+    return;
+  }
+  if (m.type === "vhil.open") frame.contentWindow.postMessage(m, origin);
+});
+setTimeout(() => { if (!ready) slow.hidden = false; }, 15000);
+document.getElementById("browser").addEventListener("click", () => vscode.postMessage({ type: "vhil.openInBrowser" }));
+</script>`
     : `<p>${esc(message)}</p>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
-<style>html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-iframe { border: 0; width: 100%; height: 100%; display: block; }
+<style>html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; display: flex; flex-direction: column; }
+iframe { border: 0; width: 100%; flex: 1; display: block; }
+#slow { padding: 4px 8px; font-family: var(--vscode-font-family); font-size: 12px;
+  color: var(--vscode-foreground); background: var(--vscode-editorWidget-background); }
+#slow[hidden] { display: none; }
 p { padding: 1em; font-family: var(--vscode-font-family); color: var(--vscode-foreground); }</style>
 </head><body>${body}</body></html>`;
 }
