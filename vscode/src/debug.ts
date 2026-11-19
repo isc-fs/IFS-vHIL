@@ -35,6 +35,14 @@ export interface Ready {
 }
 
 /**
+ * A path as one GDB command argument: quoted, so a space (the firmware-repo
+ * checkout under macOS's "Application Support") doesn't split it.
+ */
+export function gdbQuote(p: string): string {
+  return '"' + p.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+/**
  * The cppdbg configuration: the host's arm-none-eabi-gdb on the copied
  * app image, the bootloader's symbols added, each container build tree
  * mapped to sources the host has (the open firmware's working tree, else
@@ -46,6 +54,9 @@ export interface Ready {
 export function debugConfig(ready: Ready, dir: string, gdb: string,
                             local?: { firmware: string; dir: string },
                             stop = false): { [key: string]: unknown } {
+  // Forward slashes: GDB and cppdbg take them on every host, and a Windows
+  // globalStorage path would otherwise mix separators.
+  dir = dir.replace(/\\/g, "/");
   const image = (name: string) => `${dir}/${name}`;
   const map: { [from: string]: string } = {};
   ready.sources.forEach((from, i) => {
@@ -55,8 +66,11 @@ export function debugConfig(ready: Ready, dir: string, gdb: string,
   if (local) map[`/vhil/fw/${local.firmware}@local`] = local.dir;
   const setup = [
     { text: "set confirm off" },
-    ...ready.images.slice(1).map((n) => ({ text: `add-symbol-file ${image(n)}`, ignoreFailures: true })),
-    ...Object.entries(map).map(([from, to]) => ({ text: `set substitute-path ${from} ${to}` })),
+    ...ready.images.slice(1).map((n) => ({ text: `add-symbol-file ${gdbQuote(image(n))}`, ignoreFailures: true })),
+    // sourceFileMap maps the same trees too: a failed substitute mustn't
+    // abort the launch.
+    ...Object.entries(map).map(([from, to]) => ({
+      text: `set substitute-path ${gdbQuote(from)} ${gdbQuote(to)}`, ignoreFailures: true })),
   ];
   return {
     type: "cppdbg",

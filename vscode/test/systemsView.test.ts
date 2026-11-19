@@ -32,3 +32,13 @@ test("a new system's id: a file name, not one that exists", () => {
   assert.match(newSystemError("ams", ["ams"]) ?? "", /exists/);
   for (const bad of ["", "ECU", "ecu ams", "-x", "ecu/ams", "a_b"]) assert.ok(newSystemError(bad, []), bad);
 });
+
+test("the status row asks for the images when a run would pull or build them", () => {
+  const r = statusRow({ dockerUp: true, editorUp: false, context: "x", baseState: "published", editorState: "local" });
+  assert.equal(r.label, "Images needed");
+  assert.equal(r.command, "vhil.pullImages");
+  assert.equal(r.icon, "cloud-download");
+  assert.match(statusRow({ dockerUp: true, editorUp: false, context: "x", baseState: "missing" }).tooltip ?? "", /~30 min/);
+  assert.equal(statusRow({ dockerUp: true, editorUp: false, context: "x", baseState: "local", editorState: "local" }).label,
+    "Stack ready");
+});

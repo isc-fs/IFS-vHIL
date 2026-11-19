@@ -2,6 +2,21 @@
 
 ## Docker (any host, nothing installed natively)
 
+### Before you start
+
+- macOS: `brew install colima docker docker-compose`, then
+  `scripts/vhil-docker.sh vm` (or `bin/vhil setup`, which also pulls the
+  images and builds firmware). Linux: Docker with the compose plugin, vcan
+  loaded.
+- ~10 GB free for Docker. The first run pulls the images (several GB), plus
+  the ~3.5 GB x86 image on an arm64 host (for `fw`, below).
+- The base image builds Renode from source (~30 min) only when no published
+  image matches the checkout (a `docker/` change not on `dev` yet). An
+  unpublished editor image alone builds on the published base in a few
+  minutes.
+- `bin/vhil doctor` checks all of this; `scripts/vhil-docker.sh status`
+  reports what is there without pulling or building anything.
+
 [`docker/Dockerfile`](../../docker/Dockerfile) holds everything below at the
 pinned versions, for amd64 and arm64. [`scripts/vhil-docker.sh`](../../scripts/vhil-docker.sh)
 runs each CI job in it; firmware and the IFS_HIL checkout live in the
@@ -13,8 +28,16 @@ hashes the files each image's build reads, and
 `ghcr.io/isc-fs/ifs-vhil:<key>` and `ifs-vhil-editor:<key>` (amd64 + arm64)
 on every `dev` push and release tag that changes them, plus the moving tags
 `dev` and `vX.Y.Z`. Every job uses the images of the checkout it runs from:
-local by key, else pulled, else built. It builds only when none is published
-(a `docker/` change not on `dev` yet) or `docker/` has uncommitted changes.
+local by key, else pulled, else built, each image on its own. It builds only
+the image that isn't published (a `docker/` change not on `dev` yet), or both
+when `docker/` has uncommitted changes. A registry that doesn't answer stops
+the job rather than starting a build; `VHIL_BUILD_ON_PULL_FAIL=1` builds then.
+
+**Git worktrees.** The jobs work from a worktree: its git dir (the main
+checkout's `.git`) is mounted read-only beside it. The system editor and the
+web app (`editor`, `server`, `vhil ui`) must still start from the main
+checkout: the compose stack mounts the checkout alone, and they refuse a
+worktree up front.
 
 [`bin/vhil`](../../bin/vhil) wraps these with set-up checks (`vhil doctor`,
 `vhil setup`) and plain verbs (`vhil test`, `vhil scenario`, `vhil ui`);
@@ -24,6 +47,7 @@ the wrapper's own commands are below.
 scripts/vhil-docker.sh vm          # macOS: Colima VM `vhil` with vcan (once; needs colima)
 scripts/vhil-docker.sh pull        # the published images of this checkout (any job pulls them when missing)
 scripts/vhil-docker.sh image       # build the images locally instead (Renode from source, ~30 min)
+scripts/vhil-docker.sh status      # what's there (Docker, images, firmware), read-only
 scripts/vhil-docker.sh fw          # build ECU + AMS from their systems (or: fw ecu ams udv)
 scripts/vhil-docker.sh unit
 scripts/vhil-docker.sh smoke ecu   # or ams

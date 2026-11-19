@@ -4,6 +4,8 @@
 // Every command goes through scripts/vhil-docker.sh, as CI's jobs do, and
 // pytest writes its results with vhil/pytest_vscode.py (JSON lines).
 
+import * as path from "path";
+
 import { Snapshot } from "./trace";
 
 /** The test folders the extension lists, and the vhil-docker.sh job each runs under. */
@@ -25,10 +27,14 @@ function pluginArgs(out: string): string[] {
   return ["-p", "vhil.pytest_vscode", "--vscode-out", out];
 }
 
-/** vhil-docker.sh's arguments to list every test into `out`. */
-export function collectArgs(out: string, roots: string[] = SUITES.map((s) => s.root)): string[] {
+/**
+ * vhil-docker.sh's arguments to list every test into `out`. `pytestArgs`
+ * (vhil.pytestArgs) go in too: a `-m` or `-k` there changes what is listed.
+ */
+export function collectArgs(out: string, roots: string[] = SUITES.map((s) => s.root),
+                            pytestArgs: string[] = []): string[] {
   return ["run", "python", "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-          ...pluginArgs(out), ...roots];
+          ...pluginArgs(out), ...pytestArgs, ...roots];
 }
 
 /**
@@ -146,4 +152,68 @@ export function builtFirmware(text: string): Map<string, string> {
     if (at > 0) built.set(line.slice(0, at).trim(), line.slice(at + 1).trim());
   }
   return built;
+}
+
+/**
+ * The `<board>=<elf>` lines `fw` prints as it builds (what it appends to
+ * built.txt), in any other output: only a board id and an absolute path, so
+ * an echoed command line (`$ FW_LOCAL=ecu=...`) or a log line isn't one.
+ * Later lines win, as in built.txt.
+ */
+export function builtLines(text: string): Map<string, string> {
+  const built = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^([\w.-]+)=(\/\S+)\s*$/.exec(line);
+    if (m) built.set(m[1], m[2]);
+  }
+  return built;
+}
+
+/**
+ * The items still listed for `ids`, in order: a run request holds the
+ * TestItems of the listing it was made from, and a refresh since replaced
+ * them (or dropped a test). Group and folder ids remap the same way.
+ */
+export function remapItems<T>(ids: string[], byId: Map<string, T>): T[] {
+  return ids.map((id) => byId.get(id)).filter((t): t is T => t !== undefined);
+}
+
+/** A breakpoint as debugStops sees it (vscode.SourceBreakpoint / FunctionBreakpoint). */
+export interface Bp {
+  enabled: boolean;
+  kind: "source" | "function" | "other";
+  path?: string; // a source breakpoint's file
+}
+
+const FIRMWARE_SOURCE = /\.(c|h|cpp|hpp|cc|s|S)$/;
+
+/**
+ * Whether a debug session should stop at entry: no enabled breakpoint that
+ * firmware can hit (one in a C, C++ or assembly file, or on a function).
+ * A Python or YAML breakpoint left in the workspace would otherwise let the
+ * test run straight through.
+ */
+export function debugStops(bps: Bp[]): boolean {
+  return !bps.some((b) => b.enabled &&
+    (b.kind === "function" || (b.kind === "source" && !!b.path && FIRMWARE_SOURCE.test(b.path))));
+}
+
+/** What Run on save watches in a firmware repository: sources, the linker script, the build files. */
+export const FIRMWARE_SAVE_GLOB =
+  "**/{*.c,*.h,*.cpp,*.hpp,*.cc,*.s,*.S,*.ld,*.ioc,*.cmake,*.mk,CMakeLists.txt,Makefile}";
+
+/**
+ * Whether a save under `base` (the watched folder) is one Run on save
+ * ignores: build output, results, git and node_modules. Tested against the
+ * path inside `base`, so a checkout that itself sits under a `build/`
+ * folder still runs.
+ */
+export function ignoredSave(base: string, file: string): boolean {
+  const rel = path.relative(base, file);
+  return /(^|[\\/])(build|results|\.git|node_modules)([\\/]|$)/.test(rel);
+}
+
+/** `text` cut to `max` characters, saying how many more there were. */
+export function clip(text: string, max = 4096): string {
+  return text.length <= max ? text : `${text.slice(0, max)}\n… (${text.length - max} more characters)`;
 }
