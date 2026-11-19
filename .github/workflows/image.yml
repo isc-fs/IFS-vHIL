@@ -213,6 +213,12 @@ jobs:
       - name: The published editor image loads every system
         # Pulled back from the registry, on this runner's arch, with this
         # checkout's systems: what `scripts/vhil-docker.sh editor-check` runs.
+        # The registry may not serve a tag pushed a second ago: retry the pull.
         run: |
+          for i in 1 2 3 4 5 6; do
+              docker pull -q "$REGISTRY/ifs-vhil-editor:$EDITOR" && break
+              [ "$i" = 6 ] && exit 1
+              sleep 10
+          done
           docker run --rm -v "$PWD:/work" -w /work "$REGISTRY/ifs-vhil-editor:$EDITOR" \
               python -m vhil.editor check

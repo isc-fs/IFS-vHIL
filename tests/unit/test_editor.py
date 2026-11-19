@@ -657,3 +657,16 @@ def test_a_system_keeps_its_names_through_the_editor(spec, path):
     out = from_dataflow(to_dataflow(doc, spec), spec)
     for key in ("boards", "buses", "devices"):
         assert set(out.get(key, {})) == set(doc.get(key, {}))
+
+
+def test_a_board_without_roles_is_offered_only_firmware_no_other_platform_claims():
+    # The SensorHub (STM32L496) isn't offered the MainLite's (STM32H733) role
+    # firmware or bootloader; a firmware no board claims stays offered.
+    from vhil.editor import NO_FIRMWARE, firmware_for, specification
+    boards = {"mainlite": {"platform": "stm32h733", "bootloader": "can-bootloader",
+                           "roles": {"ecu": {"firmware": "ecu"}, "ams": {"firmware": "ams"}}},
+              "sensorhub": {"platform": "stm32l496"}}
+    assert firmware_for("sensorhub", boards, ["ams", "can-bootloader", "ecu", "imu-fw"]) == ["imu-fw"]
+    node = next(n for n in specification()["nodes"] if n["name"] == "sensorhub")
+    firmware = next(p for p in node["properties"] if p["name"] == "firmware")
+    assert firmware["values"] == [NO_FIRMWARE]

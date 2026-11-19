@@ -322,12 +322,30 @@ def _every_protocol(model: dict) -> dict:
     return iface
 
 
+def firmware_for(board_id: str, boards: dict, firmware: list[str]) -> list[str]:
+    """The catalogue firmware a board without roles may run: every one but
+    those another platform's board claims (its roles' firmware, its
+    bootloader). The catalogue's firmware names no platform; the MainLite's
+    roles and bootloader say whose they are, so the SensorHub (STM32L496)
+    isn't offered the MainLite's (STM32H733) ECU, AMS, uDV or bootloader."""
+    platform = boards[board_id].get("platform")
+    claimed = set()
+    for other in boards.values():
+        if other.get("platform") == platform:
+            continue
+        claimed.update(r["firmware"] for r in (other.get("roles") or {}).values() if r.get("firmware"))
+        if other.get("bootloader"):
+            claimed.add(other["bootloader"])
+    return [f for f in firmware if f not in claimed]
+
+
 def specification(catalog: Path = CATALOG) -> dict:
     """Pipeline Manager node types for everything in the catalogue."""
     firmware_docs = _catalog("firmware", catalog)
     firmware = sorted(firmware_docs)
     nodes = []
-    for board_id, board in _catalog("board", catalog).items():
+    boards = _catalog("board", catalog)
+    for board_id, board in boards.items():
         roles = board.get("roles") or {}
         tail = [
             # The bootloader comes with the board; only its ref is the
@@ -356,7 +374,8 @@ def specification(catalog: Path = CATALOG) -> dict:
                 # NO_FIRMWARE: none from the catalogue (the system names
                 # none; its image is given at render), the default.
                 "properties": [{"name": "firmware", "type": "select",
-                                "values": [NO_FIRMWARE, *firmware], "default": NO_FIRMWARE,
+                                "values": [NO_FIRMWARE, *firmware_for(board_id, boards, firmware)],
+                                "default": NO_FIRMWARE,
                                 "description": "Catalogue firmware to build, or "
                                                f"'{NO_FIRMWARE}': an image given at render."},
                                ref, *tail],
