@@ -78,8 +78,10 @@ def test_login_without_the_teams_oauth_app_says_so(tmp_path):
     assert r.returncode == 2 and "VHIL_DEVICE_CLIENT_ID" in r.stderr
 
 
-def test_ui_hands_your_account_to_the_stack(tmp_path):
-    """vhil ui exports the token and login vhil-account keeps, for compose."""
+def test_ui_mounts_your_account_not_its_token(tmp_path):
+    """vhil ui hands compose the account's directory (the api reads the file
+    live, so a sign-in needs no restart), never the token itself: a sign-out
+    must not leave one behind in the container's environment."""
     cfg = tmp_path / "config/vhil"
     cfg.mkdir(parents=True)
     (cfg / "github").write_text("login=ines\ntoken=gho_secret\n")
@@ -87,7 +89,7 @@ def test_ui_hands_your_account_to_the_stack(tmp_path):
     bindir.mkdir()
     log = tmp_path / "docker.log"
     (bindir / "docker").write_text(
-        f'#!/bin/sh\necho "$* | $VHIL_TEAM_LOGIN $VHIL_GITHUB_TOKEN" >> {log}\n')
+        f'#!/bin/sh\necho "$* | $VHIL_ACCOUNT_DIR|$VHIL_GITHUB_TOKEN" >> {log}\n')
     (bindir / "docker").chmod(0o755)
     env = {k: v for k, v in os.environ.items() if k not in ("VHIL_GITHUB_TOKEN", "FW_LOCAL")}
     env.update({"PATH": f"{bindir}:{os.environ['PATH']}", "XDG_CONFIG_HOME": str(tmp_path / "config"),
@@ -96,4 +98,4 @@ def test_ui_hands_your_account_to_the_stack(tmp_path):
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     up = [l for l in log.read_text().splitlines() if " up " in l]
-    assert up and up[-1].endswith("| ines gho_secret"), up
+    assert up and up[-1].endswith(f"| {cfg}|"), up

@@ -362,3 +362,6 @@ select.vhil-input option { padding: 2px var(--sp-2); }
 .vhil-team-foot { display: flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-small); }
 .vhil-team-foot .vhil-btn { margin-left: auto; }
 .vhil-team-error { color: var(--status-warn); font-size: var(--fs-small); }
+.vhil-team-signin { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.vhil-team-signin p { flex-basis: 100%; margin: 0; }
+.vhil-team-code { font-size: 1.15em; letter-spacing: 0.08em; user-select: all; }

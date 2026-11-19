@@ -8,19 +8,23 @@ usual way, through a pull request.
 
 ## Sign in
 
+- **Editor:** the Team view (⇄) has **Sign in with GitHub**. It shows a code
+  and GitHub's link: open it, enter the code and approve. The view notices
+  within a couple of seconds; **Sign out** is in the same place.
 - **Desktop app:** the **vHIL** menu's **Sign in with GitHub…** (also on the
   set-up page, under Team sharing). It opens GitHub's sign-in page in your
-  browser and copies the code: paste it there and approve. If the vHIL is
-  open, **Restart the vHIL** makes it share from then on. **Sign Out of
+  browser and copies the code: paste it there and approve. **Sign Out of
   GitHub** is next to it.
 - **Terminal:** `vhil login` (GitHub's device flow; it works in WSL), then
   `vhil whoami` and `vhil logout` (`bin/vhil-account`; the desktop app carries its own copy, so signing in works whichever commit your clone is at).
 
-The token stays in a file only you can read, `~/.config/vhil/github` (in WSL
-on Windows), as the GitHub CLI keeps its own. It has the `public_repo` scope:
-pushing branches to this public repository, where you need write access.
-`vhil ui` (the app's Open) hands it to the vHIL when it starts, so a vHIL
-already open shares after a restart (the app offers it).
+All three keep the same account: a file only you can read,
+`~/.config/vhil/github` (in WSL on Windows), as the GitHub CLI keeps its own.
+The token has the `public_repo` scope: pushing branches to this public
+repository, where you need write access. The vHIL's server reads that file
+each time it needs it (`vhil/server/account.py`; its directory is mounted
+into the api container), so signing in or out anywhere takes effect at once,
+in a vHIL that is already open: no restart.
 
 Without signing in you can still sync and open everything teammates shared.
 

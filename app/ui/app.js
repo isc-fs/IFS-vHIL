@@ -219,22 +219,14 @@ listen("log", (e) => {
   navigator.clipboard?.writeText(m[2]).catch(() => {});
   invoke("open_device_page").catch(() => {});
 });
-listen("done", async (e) => {
+listen("done", (e) => {
   if (e.payload.task !== "login" && e.payload.task !== "logout") return;
   $("#account-code").hidden = true;
   refreshAccount();
   if (e.payload.code !== 0 && e.payload.task === "login") {
     $("#account-status").textContent = "Sign-in failed: see Output.";
   }
-  // A running vHIL got its account when it started: restart it to share.
-  if (e.payload.code === 0 && e.payload.task === "login" && await invoke("app_running")) {
-    const s = $("#open-status");
-    s.replaceChildren("Signed in. The open vHIL shares after a restart. ");
-    const btn = document.createElement("button");
-    btn.textContent = "Restart the vHIL";
-    btn.onclick = () => { s.textContent = ""; running = "ui"; render(); invoke("restart_app"); };
-    s.append(btn);
-  }
+  // A running vHIL reads the account live (vhil/server/account.py): no restart.
 });
 
 $("#open").onclick = openApp;

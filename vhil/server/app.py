@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from vhil.server import auth, security
-from vhil.server import systems_write, team
+from vhil.server import account, systems_write, team
 from vhil.server import bundle, decode, runs, scenarios, session, sources, training
 from vhil.server.config import Settings
 from vhil.server.workspace import NotFound, Workspace
@@ -34,10 +34,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # guard's 401/403 included (vhil/server/security.py).
     app.add_middleware(security.SecurityHeaders, public_url=a.public_url)
 
+    # The commit this server's code was loaded from: the desktop app restarts
+    # the stack when the checkout has moved on since (app/src-tauri/src/main.rs).
+    started_ref = ws.ref()
+
     @app.get("/api/health")
     def health():
         return {"status": "ok", "version": _version(), "auth": settings.auth,
-                "workspace_ref": ws.ref(), "contract": runs.CONTRACT_VERSION}
+                "workspace_ref": ws.ref(), "started_ref": started_ref,
+                "contract": runs.CONTRACT_VERSION}
 
     @app.get("/api/catalog")
     def catalog():
@@ -56,6 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(systems_write.router)
     app.include_router(team.router)
+    app.include_router(account.router)
     app.include_router(runs.router(settings, ws))
     app.include_router(session.router(settings, ws))
     app.include_router(runs.pickers_router(ws))

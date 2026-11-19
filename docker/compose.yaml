@@ -28,6 +28,9 @@ services:
     working_dir: /work
     volumes:
       - ..:/work
+      # Your GitHub account (vhil/server/account.py): read live, written by
+      # the editor's Sign in. scripts/vhil-docker.sh creates it as you.
+      - ${VHIL_ACCOUNT_DIR:-${HOME}/.config/vhil}:/vhil-account
       - vhil-data:/vhil
     environment:
       VHIL_WORKSPACE: /work
@@ -52,6 +55,7 @@ services:
       # The team store's you on a desktop (vhil/server/team.py): the GitHub
       # account the app signed in with; unset, the login of VHIL_GITHUB_TOKEN.
       VHIL_TEAM_LOGIN: ${VHIL_TEAM_LOGIN:-}
+      VHIL_ACCOUNT_FILE: /vhil-account/github
       # Saves commit to the mounted checkout's refs (never its tree); it is
       # owned by the host user, not the container's.
       GIT_CONFIG_COUNT: 1

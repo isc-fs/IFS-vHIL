@@ -174,11 +174,8 @@ test)
 scenario|scenarios) exec "$wrapper" scenarios "$@" ;;
 ui)
     [ "${1:-}" = --no-browser ] || open_when_up &
-    # Your GitHub account, for the team store (vhil login), unless set.
-    if [ -z "${VHIL_GITHUB_TOKEN:-}" ] && token=$("$repo/bin/vhil-account" token 2>/dev/null); then
-        VHIL_GITHUB_TOKEN=$token VHIL_TEAM_LOGIN=$("$repo/bin/vhil-account" whoami)
-        export VHIL_GITHUB_TOKEN VHIL_TEAM_LOGIN
-    fi
+    # Your GitHub account (vhil login, or Sign in in the editor's Team view)
+    # is read live by the api from its file: nothing to pass here.
     exec "$wrapper" editor ;;
 login|logout|whoami) exec "$repo/bin/vhil-account" "$cmd" ;;
 export) exec "$wrapper" export-run "$@" ;;
