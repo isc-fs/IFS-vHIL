@@ -711,6 +711,26 @@ from `git archive 04613679` except as listed below.
     palette has its own column and the inspector covers the canvas's
     right, so a loaded system landed behind the inspector. Falls back to
     upstream's window sizing when there is no editor element.
+33. **Ask in the page, and talk to the VS Code tab.** The VS Code
+    extension frames the workspace in a webview, sandboxed without
+    `allow-modals` or popups, so `window.confirm` answered no unasked and a
+    `target=_blank` link went nowhere. `src/vhil/workspace.js` `ask`
+    (a promise) shows the question in a `<dialog>` of
+    `src/vhil/VhilDialogs.vue`, over any open dialog: discarding unsaved
+    edits (`discardOk`, now async), a branch takeover (`commitSystem`) and
+    a fast periodic send (`src/vhil/VhilSend.vue`). `externalLink` /
+    `openExternal`: framed, the run, artifact and PR links
+    (`VhilRail.vue`, `VhilStatus.vue`, `VhilTopBar.vue`,
+    `VhilArtifacts.vue`, `VhilDialogs.vue`) ask VS Code to open them.
+    Messages, to the parent's own `vscode-webview:` / `vscode-file:`
+    origin (from `location.ancestorOrigins` or the referrer, never `*`):
+    `{type: 'vhil.ready'}` once booted, `{type: 'vhil.openExternal', url}`;
+    from it, only from `window.parent` at such an origin,
+    `{type: 'vhil.open', system, isNew, firmware}` opens a system (asking
+    first if the graph is edited). `open`'s `firmware` (or `?firmware=`)
+    starts a new system's template on the role that runs that firmware
+    (`GET /api/systems/<id>/dataflow?new=true&firmware=`,
+    vhil/server/systems_write.py).
 
 ## Left for later
 

@@ -130,6 +130,8 @@ export const ws = reactive({
     selectedId: null,
     layout: { ...LAYOUT, ...(stored(LAYOUT_KEY) || {}) },
     dialog: null, // 'commit' | 'pr' | 'shortcuts' | 'save-session' | 'pytest'
+    // A question awaiting yes or no (ask; VhilDialogs.vue), over any dialog.
+    ask: null, // {text, ok}
     // A pytest run's form (runPytest): the selection, its timeout, the tests
     // the server collects.
     pytest: {
@@ -148,6 +150,88 @@ const log = (line) => terminalStore.add(line);
 export function say(text, type = 'info', details = undefined) {
     ws.status = text;
     NotificationHandler.terminalLog(type, text, details);
+}
+
+// -- asking, and the VS Code tab ------------------------------------------------
+
+// A question in the workspace's own modal dialog (VhilDialogs.vue), not
+// window.confirm: VS Code's webview is sandboxed without allow-modals, which
+// the editor's frame inside it inherits, so a confirm there returned false
+// without asking.
+let answerAsk = null;
+
+/** Asks `text`; resolves true for `ok`, false for Cancel (or Escape). */
+export function ask(text, { ok = 'OK' } = {}) {
+    answerAsk?.(false); // a newer question replaces an unanswered one
+    ws.ask = { text, ok };
+    return new Promise((resolve) => { answerAsk = resolve; });
+}
+
+/** The answer to the open question (VhilDialogs.vue); later calls are no-ops. */
+export function answer(yes) {
+    const resolve = answerAsk;
+    answerAsk = null;
+    ws.ask = null;
+    resolve?.(Boolean(yes));
+}
+
+// The VS Code extension frames the editor in a webview tab (vscode/; its
+// panel is the only frame-ancestors source besides this site: deploy/
+// Caddyfile, vhil/server/security.py). Messages to and from it:
+//   editor -> VS Code  {type: 'vhil.ready'}                 booted, can open
+//                      {type: 'vhil.openExternal', url}     open in a browser
+//   VS Code -> editor  {type: 'vhil.open', system, isNew, firmware}
+// Every message names the parent's origin, never '*' (tests/unit/
+// test_editor_csp.py). The webview's is a per-panel id (vscode-webview://
+// <id>), so it is read from the frame's ancestry, or the referrer where the
+// browser has no ancestorOrigins, and must be one of VS Code's schemes; a
+// message from the parent confirms it. Unknown: nothing is posted.
+export const framed = typeof window !== 'undefined' && window.parent !== window;
+const VSCODE_ORIGIN = /^vscode-(?:webview|file):\/\/[^/?#]+/;
+
+function vscodeOrigin(url) {
+    return VSCODE_ORIGIN.exec(url || '')?.[0] || null;
+}
+
+let parentOrigin = framed
+    ? vscodeOrigin(window.location.ancestorOrigins?.[0]) || vscodeOrigin(document.referrer)
+    : null;
+
+function tellVsCode(message) {
+    if (!parentOrigin) return false;
+    window.parent.postMessage(message, parentOrigin);
+    return true;
+}
+
+/** Opens `url` (absolute, or relative to this page) in a browser tab: the
+ *  framing VS Code's, which a webview's own target=_blank can't do. */
+export function openExternal(url) {
+    const abs = new URL(url, window.location.href).href;
+    if (framed && tellVsCode({ type: 'vhil.openExternal', url: abs })) return;
+    window.open(abs, '_blank', 'noopener');
+}
+
+/** A target=_blank link's click handler: framed by VS Code, VS Code opens
+ *  it; otherwise the link opens its own tab as usual. */
+export function externalLink(event) {
+    if (!framed || !parentOrigin) return;
+    event.preventDefault();
+    openExternal(event.currentTarget.href);
+}
+
+function listenToVsCode() {
+    window.addEventListener('message', (e) => {
+        if (e.source !== window.parent || vscodeOrigin(e.origin) !== e.origin) return;
+        parentOrigin = e.origin;
+        const m = e.data;
+        if (m?.type !== 'vhil.open' || typeof m.system !== 'string' || !m.system) return;
+        // eslint-disable-next-line no-use-before-define
+        open(m.system, {
+            isNew: Boolean(m.isNew),
+            firmware: typeof m.firmware === 'string' ? m.firmware : '',
+        });
+    });
+    tellVsCode({ type: 'vhil.ready' });
 }
 
 async function guarded(what, fn) {
@@ -209,11 +293,10 @@ export function saveDraft() {
 }
 
 /** Asks before replacing unsaved edits; false keeps the current graph. */
-function discardOk(what) {
+async function discardOk(what) {
     if (!ws.dirty) return true;
     saveDraft();
-    // eslint-disable-next-line no-alert
-    return window.confirm(`${ws.id} has unsaved changes. Discard them and ${what}?`);
+    return ask(`${ws.id} has unsaved changes. Discard them and ${what}?`, { ok: 'Discard' });
 }
 
 // A reload or closed tab with unsaved edits asks first.
@@ -285,16 +368,20 @@ watch(() => session.live.paused, (paused) => {
 
 const today = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
 
+/** Opens system `id`. firmware: a new system's template starts on the role
+ *  that runs it (a firmware repo's New system in VS Code; ?firmware=). */
 export function open(id, {
-    branch = '', isNew = false, keepReplay = false, scenario = '',
+    branch = '', isNew = false, keepReplay = false, scenario = '', firmware = '',
 } = {}) {
     return guarded(`could not open ${id}`, async () => {
-        if (!(id === ws.id && branch === ws.branch) && !discardOk(isNew ? `create ${id}` : `open ${id}`)) return;
+        if (!(id === ws.id && branch === ws.branch)
+            && !(await discardOk(isNew ? `create ${id}` : `open ${id}`))) return;
         if (!keepReplay) exitReplay();
         ws.status = `opening ${id}…`;
         const q = new URLSearchParams();
         if (branch) q.set('branch', branch);
         if (isNew) q.set('new', 'true');
+        if (isNew && firmware) q.set('firmware', firmware);
         const s = await call('GET', `/api/systems/${encodeURIComponent(id)}/dataflow?${q}`);
         ws.selectedId = null;
         await loadGraph(s.dataflow);
@@ -555,8 +642,8 @@ async function commitSystem({ takeover = false } = {}) {
         // Another member saved this branch last (vhil/server/systems_write.py):
         // moving it is a takeover, which the server logs.
         if (e.status !== 409 || !e.detail?.takeover) throw e;
-        // eslint-disable-next-line no-alert
-        if (!window.confirm(`${e.message}\n\nTake the branch over? This is logged.`)) throw e;
+        if (!(await ask(`${e.message}\n\nTake the branch over? This is logged.`,
+            { ok: 'Take over' }))) throw e;
         out = await send({ ...body, takeover: true });
     }
     ws.isNew = false;
@@ -990,6 +1077,7 @@ export async function start() {
             isNew: q.get('new') === '1',
             keepReplay: true,
             scenario: q.get('scenario') || '',
+            firmware: q.get('firmware') || '',
         });
     }
     if (run > 0) {
@@ -1004,4 +1092,7 @@ export async function start() {
         ws.layout.view = q.get('view') === 'runs' ? 'runs' : 'systems';
         if (ws.layout.view === 'runs') loadRuns();
     }
+    // Framed by VS Code: booted, with the URL's system open, it may now ask
+    // for another (vhil.open).
+    if (framed) listenToVsCode();
 }

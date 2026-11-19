@@ -97,7 +97,10 @@ shown for a run, again with Refresh.
                 >
                     <summary class="mono">{{ s.name }}</summary>
                     <div v-for="f in s.files" :key="f">
-                        <a :href="artifactUrl(run.id, f)" target="_blank" rel="noopener">
+                        <a
+                            :href="artifactUrl(run.id, f)" target="_blank" rel="noopener"
+                            @click="externalLink"
+                        >
                             {{ f.split('/').pop() }}
                         </a>
                         <pre v-if="texts[f] !== undefined">{{ texts[f] }}</pre>
@@ -117,7 +120,10 @@ shown for a run, again with Refresh.
             <h3>Files</h3>
             <ul v-if="names.length" class="vhil-files">
                 <li v-for="n in names" :key="n">
-                    <a :href="artifactUrl(run.id, n)" target="_blank" rel="noopener" class="mono">
+                    <a
+                        :href="artifactUrl(run.id, n)" target="_blank" rel="noopener" class="mono"
+                        @click="externalLink"
+                    >
                         {{ n }}
                     </a>
                 </li>
@@ -136,7 +142,7 @@ import {
 } from 'vue';
 import { call, text } from './api.js';
 import { replay } from './replay.js';
-import { ws } from './workspace.js';
+import { ws, externalLink } from './workspace.js';
 import {
     artifactUrl, firmwareText, isTerminal, junitCounts, parseJunit, scenarioText, snapshotsFor,
     snapshotsOf, tail, wallText,
@@ -261,6 +267,7 @@ export default defineComponent({
 
         return {
             replay,
+            externalLink,
             run,
             names,
             cases,

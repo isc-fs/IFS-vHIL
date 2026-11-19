@@ -147,6 +147,7 @@ import {
 import {
     cannotSend, live as session, send, stopAll,
 } from './session.js';
+import { ask } from './workspace.js';
 
 const PLAIN_UNITS = ['', 'enum', 'bool', 'bit'];
 
@@ -240,13 +241,13 @@ export default defineComponent({
             || (badHex.value ? 'data must be hex' : null)
             || (periodic.value && session.used.includes(name.value || autoName.value)
                 ? `'${name.value || autoName.value}' ran in this session already: name it anew` : null));
-        const submit = () => {
+        const submit = async () => {
             if (blocked.value) return;
             const f = frame.value;
             if (f.periodMs && f.periodMs < FAST_PERIOD_MS
-                // eslint-disable-next-line no-alert
-                && !window.confirm(`Send ${hexId(f.id, f.ext)} every ${f.periodMs} ms? That is `
-                    + `${Math.round(1000 / f.periodMs)} frames a second on ${f.bus}.`)) return;
+                && !(await ask(`Send ${hexId(f.id, f.ext)} every ${f.periodMs} ms? That is `
+                    + `${Math.round(1000 / f.periodMs)} frames a second on ${f.bus}.`,
+                { ok: 'Send' }))) return;
             const ok = send(sendOp({ ...f, name: name.value || autoName.value }));
             if (ok && f.periodMs) name.value = '';
         };
