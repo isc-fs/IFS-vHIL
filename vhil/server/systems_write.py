@@ -449,18 +449,23 @@ def firmware_enums(firmware_id: str, request: Request, ref: str | None = None):
             **stateview.enums_of(elf)}
 
 
-def _template(system_id: str, request: Request) -> str:
+def _template(system_id: str, request: Request, firmware_id: str | None = None) -> str:
+    """A one-board system to start from. `firmware_id` (a firmware repo's New
+    system in VS Code) picks the role that runs it, when the board has one."""
     cat = request.app.state.settings.workspace / "catalog"
     board = sorted(p.stem for p in (cat / "boards").glob("*.yaml"))[0]
     firmware = sorted(p.stem for p in (cat / "firmware").glob("*.yaml"))
     entry = {"board": board, "firmware": firmware[0]}
     # A board with roles (the MainLite) needs one, which sets its firmware:
-    # the first whose firmware the catalogue has.
+    # the one running `firmware_id` if any role does, else the first whose
+    # firmware the catalogue has.
     roles = (yaml.safe_load((cat / "boards" / f"{board}.yaml").read_text())
              .get("roles") or {})
     if roles:
-        role = next((r for r, spec in roles.items() if spec.get("firmware") in firmware),
-                    next(iter(roles)))
+        role = next((r for r, spec in roles.items()
+                     if firmware_id and spec.get("firmware") == firmware_id),
+                    next((r for r, spec in roles.items() if spec.get("firmware") in firmware),
+                         next(iter(roles))))
         entry = {"board": board, "role": role}
     return editor.dump_system({"kind": "system", "id": system_id,
                                "description": "A new system: place boards, wire their buses.",
@@ -468,9 +473,11 @@ def _template(system_id: str, request: Request) -> str:
 
 
 @router.get("/api/systems/{system_id}/dataflow")
-def dataflow(system_id: str, request: Request, branch: str | None = None, new: bool = False):
+def dataflow(system_id: str, request: Request, branch: str | None = None, new: bool = False,
+             firmware: str | None = None):
     """The system file on `branch` (default: the checked-out tree) as the
-    graph the editor loads; with new=true, a template if it doesn't exist."""
+    graph the editor loads; with new=true, a template if it doesn't exist,
+    on the role running `firmware` when one does (_template)."""
     _id(system_id)
     store = _store(request)
     ref = None
@@ -485,7 +492,7 @@ def dataflow(system_id: str, request: Request, branch: str | None = None, new: b
     if not exists:
         if not new:
             raise HTTPException(404, f"no system '{system_id}'" + (f" on {branch}" if branch else ""))
-        text = _template(system_id, request)
+        text = _template(system_id, request, firmware)
     try:
         doc = yaml.safe_load(text)
         graph = editor.to_dataflow(doc, source=text)

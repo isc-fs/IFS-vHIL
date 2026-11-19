@@ -311,6 +311,21 @@ def test_unknown_systems_are_404_unless_new(env):
     assert not t["exists"] and t["errors"] == []
 
 
+def _template_role(env, **params):
+    t = env.client.get("/api/systems/nope/dataflow", params={"new": True, **params}).json()
+    assert not t["exists"] and t["errors"] == []
+    return yaml.safe_load(t["yaml"])["boards"]["board0"].get("role")
+
+
+def test_a_new_system_for_a_firmware_starts_on_its_role(env):
+    # VS Code's New system in a firmware repo (the AMS's) names it.
+    assert _template_role(env, firmware="ams") == "ams"
+
+
+def test_a_new_system_for_an_unknown_firmware_falls_back(env):
+    assert _template_role(env, firmware="nope") == _template_role(env)
+
+
 # -- PRs ------------------------------------------------------------------------------
 
 def test_a_pr_pushes_the_branch_and_opens_against_dev(env):
