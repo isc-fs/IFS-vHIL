@@ -57,6 +57,7 @@ scenario" records it.
             <a
                 class="vhil-scrub-run mono" :href="runPage(replay.id)"
                 target="_blank" rel="noopener" :title="`Run ${replay.id} in a new tab (it watches)`"
+                @click="externalLink"
             >run {{ replay.id }}</a>
             <output class="vhil-live-clock mono num" :title="clockTitle">{{ clock }}</output>
             <span
@@ -152,6 +153,15 @@ scenario" records it.
             </select>
         </label>
 
+        <label
+            v-if="ws.config.local_firmware?.length" class="vhil-quantum"
+            :title="`Build ${ws.config.local_firmware.join(', ')} from your working tree, `
+                + 'uncommitted edits included, before each Run, Live and pytest run '
+                + '(off: the catalogue\'s or the board\'s refs)'"
+        >
+            <input v-model="ws.useLocal" type="checkbox" :disabled="live" />
+            <span class="mono">{{ ws.config.local_firmware.map((f) => `${f}@local`).join(', ') }}</span>
+        </label>
         <div v-if="!live" class="vhil-run-buttons">
             <button
                 type="button" class="vhil-btn --primary" :disabled="ws.busy || running"
@@ -213,7 +223,8 @@ import {
     computed, defineComponent, inject, ref,
 } from 'vue';
 import {
-    ws, askNewScenario, boardFirmware, cycleTheme, exitReplay, isLive, keepAlive, pauseLive,
+    ws, askNewScenario, boardFirmware, cycleTheme, exitReplay, externalLink, isLive, keepAlive,
+    pauseLive,
     pickScenario,
     runActive, runNow, showBoard, startLive, stopLive, stopRun,
 } from './workspace.js';
@@ -313,6 +324,7 @@ export default defineComponent({
         };
         return {
             showArtifacts,
+            externalLink,
             LIVE_TITLE: 'A live session of the saved system: drive its buses and pins as on the '
                 + 'bench, until you stop it',
             QUANTUM_TITLE: 'How often the boards meet (the sync quantum) in Run and Live: '

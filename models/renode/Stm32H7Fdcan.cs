@@ -80,6 +80,13 @@
 //   - Cancelling a request (TXBCR) applies when it is written; a frame the bus
 //     already decided is not cancelled (as on the chip once transmission has
 //     started).
+//   - A TXBAR bit for a buffer whose request is still pending changes nothing
+//     (RM0468, FDCAN_TXBAR), so the frame the firmware wrote into that element
+//     since is never sent: TxRequestsDropped counts these. A Tx FIFO request
+//     for any buffer but the put index (TXFQS.TFQPI) is counted in
+//     TxRequestsOffPut. Both are what two tasks adding to one Tx FIFO without
+//     a lock produce (both read the same put index): each is logged once, with
+//     the IDs involved, and the counters survive Reset. #415.
 //
 // NBTP is held here (Renode's MCAN drops writes to it): writable only while
 // CCCR.INIT and CCE are both set, reset value 0x06000A03 (RM0468, FDCAN_NBTP;
@@ -195,6 +202,12 @@ namespace Antmicro.Renode.Peripherals.CAN
         public bool WireTiming { get; set; }
 
         public bool Arbitrated => bus != null;
+
+        // TXBAR requests for a buffer still pending (the frame written since is
+        // dropped), and Tx FIFO requests off the put index: a Tx race (#415).
+        public uint TxRequestsDropped { get; private set; }
+
+        public uint TxRequestsOffPut { get; private set; }
 
         // On an arbitrated bus: "buffer time_ns id fifo committed" per request
         // held for the bus, in request order.
@@ -401,7 +414,8 @@ namespace Antmicro.Renode.Peripherals.CAN
             cel = 0;
             lec = LecNoChange;
             bus?.CountersReset(this);
-            // FailInit, WireTiming and BusOffRecoveries are the test's: they survive.
+            // FailInit, WireTiming, BusOffRecoveries and the Tx race counters are
+            // the test's: they survive.
         }
 
         // -- IVhilCanController ------------------------------------------------
@@ -563,11 +577,35 @@ namespace Antmicro.Renode.Peripherals.CAN
             {
                 for(var i = 0; i < Math.Min(total, 32); i++)
                 {
-                    if((value & (1u << i)) == 0 || pending.Any(r => r.Buffer == i))
+                    if((value & (1u << i)) == 0)
                     {
-                        continue;   // a pending buffer's request stands (RM0468, FDCAN_TXBAR)
+                        continue;
                     }
                     var fifo = i >= dedicated && !queueMode;
+                    if(fifo && i != dedicated + fifoPut)
+                    {
+                        TxRequestsOffPut++;
+                        if(TxRequestsOffPut == 1)
+                        {
+                            this.Log(LogLevel.Warning, "TXBAR requests Tx FIFO buffer {0}, not the put index {1}: "
+                                     + "two writers on one Tx FIFO without a lock? (counted in TxRequestsOffPut, "
+                                     + "#415)", i, dedicated + fifoPut);
+                        }
+                    }
+                    var standing = pending.FirstOrDefault(r => r.Buffer == i);
+                    if(standing != null)
+                    {
+                        // A pending buffer's request stands (RM0468, FDCAN_TXBAR):
+                        // the frame written into its element since is lost.
+                        TxRequestsDropped++;
+                        if(TxRequestsDropped == 1)
+                        {
+                            this.Log(LogLevel.Warning, "TXBAR requests buffer {0}, still pending with 0x{1:X}: "
+                                     + "0x{2:X}, written into it since, is never sent (counted in "
+                                     + "TxRequestsDropped, #415)", i, standing.Frame.Id, ReadElement(i).Id);
+                        }
+                        continue;
+                    }
                     pending.Add(new VhilCanRequest
                     {
                         Buffer = i, TimeNs = now, Fifo = fifo, Frame = ReadElement(i), Generation = generation,

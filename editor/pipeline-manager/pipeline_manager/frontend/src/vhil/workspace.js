@@ -52,6 +52,13 @@ function stored(key) {
 function store(key, value) {
     try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* not kept */ }
 }
+function unstore(key) {
+    try { window.localStorage.removeItem(key); } catch { /* not kept */ }
+}
+
+// A new (never committed) system has no file to reopen: its graph is kept
+// here as a local draft until it is committed.
+const draftKey = (id) => `vhil.draft.${id}`;
 
 export const DOCK_TABS = [
     // id, label, the step that fills it (none: here now)
@@ -77,7 +84,12 @@ const LAYOUT = {
 };
 
 export const ws = reactive({
-    config: { run_virtual_ms: 3000, base_branch: 'dev', can_open_pr: false },
+    config: {
+        run_virtual_ms: 5000, base_branch: 'dev', can_open_pr: false, local_firmware: [],
+    },
+    // Runs build the server's working tree (config.local_firmware: the VS
+    // Code extension's firmware repository) instead of the catalogue's refs.
+    useLocal: true,
     systems: [],
     firmware: {}, // id -> catalogue firmware (repo, ref)
     // The open system. saved: the signature of the graph when it was opened
@@ -106,9 +118,11 @@ export const ws = reactive({
     // Check's (and opening's) findings: {severity: error|warning, text, nodeId}.
     problems: [],
     checked: false,
+    // The graph was edited after the findings above (the auto-check is due).
+    stale: false,
     run: null, // {id, state, counts, what}
     runs: [], // the open system's history
-    virtualMs: 3000,
+    virtualMs: 5000,
     // The sync quantum Run and Live run at, us: the gate's 500 unless picked
     // 1000 (#348; shell/editor-run.js QUANTA_US). Not remembered: a reload
     // is back at 500.
@@ -121,6 +135,8 @@ export const ws = reactive({
     selectedId: null,
     layout: { ...LAYOUT, ...(stored(LAYOUT_KEY) || {}) },
     dialog: null, // 'commit' | 'pr' | 'shortcuts' | 'save-session' | 'pytest'
+    // A question awaiting yes or no (ask; VhilDialogs.vue), over any dialog.
+    ask: null, // {text, ok}
     // A pytest run's form (runPytest): the selection, its timeout, the tests
     // the server collects.
     pytest: {
@@ -139,6 +155,90 @@ const log = (line) => terminalStore.add(line);
 export function say(text, type = 'info', details = undefined) {
     ws.status = text;
     NotificationHandler.terminalLog(type, text, details);
+}
+
+// -- asking, and the VS Code tab ------------------------------------------------
+
+// A question in the workspace's own modal dialog (VhilDialogs.vue), not
+// window.confirm: VS Code's webview is sandboxed without allow-modals, which
+// the editor's frame inside it inherits, so a confirm there returned false
+// without asking.
+let answerAsk = null;
+
+/** Asks `text`; resolves true for `ok`, false for Cancel (or Escape). */
+export function ask(text, { ok = 'OK' } = {}) {
+    answerAsk?.(false); // a newer question replaces an unanswered one
+    ws.ask = { text, ok };
+    return new Promise((resolve) => { answerAsk = resolve; });
+}
+
+/** The answer to the open question (VhilDialogs.vue); later calls are no-ops. */
+export function answer(yes) {
+    const resolve = answerAsk;
+    answerAsk = null;
+    ws.ask = null;
+    resolve?.(Boolean(yes));
+}
+
+// The VS Code extension frames the editor in a webview tab (vscode/; its
+// panel is the only frame-ancestors source besides this site: deploy/
+// Caddyfile, vhil/server/security.py). Messages to and from it:
+//   editor -> VS Code  {type: 'vhil.ready'}                 booted, can open
+//                      {type: 'vhil.openExternal', url}     open in a browser
+//                      {type: 'vhil.saved', system, branch} committed: VS Code
+//                                                           offers to push it
+//   VS Code -> editor  {type: 'vhil.open', system, isNew, firmware}
+// Every message names the parent's origin, never '*' (tests/unit/
+// test_editor_csp.py). The webview's is a per-panel id (vscode-webview://
+// <id>), so it is read from the frame's ancestry, or the referrer where the
+// browser has no ancestorOrigins, and must be one of VS Code's schemes; a
+// message from the parent confirms it. Unknown: nothing is posted.
+export const framed = typeof window !== 'undefined' && window.parent !== window;
+const VSCODE_ORIGIN = /^vscode-(?:webview|file):\/\/[^/?#]+/;
+
+function vscodeOrigin(url) {
+    return VSCODE_ORIGIN.exec(url || '')?.[0] || null;
+}
+
+let parentOrigin = framed
+    ? vscodeOrigin(window.location.ancestorOrigins?.[0]) || vscodeOrigin(document.referrer)
+    : null;
+
+function tellVsCode(message) {
+    if (!parentOrigin) return false;
+    window.parent.postMessage(message, parentOrigin);
+    return true;
+}
+
+/** Opens `url` (absolute, or relative to this page) in a browser tab: the
+ *  framing VS Code's, which a webview's own target=_blank can't do. */
+export function openExternal(url) {
+    const abs = new URL(url, window.location.href).href;
+    if (framed && tellVsCode({ type: 'vhil.openExternal', url: abs })) return;
+    window.open(abs, '_blank', 'noopener');
+}
+
+/** A target=_blank link's click handler: framed by VS Code, VS Code opens
+ *  it; otherwise the link opens its own tab as usual. */
+export function externalLink(event) {
+    if (!framed || !parentOrigin) return;
+    event.preventDefault();
+    openExternal(event.currentTarget.href);
+}
+
+function listenToVsCode() {
+    window.addEventListener('message', (e) => {
+        if (e.source !== window.parent || vscodeOrigin(e.origin) !== e.origin) return;
+        parentOrigin = e.origin;
+        const m = e.data;
+        if (m?.type !== 'vhil.open' || typeof m.system !== 'string' || !m.system) return;
+        // eslint-disable-next-line no-use-before-define
+        open(m.system, {
+            isNew: Boolean(m.isNew),
+            firmware: typeof m.firmware === 'string' ? m.firmware : '',
+        });
+    });
+    tellVsCode({ type: 'vhil.ready' });
 }
 
 async function guarded(what, fn) {
@@ -168,6 +268,11 @@ export function cycleTheme() {
 
 // -- the graph ------------------------------------------------------------------
 
+// The graph (signature) the findings are of, and the pending auto-check.
+let checkedSig = null;
+let autoTimer = null;
+const AUTO_CHECK_MS = 1000;
+
 /** The dataflow with what Pipeline Manager drops put back (the file's id,
  *  description, bench wiring and source text, from when it was opened). */
 export function currentGraph() {
@@ -183,6 +288,33 @@ export function currentGraph() {
 export function refreshDirty() {
     if (!ws.id || ws.saved === null) { ws.dirty = ws.isNew; return; }
     try { ws.dirty = ws.isNew || signature(saveDataflow()) !== ws.saved; } catch { /* mid-load */ }
+    // eslint-disable-next-line no-use-before-define
+    noteEdit();
+    saveDraft();
+}
+
+/** Keeps the open new system's graph as a local draft (no-op otherwise). */
+export function saveDraft() {
+    if (!ws.id || !ws.isNew || ws.saved === null) return;
+    try { store(draftKey(ws.id), currentGraph()); } catch { /* mid-load */ }
+}
+
+/** Asks before replacing unsaved edits; false keeps the current graph. */
+async function discardOk(what) {
+    if (!ws.dirty) return true;
+    saveDraft();
+    return ask(`${ws.id} has unsaved changes. Discard them and ${what}?`, { ok: 'Discard' });
+}
+
+// A reload or closed tab with unsaved edits asks first.
+if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', (e) => {
+        if (!ws.dirty) return undefined;
+        saveDraft();
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+    });
 }
 
 async function previewYaml() {
@@ -207,7 +339,8 @@ export const problemCount = (severity) => allProblems()
 // shared link opens it again.
 function remember() {
     const u = new URL(window.location.href);
-    if (ws.id && !ws.isNew) u.searchParams.set('system', ws.id); else u.searchParams.delete('system');
+    if (ws.id) u.searchParams.set('system', ws.id); else u.searchParams.delete('system');
+    if (ws.id && ws.isNew) u.searchParams.set('new', '1'); else u.searchParams.delete('new');
     if (ws.branch) u.searchParams.set('branch', ws.branch); else u.searchParams.delete('branch');
     if (replay.id) u.searchParams.set('run', String(replay.id)); else u.searchParams.delete('run');
     if (scen.name && !scen.isNew) u.searchParams.set('scenario', scen.name);
@@ -242,18 +375,26 @@ watch(() => session.live.paused, (paused) => {
 
 const today = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
 
+/** Opens system `id`. firmware: a new system's template starts on the role
+ *  that runs it (a firmware repo's New system in VS Code; ?firmware=). */
 export function open(id, {
-    branch = '', isNew = false, keepReplay = false, scenario = '',
+    branch = '', isNew = false, keepReplay = false, scenario = '', firmware = '',
 } = {}) {
     return guarded(`could not open ${id}`, async () => {
+        if (!(id === ws.id && branch === ws.branch)
+            && !(await discardOk(isNew ? `create ${id}` : `open ${id}`))) return;
         if (!keepReplay) exitReplay();
         ws.status = `opening ${id}…`;
         const q = new URLSearchParams();
         if (branch) q.set('branch', branch);
         if (isNew) q.set('new', 'true');
+        if (isNew && firmware) q.set('firmware', firmware);
         const s = await call('GET', `/api/systems/${encodeURIComponent(id)}/dataflow?${q}`);
         ws.selectedId = null;
         await loadGraph(s.dataflow);
+        const draft = !s.exists && isNew ? stored(draftKey(id)) : null;
+        if (draft) await loadGraph(draft);
+        else if (s.exists) unstore(draftKey(id));
         Object.assign(ws, {
             id,
             isNew: !s.exists,
@@ -273,14 +414,18 @@ export function open(id, {
         ws.pr.title = ws.commit.message;
         refreshDirty();
         setProblems(s.errors, s.warnings);
-        ws.checked = true;
+        // A new system's findings are of an empty file, not a Check.
+        ws.checked = s.exists;
+        ws.stale = false;
+        checkedSig = s.exists ? ws.saved : null;
+        clearTimeout(autoTimer);
         remember();
         document.title = `${id} · IFS vHIL`;
         clearScenario();
         // eslint-disable-next-line no-use-before-define
         await openScenarios(scenario);
         const where = `${branch || 'checked-out tree'} @ ${(s.ref || '').slice(0, 8)}`;
-        say(`Opened ${id}${s.exists ? '' : ' (new)'} · ${where}`);
+        say(`Opened ${id}${s.exists ? '' : ' (new)'}${draft ? ' (local draft restored)' : ''} · ${where}`);
         if (s.errors.length) {
             ws.layout.dock = true;
             ws.layout.dockTab = 'problems';
@@ -299,12 +444,39 @@ export function newSystem(id) {
     return open(id, { isNew: true });
 }
 
+/** Validates the open system and shows the findings; returns the preview. */
+async function runCheck() {
+    if (!ws.id) throw new Error('open a system first');
+    const sig = signature(saveDataflow());
+    const p = await previewYaml();
+    setProblems(p.errors, p.warnings);
+    ws.checked = true;
+    checkedSig = sig;
+    ws.stale = false;
+    // eslint-disable-next-line no-use-before-define
+    noteEdit(); // edited while it ran: stale again, re-check
+    return p;
+}
+
+/** After an edit: the findings are stale, and a Check follows once edits
+ *  pause. Quiet: no toast, the dock stays as it is. */
+function noteEdit() {
+    if (!ws.id) return;
+    let sig;
+    try { sig = signature(saveDataflow()); } catch { return; /* mid-load */ }
+    if (sig === checkedSig) return;
+    ws.stale = true;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(async () => {
+        if (ws.busy) { noteEdit(); return; }
+        try { await runCheck(); } catch { /* the explicit Check reports it */ }
+    }, AUTO_CHECK_MS);
+}
+
 export function check() {
     return guarded('Check', async () => {
-        if (!ws.id) throw new Error('open a system first');
-        const p = await previewYaml();
-        setProblems(p.errors, p.warnings);
-        ws.checked = true;
+        clearTimeout(autoTimer);
+        const p = await runCheck();
         ws.layout.dock = true;
         ws.layout.dockTab = 'problems';
         if (p.errors.length) say(`${ws.id} is not valid: ${p.errors.length} error(s)`, 'error');
@@ -358,7 +530,7 @@ export function createScenario(name) {
         say('Open a system first', 'warning');
         return;
     }
-    if (!newScenario(name, Number(ws.virtualMs) || 3000)) return;
+    if (!newScenario(name, Number(ws.virtualMs) || 5000)) return;
     ws.commit.scenario = true;
     ws.commit.scenarioMessage = `test(scenarios): add ${ws.id}/${name}`;
     ws.layout.dock = true;
@@ -383,6 +555,9 @@ export function refsOf(fwId, all = false) {
 }
 export const clearRefs = () => refsCache.clear();
 
+/** A board without roles names no catalogue firmware (vhil/editor.py NO_FIRMWARE). */
+export const NO_FIRMWARE = '(none)';
+
 /**
  * A board's app and bootloader: the firmware each runs (the role sets which:
  * a node property shown read-only) and the ref picked for it. "<id> (not in
@@ -403,7 +578,9 @@ export function boardFirmware(node) {
             fw: ws.firmware[fwId] || null,
             ref: String(propValue(node, refProp)),
         };
-    }).filter((f) => f.fwId);
+    // '(none)' (vhil/editor.py NO_FIRMWARE): no catalogue firmware, an
+    // image given at run.
+    }).filter((f) => f.fwId && f.fwId !== NO_FIRMWARE);
 }
 
 /** Picks a ref (empty: the catalogue's, so the file keeps no ref). */
@@ -477,11 +654,12 @@ async function commitSystem({ takeover = false } = {}) {
         // Another member saved this branch last (vhil/server/systems_write.py):
         // moving it is a takeover, which the server logs.
         if (e.status !== 409 || !e.detail?.takeover) throw e;
-        // eslint-disable-next-line no-alert
-        if (!window.confirm(`${e.message}\n\nTake the branch over? This is logged.`)) throw e;
+        if (!(await ask(`${e.message}\n\nTake the branch over? This is logged.`,
+            { ok: 'Take over' }))) throw e;
         out = await send({ ...body, takeover: true });
     }
     ws.isNew = false;
+    unstore(draftKey(ws.id));
     ws.runRef = out.ref;
     ws.base = out.ref;
     ws.saved = signature(saveDataflow());
@@ -491,6 +669,9 @@ async function commitSystem({ takeover = false } = {}) {
     committedAt(out);
     if (out.changed) {
         say(`Committed ${out.path} on ${out.branch} @ ${out.ref.slice(0, 8)}`);
+        // Framed by VS Code: it pushes the branch with the host's git when
+        // the server can't (no VHIL_GITHUB_TOKEN), e.g. in a firmware repository.
+        if (framed && !ws.config.can_open_pr) tellVsCode({ type: 'vhil.saved', system: ws.id, branch: out.branch });
     } else {
         say(`Nothing to commit: identical to ${out.ref.slice(0, 8)}`);
     }
@@ -631,9 +812,9 @@ export function startLive() {
             say('No live session', 'warning', why.replace('Run then runs', 'Live then runs'));
             return;
         }
-        const body = runRequest({
+        const body = withLocal(runRequest({
             system: ws.id, ref: ws.runRef, dataflow, virtualMs: 1, quantumUs: ws.quantumUs,
-        });
+        }));
         // Open-ended: the server caps it (VHIL_MAX_LIVE_MS).
         const { quantum_us: quantum } = body.scenario;
         body.scenario = { kind: 'run', live: true };
@@ -756,6 +937,12 @@ async function scenarioRunEnded(id) {
     }
 }
 
+/** A run body with `local` set when it builds the server's working tree. */
+function withLocal(body) {
+    if (ws.useLocal && ws.config.local_firmware?.length) body.local = true;
+    return body;
+}
+
 export function runNow() {
     return guarded('Run', async () => {
         if (isLive()) throw new Error(`live session ${replay.id} is on: stop it first`);
@@ -780,9 +967,9 @@ export function runNow() {
             say('Not run', 'warning', why);
             return;
         }
-        const body = runRequest({
+        const body = withLocal(runRequest({
             system: ws.id, ref: ws.runRef, dataflow, virtualMs, scenario, quantumUs: ws.quantumUs,
-        });
+        }));
         let out;
         try {
             out = await call('POST', '/api/runs', body);
@@ -826,12 +1013,12 @@ export function runPytest() {
         const tests = ws.pytest.select.trim();
         if (!ws.id || ws.isNew) throw new Error('open a saved system first');
         if (!tests) throw new Error('name a test file or node id under tests/sim');
-        const body = {
+        const body = withLocal({
             system: ws.id,
             scenario: {
                 kind: 'pytest', select: tests, timeout_s: Number(ws.pytest.timeoutS) || 3600,
             },
-        };
+        });
         let out;
         try {
             out = await call('POST', '/api/runs', body);
@@ -907,7 +1094,11 @@ export async function start() {
     const run = Number(q.get('run'));
     if (id) {
         await open(id, {
-            branch: q.get('branch') || '', keepReplay: true, scenario: q.get('scenario') || '',
+            branch: q.get('branch') || '',
+            isNew: q.get('new') === '1',
+            keepReplay: true,
+            scenario: q.get('scenario') || '',
+            firmware: q.get('firmware') || '',
         });
     }
     if (run > 0) {
@@ -922,4 +1113,7 @@ export async function start() {
         ws.layout.view = q.get('view') === 'runs' ? 'runs' : 'systems';
         if (ws.layout.view === 'runs') loadRuns();
     }
+    // Framed by VS Code: booted, with the URL's system open, it may now ask
+    // for another (vhil.open).
+    if (framed) listenToVsCode();
 }

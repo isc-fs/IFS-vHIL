@@ -703,6 +703,58 @@ from `git archive 04613679` except as listed below.
     with where it came from in its tooltip. `src/vhil/api.js`
     `send` sends a File or Blob body as it is; `src/vhil/workspace.js`
     `importRun`; `src/vhil/VhilRail.vue`.
+32. **Fit the graph to the canvas it is drawn in.**
+    `pipeline_manager/frontend/src/custom/Editor.js` `editorSize`: the
+    `.baklava-editor` box, less the palette, inspector and dock laid over
+    it. Upstream sized against the window and shifted by the palette's
+    right edge, assuming a full-window canvas; in the vHIL workspace the
+    palette has its own column and the inspector covers the canvas's
+    right, so a loaded system landed behind the inspector. Falls back to
+    upstream's window sizing when there is no editor element.
+33. **Ask in the page, and talk to the VS Code tab.** The VS Code
+    extension frames the workspace in a webview, sandboxed without
+    `allow-modals` or popups, so `window.confirm` answered no unasked and a
+    `target=_blank` link went nowhere. `src/vhil/workspace.js` `ask`
+    (a promise) shows the question in a `<dialog>` of
+    `src/vhil/VhilDialogs.vue`, over any open dialog: discarding unsaved
+    edits (`discardOk`, now async), a branch takeover (`commitSystem`) and
+    a fast periodic send (`src/vhil/VhilSend.vue`). `externalLink` /
+    `openExternal`: framed, the run, artifact and PR links
+    (`VhilRail.vue`, `VhilStatus.vue`, `VhilTopBar.vue`,
+    `VhilArtifacts.vue`, `VhilDialogs.vue`) ask VS Code to open them.
+    Messages, to the parent's own `vscode-webview:` / `vscode-file:`
+    origin (from `location.ancestorOrigins` or the referrer, never `*`):
+    `{type: 'vhil.ready'}` once booted, `{type: 'vhil.openExternal', url}`;
+    from it, only from `window.parent` at such an origin,
+    `{type: 'vhil.open', system, isNew, firmware}` opens a system (asking
+    first if the graph is edited). `open`'s `firmware` (or `?firmware=`)
+    starts a new system's template on the role that runs that firmware
+    (`GET /api/systems/<id>/dataflow?new=true&firmware=`,
+    vhil/server/systems_write.py).
+
+34. **A board without roles picks its firmware, not a role.**
+    `vhil/VhilBoardControls.vue` showed the Role select on every board,
+    disabled and empty on the SensorHub, which is not a main control unit
+    and has no roles (`catalog/boards/sensorhub.yaml`), and showed its
+    firmware as "(none)" with no way to pick one: the card only showed it
+    and the inspector is read-only. The Role row now shows only on a board
+    with roles; one without gets a Firmware select (the spec's `firmware`
+    values, "(none)" reading "none: an image given at run"), and picking
+    one resets its ref to the catalogue's. `workspace.js` `boardFirmware`
+    drops "(none)" (`NO_FIRMWARE`). The backend offers such a board only
+    firmware no board of another platform claims (`vhil/editor.py`
+    `firmware_for`), so the SensorHub isn't offered the MainLite's.
+35. **A commit tells VS Code, which pushes it.** Framed by VS Code with no
+    GitHub credentials on the server (`can_open_pr` false), a commit posts
+    `{type: 'vhil.saved', system, branch}` (`vhil/workspace.js`): the
+    extension offers to push the branch with the host's git and open its
+    pull request, and lists unpushed ones in its view. The PR dialog says
+    so instead of "by hand".
+36. **Run your working tree.** With a working tree on the server
+    (`/api/config` `local_firmware`: the VS Code extension's firmware
+    repository), the top bar has a `<id>@local` toggle, on by default:
+    Run, Live and a pytest run send `local: true`, and the worker builds
+    that firmware from the tree (uncommitted edits included) before each.
 
 ## Left for later
 

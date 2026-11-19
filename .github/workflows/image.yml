@@ -13,11 +13,23 @@ name: Image
 # Moving tags, the same on both images (deploy/compose.prod.yaml's VHIL_TAG):
 # `dev` follows the dev branch; a release tag `vX.Y.Z` gets `vX.Y.Z` and
 # `latest`.
+#
+# A pull request into dev publishes its editor image too, at its head's key
+# and with no moving tag, so whoever checks the branch out (or the VS Code
+# extension's checkout) pulls it instead of building it. Only the editor, on
+# a published base: a PR that changes docker/ builds the base locally until
+# it merges (~30 min of Renode per arch is not worth spending per push). Not
+# from forks or Dependabot, whose tokens can't write packages. Every image
+# this workflow publishes is then pulled back and loads every system
+# (`vhil.editor check`), so a broken published image fails here, not on a
+# teammate's machine.
 
 on:
   push:
     branches: [dev]
     tags: ['v*']
+  pull_request:
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
@@ -25,10 +37,13 @@ permissions:
 
 concurrency:
   group: image-${{ github.ref }}
-  cancel-in-progress: false
+  # A newer push to a PR supersedes its image; dev and tags finish each one.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io/isc-fs
+  # A PR's head, not its merge commit: the tree a teammate checks out.
+  SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   key:
@@ -41,13 +56,15 @@ jobs:
       editor: ${{ steps.key.outputs.editor }}
       base_missing: ${{ steps.have.outputs.base_missing }}
       editor_missing: ${{ steps.have.outputs.editor_missing }}
+      build: ${{ steps.plan.outputs.build }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.SHA }}
           persist-credentials: false
       - id: key
         run: scripts/image-key.sh | tee -a "$GITHUB_OUTPUT"
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -61,10 +78,32 @@ jobs:
           missing() { docker buildx imagetools inspect "$1" >/dev/null 2>&1 && echo false || echo true; }
           echo "base_missing=$(missing "$REGISTRY/ifs-vhil:$BASE")" | tee -a "$GITHUB_OUTPUT"
           echo "editor_missing=$(missing "$REGISTRY/ifs-vhil-editor:$EDITOR")" | tee -a "$GITHUB_OUTPUT"
+      - name: What to build
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_MISSING: ${{ steps.have.outputs.base_missing }}
+          EDITOR_MISSING: ${{ steps.have.outputs.editor_missing }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          build=false
+          if [ "$EVENT" != pull_request ]; then
+              { [ "$BASE_MISSING" = true ] || [ "$EDITOR_MISSING" = true ]; } && build=true
+          elif [ "$EDITOR_MISSING" != true ]; then
+              echo "The editor image of this head is published already." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$SAME_REPO" != true ] || [ "$ACTOR" = "dependabot[bot]" ]; then
+              echo "A fork's or Dependabot's PR: no image published (its token can't write packages)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$BASE_MISSING" = true ]; then
+              echo "This PR changes the base image: neither image is published until it merges (build them with \`scripts/vhil-docker.sh images\`)." >> "$GITHUB_STEP_SUMMARY"
+          else
+              build=true
+          fi
+          echo "build=$build" | tee -a "$GITHUB_OUTPUT"
 
   build:
     needs: key
-    if: needs.key.outputs.base_missing == 'true' || needs.key.outputs.editor_missing == 'true'
+    if: needs.key.outputs.build == 'true'
     strategy:
       matrix:
         include:
@@ -83,9 +122,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.SHA }}
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -122,7 +162,11 @@ jobs:
   manifest:
     needs: [key, build]
     # After a build, or with nothing to build (both keys published already).
-    if: always() && needs.key.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    # A PR only after its build: it has no moving tags to set.
+    if: >-
+      always() && needs.key.result == 'success' &&
+      (needs.build.result == 'success' ||
+       (needs.build.result == 'skipped' && github.event_name != 'pull_request'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -132,9 +176,14 @@ jobs:
       EDITOR: ${{ needs.key.outputs.editor }}
       REF_TYPE: ${{ github.ref_type }}
       REF_NAME: ${{ github.ref_name }}
+      EVENT: ${{ github.event_name }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -144,10 +193,14 @@ jobs:
           set -euo pipefail
           # The moving tags this ref gets: dev, a release tag and latest, or none.
           moving=
-          if [ "$REF_TYPE" = tag ]; then moving="$REF_NAME latest"
+          if [ "$EVENT" = pull_request ]; then moving=
+          elif [ "$REF_TYPE" = tag ]; then moving="$REF_NAME latest"
           elif [ "$REF_NAME" = dev ]; then moving=dev
           fi
-          for pair in "ifs-vhil:$BASE" "ifs-vhil-editor:$EDITOR"; do
+          # A PR publishes only its editor; the base it builds on is published.
+          pairs=("ifs-vhil:$BASE" "ifs-vhil-editor:$EDITOR")
+          [ "$EVENT" = pull_request ] && pairs=("ifs-vhil-editor:$EDITOR")
+          for pair in "${pairs[@]}"; do
               ref=$REGISTRY/$pair
               if ! docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
                   docker buildx imagetools create -t "$ref" "$ref-amd64" "$ref-arm64"
@@ -157,3 +210,15 @@ jobs:
               done
               echo "\`$ref\`${moving:+ (also \`$moving\`)}" >> "$GITHUB_STEP_SUMMARY"
           done
+      - name: The published editor image loads every system
+        # Pulled back from the registry, on this runner's arch, with this
+        # checkout's systems: what `scripts/vhil-docker.sh editor-check` runs.
+        # The registry may not serve a tag pushed a second ago: retry the pull.
+        run: |
+          for i in 1 2 3 4 5 6; do
+              docker pull -q "$REGISTRY/ifs-vhil-editor:$EDITOR" && break
+              [ "$i" = 6 ] && exit 1
+              sleep 10
+          done
+          docker run --rm -v "$PWD:/work" -w /work "$REGISTRY/ifs-vhil-editor:$EDITOR" \
+              python -m vhil.editor check

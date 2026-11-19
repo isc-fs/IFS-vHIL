@@ -13,7 +13,7 @@ second, and the periodic senders running with Stop all.
         </span>
         <span class="vhil-status-item">{{ ws.mode }}</span>
         <span v-if="ws.run" class="vhil-status-item">
-            <a :href="runPage(ws.run.id)" target="_blank" rel="noopener">run {{ ws.run.id }}</a>
+            <a :href="runPage(ws.run.id)" target="_blank" rel="noopener" @click="externalLink">run {{ ws.run.id }}</a>
             <StateBadge :state="ws.run.state" />
             <span class="mono muted">{{ frames }}</span>
         </span>
@@ -52,7 +52,9 @@ second, and the periodic senders running with Stop all.
 
 <script>
 import { computed, defineComponent } from 'vue';
-import { ws, isLive, problemCount } from './workspace.js';
+import {
+    ws, externalLink, isLive, problemCount,
+} from './workspace.js';
 import { cannotSend, live as session, stopAll } from './session.js';
 import { clockText } from './live.js';
 import { replay } from './replay.js';
@@ -94,6 +96,7 @@ export default defineComponent({
         });
         return {
             live,
+            externalLink,
             clock,
             rates,
             session,

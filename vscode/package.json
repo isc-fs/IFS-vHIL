@@ -1,0 +1,408 @@
+{
+  "name": "vhil-tests",
+  "displayName": "ISC vHIL",
+  "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel against your working tree, in the vHIL's Docker image.",
+  "version": "0.6.0",
+  "publisher": "isc-fs",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/isc-fs/IFS-vHIL"
+  },
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "activationEvents": [
+    "workspaceContains:scripts/vhil-docker.sh",
+    "workspaceContains:*.ioc"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vhil.setup",
+        "title": "Set up / Retry",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.diagnose",
+        "title": "Diagnose (Docker, images, firmware, debugger)",
+        "category": "vHIL",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "vhil.refreshTests",
+        "title": "Refresh tests",
+        "category": "vHIL",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vhil.statusClick",
+        "title": "Run the tests again",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.startVm",
+        "title": "Start the Docker VM",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.pullImages",
+        "title": "Get images (pull, or build what isn't published)",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.buildImages",
+        "title": "Build images",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.buildFirmware",
+        "title": "Build firmware\u2026",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.openEditor",
+        "title": "Open the system editor",
+        "category": "vHIL",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "vhil.openSystemInEditor",
+        "title": "Open a system in the system editor\u2026",
+        "category": "vHIL",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "vhil.stopEditor",
+        "title": "Stop the system editor",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.tools",
+        "title": "Tools\u2026",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.updateVhil",
+        "title": "Update the vHIL checkout",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.showTrace",
+        "title": "Show bus trace",
+        "category": "vHIL",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "vhil.newSystem",
+        "title": "New system\u2026",
+        "category": "vHIL",
+        "icon": "$(add)"
+      },
+      {
+        "command": "vhil.checkForUpdates",
+        "title": "Check for extension updates",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.pushSystemBranch",
+        "title": "Push and open a pull request",
+        "category": "vHIL",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "vhil.newPart",
+        "title": "New part\u2026",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.openSystemYaml",
+        "title": "Open the system file",
+        "category": "vHIL",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "vhil.runSystemScenarios",
+        "title": "Run its scenarios",
+        "category": "vHIL",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "vhil.openEditorInBrowser",
+        "title": "Open the system editor in the browser",
+        "category": "vHIL",
+        "icon": "$(link-external)"
+      }
+    ],
+    "configuration": {
+      "title": "vHIL",
+      "properties": {
+        "vhil.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Once a day, look for a newer extension on the vHIL's vscode-latest release and offer to install it."
+        },
+        "vhil.dockerContext": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Docker context the vHIL runs in (`VHIL_DOCKER_CONTEXT`). Empty: `colima-vhil` on macOS, `default` elsewhere. Docker Desktop is `desktop-linux`: start it yourself, as only a Colima context is a VM the vHIL starts.",
+          "order": 0
+        },
+        "vhil.pytestArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Extra pytest arguments for every run, e.g. `--vhil-trace`.",
+          "order": 1
+        },
+        "vhil.cpus": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Advanced. Limit each run to this many cores, like CI's 4-core runners (`VHIL_DOCKER_CPUS`). 0: no limit.",
+          "order": 2
+        },
+        "vhil.firmwareRefs": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Advanced. Firmware refs for **Build firmware** (`FW_REFS`), e.g. `ecu=feat/x ams=dev`.",
+          "order": 3
+        },
+        "vhil.ifsHilRef": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Advanced. IFS_HIL ref the firmware is built from (`IFS_HIL_REF`). Empty: `dev`.",
+          "order": 4
+        },
+        "vhil.repository": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Advanced. The vHIL repository the extension checks out when a firmware repository is open (it tests that firmware with it). Empty: `https://github.com/isc-fs/IFS-vHIL`.",
+          "order": 5
+        },
+        "vhil.ref": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Advanced. The branch or tag of that checkout, updated once a day (**Update the vHIL checkout** now). Empty: `dev`.",
+          "order": 6
+        },
+        "vhil.gdbPath": {
+          "type": "string",
+          "default": "",
+          "order": 7,
+          "markdownDescription": "Advanced. The host's GDB for **Debug Test** (`arm-none-eabi-gdb` on the PATH when empty; STM32CubeCLT ships one)."
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "vhil",
+        "required": [
+          "args"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "scripts/vhil-docker.sh's arguments"
+          }
+        }
+      }
+    ],
+    "menus": {
+      "testing/item/context": [
+        {
+          "command": "vhil.openSystemInEditor",
+          "when": "controllerId == vhil && testId =~ /^group:scenarios\\//",
+          "group": "vhil@1"
+        },
+        {
+          "command": "vhil.showTrace",
+          "when": "controllerId == vhil && testId in vhil.traced",
+          "group": "vhil@0"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vhil.statusClick",
+          "when": "false"
+        },
+        {
+          "command": "vhil.startVm",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.tools",
+          "when": "vhil.active && !vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.updateVhil",
+          "when": "vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.diagnose",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.refreshTests",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.pullImages",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.buildImages",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.buildFirmware",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.openEditor",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.openSystemInEditor",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.stopEditor",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.showTrace",
+          "when": "false"
+        },
+        {
+          "command": "vhil.newSystem",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.newPart",
+          "when": "vhil.active && !vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.pushSystemBranch",
+          "when": "vhil.active && vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.openSystemYaml",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.openEditorInBrowser",
+          "when": "vhil.active"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "vhil.newSystem",
+          "when": "view == vhil.systems",
+          "group": "navigation@0"
+        },
+        {
+          "command": "vhil.refreshTests",
+          "when": "view == vhil.systems",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vhil.pushSystemBranch",
+          "when": "view == vhil.systems && viewItem == vhilBranch",
+          "group": "inline@0"
+        },
+        {
+          "command": "vhil.openSystemYaml",
+          "when": "view == vhil.systems && viewItem =~ /^vhilSystem/",
+          "group": "inline@1"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "view == vhil.systems && viewItem == vhilSystemWithScenarios",
+          "group": "inline@0"
+        },
+        {
+          "command": "vhil.openSystemInEditor",
+          "when": "view == vhil.systems && viewItem =~ /^vhilSystem/",
+          "group": "1_open@0"
+        },
+        {
+          "command": "vhil.openSystemYaml",
+          "when": "view == vhil.systems && viewItem =~ /^vhilSystem/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "vhil.runSystemScenarios",
+          "when": "view == vhil.systems && viewItem == vhilSystemWithScenarios",
+          "group": "2_run@0"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "vhil.openEditorInBrowser",
+          "when": "activeWebviewPanelId == 'vhil.editor'",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "vhil-trace",
+          "title": "vHIL Trace",
+          "icon": "media/vhil.svg"
+        }
+      ],
+      "activitybar": [
+        {
+          "id": "vhil",
+          "title": "vHIL",
+          "icon": "media/vhil.svg"
+        }
+      ]
+    },
+    "views": {
+      "vhil-trace": [
+        {
+          "type": "webview",
+          "id": "vhil.trace",
+          "name": "vHIL Trace",
+          "when": "vhil.active"
+        }
+      ],
+      "vhil": [
+        {
+          "id": "vhil.systems",
+          "name": "Systems",
+          "when": "vhil.active"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "tsc -p . && node --test \"out/test/*.test.js\"",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.10",
+    "@types/vscode": "1.93.0",
+    "@vscode/vsce": "3.2.1",
+    "typescript": "5.7.2"
+  }
+}

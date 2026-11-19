@@ -27,7 +27,7 @@ def test_every_catalogue_view_resolves_on_every_system(path):
     for board in system.boards:
         items, errors = stateview.resolve(system, board)
         assert errors == [], errors
-        firmware = system.boards[board].firmware
+        firmware = system.boards[board].firmware or {}     # None: an image given at render
         assert len(items) == len(firmware.get("state_view") or [])
         if items:       # one FSM state, first; each kind known
             assert [i.kind for i in items].count("state") == 1 and items[0].kind == "state"

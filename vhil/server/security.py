@@ -12,11 +12,18 @@ plus X-Frame-Options, X-Content-Type-Options and Referrer-Policy. The editor
 is on this origin, under /editor/ (the proxy routes it to Pipeline Manager:
 deploy/Caddyfile), and no shell page embeds it any more: it is the vHIL
 workspace, a page of its own, which the shell's Editor route redirects to
-(static/editor.js). frame-src 'self' names no other origin. A response that
+(static/editor.js); only the VS Code extension's editor panel frames it
+(EDITOR_CSP). frame-src 'self' names no other origin. A response that
 already carries a Content-Security-Policy keeps its own: run artifacts set
 `sandbox` (vhil/server/runs.py). FastAPI's /docs and
 /redoc pages load Swagger UI from a CDN with inline script, so they get only
 the frame and sniffing headers.
+
+The shell's HTML and /static/ files carry Cache-Control: no-cache. Their
+names have no content hash, so without it a browser may reuse a stale copy
+after an upgrade (heuristic freshness from Last-Modified); no-cache makes it
+revalidate each load, which the ETag answers with a 304. Run artifacts keep
+whatever runs.py sets.
 
 The editor's own policy, EDITOR_CSP, is the same with no avatars or frames;
 Pipeline Manager sends it (PM_CSP, scripts/editor.sh). Its validators are
@@ -32,6 +39,13 @@ from urllib.parse import urlsplit
 AVATARS = "https://avatars.githubusercontent.com"
 _HOST = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$")
 DOCS = ("/docs", "/redoc", "/openapi.json")
+# The shell: its pages (app.py) and its unhashed static files.
+SHELL_PAGES = ("/", "/training/")
+
+
+def revalidated(path: str) -> bool:
+    """Whether a response for `path` must be revalidated on every load."""
+    return path in SHELL_PAGES or path.startswith("/static/")
 
 
 def origin_of(url: str) -> str | None:
@@ -44,7 +58,10 @@ def origin_of(url: str) -> str | None:
 
 
 # The editor (Pipeline Manager under /editor/). connect-src 'self' covers its
-# same-origin socket.io WebSocket in current browsers.
+# same-origin socket.io WebSocket in current browsers. Besides this site, only
+# VS Code may frame it: the vHIL extension's editor panel is a webview
+# (vscode-webview:) inside the workbench (vscode-file:), and frame-ancestors
+# checks every ancestor. No web origin is added.
 EDITOR_CSP = "; ".join([
     "default-src 'self'",
     "script-src 'self'",
@@ -54,7 +71,7 @@ EDITOR_CSP = "; ".join([
     "connect-src 'self'",
     "worker-src 'self'",
     "frame-src 'none'",
-    "frame-ancestors 'self'",
+    "frame-ancestors 'self' vscode-webview: vscode-file:",
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'self'",
@@ -101,6 +118,7 @@ class SecurityHeaders:
         path = scope.get("path", "")
         docs = path in DOCS or path.startswith("/docs/")
         policy = None if docs else csp(self._ws_origins(scope))
+        no_cache = revalidated(path)
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
@@ -113,6 +131,8 @@ class SecurityHeaders:
                     extra.append((b"content-security-policy", policy.encode()))
                 else:
                     extra.append((b"content-security-policy", b"frame-ancestors 'self'"))
+                if no_cache:
+                    extra.append((b"cache-control", b"no-cache"))
                 headers += [(k, v) for k, v in extra if k not in have]
                 message = {**message, "headers": headers}
             await send(message)

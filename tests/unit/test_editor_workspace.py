@@ -71,7 +71,9 @@ def test_a_board_picks_its_role_firmware_and_bootloader_on_its_node():
     controls = (VHIL / "VhilBoardControls.vue").read_text()
     template = controls.split("<script>")[0]
     assert 'no-drag="true"' in template and "@keydown.stop" in template
-    assert template.count("<select") == 3
+    # Role, or on a board without roles its firmware; then branch and tag.
+    assert template.count("<select") == 4
+    assert '@change="(ev) => setFirmware(ev.target.value)"' in template
     assert "pickRef(props.node, part.refProp, value)" in controls
     assert "setProp(props.node, 'role', value)" in controls
     assert "No {{ app.fwId }} firmware in the catalogue yet" in template
@@ -294,3 +296,26 @@ def test_the_debug_tab():
         t = (VHIL / vue).read_text().split("<script>")[0]
         assert " style=" not in t and ":style" not in t and "v-html" not in t, vue
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", (VHIL / "debug.css").read_text())
+
+
+def test_a_commit_tells_vs_code_so_it_can_push_the_branch():
+    """Framed by VS Code with no credentials on the server, a commit posts
+    vhil.saved (vscode/src/extension.ts pushes the branch with the host's
+    git), and the PR dialog says so instead of 'by hand'."""
+    ws = (VHIL / "workspace.js").read_text()
+    assert ("if (framed && !ws.config.can_open_pr) tellVsCode({ type: 'vhil.saved', "
+            "system: ws.id, branch: out.branch });") in ws
+    dialogs = (VHIL / "VhilDialogs.vue").read_text()
+    assert '<p v-if="!ws.config.can_open_pr && framed" class="vhil-note">' in dialogs
+    ext = (REPO / "vscode/src/extension.ts").read_text()
+    assert 'msg.type === "vhil.saved"' in ext
+
+
+def test_runs_build_the_working_tree_when_the_server_has_one():
+    """config.local_firmware (vhil/server/systems_write.py) shows the
+    top bar's <id>@local toggle; on, Run, Live and pytest send local."""
+    ws = (VHIL / "workspace.js").read_text()
+    assert "if (ws.useLocal && ws.config.local_firmware?.length) body.local = true;" in ws
+    assert ws.count("withLocal(") == 4      # the helper, Run, Live, pytest
+    bar = (VHIL / "VhilTopBar.vue").read_text()
+    assert '<input v-model="ws.useLocal" type="checkbox" :disabled="live" />' in bar

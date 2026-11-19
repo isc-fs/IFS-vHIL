@@ -42,9 +42,10 @@ from vhil.server.githost import (BranchDetails, CachedRefs, GitHost, GitHubBranc
                                  active_branches, commit_of, repo_slug)
 from vhil.server.gitstore import (OWNER_TRAILER, TAKEOVER_TRAILER, BadBranch, Conflict, GitError,
                                   GitStore)
-from vhil.server.runs import DEFAULT_VIRTUAL_MS
+from vhil.server.runs import DEFAULT_VIRTUAL_MS, local_sources
 from vhil.server.workspace import SYSTEM_ID
 from vhil.system import (ID, REF, SCHEMA, System, SystemError, built_images, find_build,
+                         format_schema_error, yaml_error,
                          image_path, newest_build)
 
 router = APIRouter()
@@ -261,7 +262,7 @@ def check_with_warnings(store: GitStore, commit: str, system_id: str,
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        return [f"not YAML: {e}"], []
+        return [yaml_error(f"{system_id}.yaml", e)], []
     if not isinstance(doc, dict):
         return ["a system file is a YAML mapping (kind: system, id, boards, ...)"], []
     if doc.get("id") != system_id:
@@ -270,8 +271,7 @@ def check_with_warnings(store: GitStore, commit: str, system_id: str,
     # system, each error names its place instead of "not valid under any".
     errors = sorted(_system_validator().iter_errors(doc), key=lambda e: list(e.absolute_path))
     if errors:
-        return [f"{'.'.join(str(p) for p in e.absolute_path) or '(top)'}: {e.message}"
-                for e in errors[:10]], []
+        return [format_schema_error(e) for e in errors[:10]], []
     with tempfile.TemporaryDirectory(prefix="vhil-check-") as tmp:
         root = Path(tmp)
         store.extract(commit, ["catalog"], root)
@@ -341,6 +341,9 @@ def config(request: Request):
             "base_branch": _store(request).base,
             "auth": request.app.state.settings.auth,
             "can_open_pr": bool(host.token) if isinstance(host, GitHubHost) else True,
+            # Firmware a run can build from a developer's working tree
+            # (RunRequest.local; the VS Code extension's firmware repository).
+            "local_firmware": sorted(local_sources()),
             "run_virtual_ms": DEFAULT_VIRTUAL_MS}
 
 
@@ -449,18 +452,23 @@ def firmware_enums(firmware_id: str, request: Request, ref: str | None = None):
             **stateview.enums_of(elf)}
 
 
-def _template(system_id: str, request: Request) -> str:
+def _template(system_id: str, request: Request, firmware_id: str | None = None) -> str:
+    """A one-board system to start from. `firmware_id` (a firmware repo's New
+    system in VS Code) picks the role that runs it, when the board has one."""
     cat = request.app.state.settings.workspace / "catalog"
     board = sorted(p.stem for p in (cat / "boards").glob("*.yaml"))[0]
     firmware = sorted(p.stem for p in (cat / "firmware").glob("*.yaml"))
     entry = {"board": board, "firmware": firmware[0]}
     # A board with roles (the MainLite) needs one, which sets its firmware:
-    # the first whose firmware the catalogue has.
+    # the one running `firmware_id` if any role does, else the first whose
+    # firmware the catalogue has.
     roles = (yaml.safe_load((cat / "boards" / f"{board}.yaml").read_text())
              .get("roles") or {})
     if roles:
-        role = next((r for r, spec in roles.items() if spec.get("firmware") in firmware),
-                    next(iter(roles)))
+        role = next((r for r, spec in roles.items()
+                     if firmware_id and spec.get("firmware") == firmware_id),
+                    next((r for r, spec in roles.items() if spec.get("firmware") in firmware),
+                         next(iter(roles))))
         entry = {"board": board, "role": role}
     return editor.dump_system({"kind": "system", "id": system_id,
                                "description": "A new system: place boards, wire their buses.",
@@ -468,9 +476,11 @@ def _template(system_id: str, request: Request) -> str:
 
 
 @router.get("/api/systems/{system_id}/dataflow")
-def dataflow(system_id: str, request: Request, branch: str | None = None, new: bool = False):
+def dataflow(system_id: str, request: Request, branch: str | None = None, new: bool = False,
+             firmware: str | None = None):
     """The system file on `branch` (default: the checked-out tree) as the
-    graph the editor loads; with new=true, a template if it doesn't exist."""
+    graph the editor loads; with new=true, a template if it doesn't exist,
+    on the role running `firmware` when one does (_template)."""
     _id(system_id)
     store = _store(request)
     ref = None
@@ -485,7 +495,7 @@ def dataflow(system_id: str, request: Request, branch: str | None = None, new: b
     if not exists:
         if not new:
             raise HTTPException(404, f"no system '{system_id}'" + (f" on {branch}" if branch else ""))
-        text = _template(system_id, request)
+        text = _template(system_id, request, firmware)
     try:
         doc = yaml.safe_load(text)
         graph = editor.to_dataflow(doc, source=text)

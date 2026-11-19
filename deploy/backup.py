@@ -16,6 +16,9 @@ A snapshot is a directory <VHIL_BACKUP_DIR>/<UTC time>/ with
     branches.bundle the workspace clone's local branches (the systems users
                     saved from the browser, some maybe never pushed), as a git
                     bundle; absent when there are none
+    training.json   the trainees' progress on the Training page (vhil/training.py
+                    Progress, next to vhil.db: written whole and renamed into
+                    place, so a copy is never torn); absent when there is none
 
 Snapshots beyond the newest VHIL_BACKUP_KEEP are deleted. Run traces and
 firmware builds are not included: traces are large and only history, firmware
@@ -39,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB = Path(os.environ.get("VHIL_DB", "/data/db/vhil.db"))
+TRAINING = DB.with_name("training.json")
 WORKSPACE = Path(os.environ.get("VHIL_WORKSPACE", "/workspace"))
 DEST = Path(os.environ.get("VHIL_BACKUP_DIR", "/backups"))
 KEEP = int(os.environ.get("VHIL_BACKUP_KEEP", "14"))
@@ -119,6 +123,8 @@ def once() -> Path:
     try:
         copy_db(DB, tmp / "vhil.db")
         n = bundle_branches(tmp / "branches.bundle")
+        if TRAINING.is_file():
+            shutil.copyfile(TRAINING, tmp / TRAINING.name)
         private(tmp)
         tmp.rename(final)
     except BaseException:
@@ -157,6 +163,16 @@ def restore(name: str) -> None:
     if ok != "ok":
         raise SystemExit(f"restored database fails its integrity check: {ok}")
     log(f"restored {DB} from {snap.name}")
+    if (snap / TRAINING.name).is_file():
+        if TRAINING.is_file():
+            keep = TRAINING.with_name(f"{TRAINING.name}.before-restore-"
+                                      f"{datetime.now(timezone.utc).strftime(STAMP)}")
+            shutil.copyfile(TRAINING, keep)
+            private(keep)
+        tmp = TRAINING.with_suffix(".restore")
+        shutil.copyfile(snap / TRAINING.name, tmp)
+        tmp.replace(TRAINING)
+        log(f"restored {TRAINING} from {snap.name}")
     if (snap / "branches.bundle").is_file():
         log(f"saved branches: git -C {WORKSPACE} fetch {snap / 'branches.bundle'} "
             f"'refs/heads/*:refs/heads/*'  (docs/deploy.md)")

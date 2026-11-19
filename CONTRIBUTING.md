@@ -36,6 +36,12 @@ time, so tests can run on every PR without the physical bench. Read:
 
 ## 2. Set up (once, ~15 minutes)
 
+~15 minutes when the published images fit this checkout; ~30 minutes more
+when they are built on your machine. Prefer no terminal? The desktop app does
+the same set-up ([`app/README.md`](app/README.md)). Either way,
+[`docs/first-10-minutes.md`](docs/first-10-minutes.md) then takes you from
+the app to CAN frames on screen.
+
 ```sh
 git clone https://github.com/isc-fs/IFS-vHIL && cd IFS-vHIL
 git switch dev
@@ -96,6 +102,7 @@ To step through firmware, use [GDB](docs/debugger.md).
 | You want to… | Look at |
 |---|---|
 | add a board or a chip | [`docs/development/adding-a-board.md`](docs/development/adding-a-board.md) |
+| add a part (a sensor on a bus) | [`docs/development/adding-a-part.md`](docs/development/adding-a-part.md) (`python -m vhil.part new`) |
 | add a device model (sensor, transceiver) | `models/renode/*.cs` + `catalog/models/*.yaml`, step 3 of that guide |
 | wire boards into a system | `systems/*.yaml`; [`CLAUDE.md` "Systems are data"](CLAUDE.md#systems-are-data) |
 | understand the CAN bus model | [`docs/can-bus.md`](docs/can-bus.md) |

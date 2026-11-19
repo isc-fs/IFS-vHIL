@@ -1,6 +1,9 @@
 # Docs index
 
-**Start here:** [`CONTRIBUTING.md`](../CONTRIBUTING.md) (setup, first PR),
+**Using the vHIL:** [`first-10-minutes.md`](first-10-minutes.md) (install,
+run a system, watch its CAN bus and state).
+
+**Working on it:** [`CONTRIBUTING.md`](../CONTRIBUTING.md) (setup, first PR),
 then [`vision.md`](vision.md) (where the project is going) and the hard
 invariants in [`CLAUDE.md`](../CLAUDE.md#hard-invariants).
 
@@ -9,7 +12,9 @@ invariants in [`CLAUDE.md`](../CLAUDE.md#hard-invariants).
 | Doc | What it covers |
 |---|---|
 | [development/setup.md](development/setup.md) | Docker jobs, native setup, debugging failing tests, branching, PRs, releases |
+| [development/hardware.md](development/hardware.md) | What a laptop needs to run the tests: spec and measurements |
 | [development/adding-a-board.md](development/adding-a-board.md) | How to add a new board or MCU, step by step, with a definition of done |
+| [development/adding-a-part.md](development/adding-a-part.md) | How to add a part (a sensor or chip on a bus): `python -m vhil.part new` generates it |
 | [ci.md](ci.md) | CI policy, labels (`full-ci`), impact selection, fingerprints |
 | [test-coverage.md](test-coverage.md) | What the vHIL's own test suite covers |
 | [debugger.md](debugger.md) | GDB on an emulated board |

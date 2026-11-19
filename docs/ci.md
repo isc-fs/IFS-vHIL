@@ -120,7 +120,10 @@ Examples (`full-ci`):
 | `vhil/sim.py`, a workflow, an unmapped path | everything |
 
 Every tests/sim file carries a module-level `pytestmark` with its boards, its
-systems and at least one subsystem; `tests/unit/test_ci_select.py` checks
+systems and at least one subsystem. A file that tests a platform on its own,
+with no system or firmware (`test_stm32l496_platform.py`, for a board whose
+firmware does not exist yet), names `platform_<id>` instead of a system, and
+no board. `tests/unit/test_ci_select.py` checks
 it, the board markers against the systems' roles, every rule's targets, and
 the selection's fail-safes. Scenarios are grouped by system already
 (`systems/<system>.scenarios/`); the scenario job runs the selected systems'
@@ -178,7 +181,13 @@ markers and the guard.
 ([`scripts/image-key.sh`](../scripts/image-key.sh)): a push to `dev` or a
 release tag builds a key only if it isn't published yet, natively on an
 amd64 and an arm64 runner, and joins the two into one tag. `dev` and `vX.Y.Z`
-are moving tags on top. CI's own jobs don't use these images: they install
+are moving tags on top. A pull request into dev publishes its head's editor
+image the same way (no moving tag; about 7 min), so checking a PR out pulls
+it instead of building it. Only the editor, and only on a published base: a
+PR that changes `docker/` builds the base locally until it merges. Forks and
+Dependabot are skipped (their tokens can't write packages). Every image the
+workflow publishes is pulled back and must load every system
+(`vhil.editor check`). CI's own jobs don't use these images: they install
 the toolchain on the runner and take Renode from the Actions cache.
 
 ## The firmware image cache

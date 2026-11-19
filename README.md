@@ -58,8 +58,13 @@ indexed in [`docs/README.md`](docs/README.md). Adding a board:
 
 ## Try it
 
+New here? [`docs/first-10-minutes.md`](docs/first-10-minutes.md) goes from
+install to CAN frames on screen, with the desktop app
+([`app/`](app/README.md)) or `bin/vhil` (`bin/vhil setup`, then `bin/vhil ui`).
+
 Everything runs in Docker; nothing is installed on the host. On macOS the
-wrapper starts a small VM for it.
+wrapper starts a small VM for it. Underneath, `bin/vhil` and the app run
+`scripts/vhil-docker.sh`, whose jobs are the same as CI's:
 
 ```sh
 scripts/vhil-docker.sh vm            # once, on macOS: the VM
@@ -69,7 +74,7 @@ scripts/vhil-docker.sh unit          # host-only checks; validates every system
 scripts/vhil-docker.sh smoke ecu     # boot a board and check what it says on CAN
 scripts/vhil-docker.sh sim           # the native test suites, in virtual time
 scripts/vhil-docker.sh ifs-hil       # IFS_HIL's own suite against the virtual boards
-scripts/vhil-docker.sh server        # the web app on http://localhost:8080
+scripts/vhil-docker.sh editor        # the app on http://localhost:8080/editor/, with its run worker
 ```
 
 Every job the wrapper runs (the full list is the header of

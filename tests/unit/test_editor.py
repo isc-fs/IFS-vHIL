@@ -438,8 +438,9 @@ def test_firmware_refs_survive_the_round_trip(spec, path):
     """The picker's per-board refs (#116) are board properties in the graph."""
     doc = yaml.safe_load(path.read_text())
     for b in doc["boards"].values():
-        b["firmware_ref"] = "feat/x"
-        b["bootloader_ref"] = "v1.6.2"     # every MainLite carries the bootloader
+        if "role" in b:                     # a board with no firmware has no ref
+            b["firmware_ref"] = "feat/x"
+            b["bootloader_ref"] = "v1.6.2"     # every MainLite carries the bootloader
     assert from_dataflow(to_dataflow(doc, spec), spec) == doc
     assert validate(doc) == []
 
@@ -608,3 +609,64 @@ def test_an_edit_keeps_the_files_comments():
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             assert line in out
+
+
+def _added(node: dict, instance_name: str, tag: str) -> dict:
+    """A copy of `node` as Pipeline Manager adds one: new IDs, unwired, and
+    named after its type unless told otherwise."""
+    new = copy.deepcopy(node)
+
+    def renumber(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "id" and isinstance(v, str):
+                    o[k] = f"{v}:{tag}"
+                else:
+                    renumber(v)
+        elif isinstance(o, list):
+            for v in o:
+                renumber(v)
+    renumber(new)
+    new["instanceName"] = instance_name
+    return new
+
+
+def test_added_nodes_get_names_the_schema_accepts(spec):
+    """#388: a bus added in the editor is named after its type, "CAN bus",
+    which `$defs/name` refuses, and a second one overwrote the first. Each
+    gets the next free can_<n>; names a system already has stay as they are."""
+    doc = yaml.safe_load((REPO / "systems" / "ecu.yaml").read_text())
+    graph = to_dataflow(doc, spec)
+    nodes = graph["graphs"][0]["nodes"]
+    bus = next(n for n in nodes if n["instanceName"] == "can_inv")
+    radio = next(n for n in nodes if n["instanceName"] == "radio")
+    nodes += [_added(bus, "CAN bus", "a"), _added(bus, "CAN bus", "b"),
+              _added(bus, "", "c"), _added(radio, "radio", "d")]
+    out = from_dataflow(graph, spec)
+    assert set(doc["buses"]) < set(out["buses"])
+    assert set(out["buses"]) - set(doc["buses"]) == {"can_1", "can_2", "can_3"}
+    assert all(out["buses"][b]["nodes"] == [] for b in ("can_1", "can_2", "can_3"))
+    assert out["devices"]["radio"] == doc["devices"]["radio"]
+    assert set(out["devices"]) == {"radio", "nrf24l01p_1"}
+    assert not [e for e in validate(out) if "does not match" in e]
+
+
+@pytest.mark.parametrize("path", SYSTEMS, ids=lambda p: p.name)
+def test_a_system_keeps_its_names_through_the_editor(spec, path):
+    doc = yaml.safe_load(path.read_text())
+    out = from_dataflow(to_dataflow(doc, spec), spec)
+    for key in ("boards", "buses", "devices"):
+        assert set(out.get(key, {})) == set(doc.get(key, {}))
+
+
+def test_a_board_without_roles_is_offered_only_firmware_no_other_platform_claims():
+    # The SensorHub (STM32L496) isn't offered the MainLite's (STM32H733) role
+    # firmware or bootloader; a firmware no board claims stays offered.
+    from vhil.editor import NO_FIRMWARE, firmware_for, specification
+    boards = {"mainlite": {"platform": "stm32h733", "bootloader": "can-bootloader",
+                           "roles": {"ecu": {"firmware": "ecu"}, "ams": {"firmware": "ams"}}},
+              "sensorhub": {"platform": "stm32l496"}}
+    assert firmware_for("sensorhub", boards, ["ams", "can-bootloader", "ecu", "imu-fw"]) == ["imu-fw"]
+    node = next(n for n in specification()["nodes"] if n["name"] == "sensorhub")
+    firmware = next(p for p in node["properties"] if p["name"] == "firmware")
+    assert firmware["values"] == [NO_FIRMWARE]

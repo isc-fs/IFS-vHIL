@@ -87,8 +87,9 @@ MAX_ATTEMPTS = 2
 # A `run` scenario's virtual time when the request names none, and what the
 # editor workspace offers: every run counts from power-on, and each
 # MainLite spends its CAN bootloader's 2 s auto-jump window before its app
-# starts (CLAUDE.md invariant 5), so less than 3 s shows little of the app.
-DEFAULT_VIRTUAL_MS = 3000
+# starts (CLAUDE.md invariant 5), so less than 3 s shows nothing of the app and
+# 3 s only 1 s of it (#390).
+DEFAULT_VIRTUAL_MS = 5000
 # A live session's slice (the trace is flushed, and its ops applied, at each
 # slice boundary; Limits.max_live_ms caps its virtual time).
 LIVE_SLICE_MS = 50
@@ -143,7 +144,9 @@ class QueueFull(Exception):
 # A git ref we pass to `git clone -b` and use in a directory name: no option
 # look-alikes, no path climbing.
 _REF = re.compile(r"^(?!-)(?!.*\.\.)[\w./-]{1,100}\Z", re.ASCII)
-_SELECT = re.compile(r"^tests/(?!.*\.\.)[\w/.-]+\.py(::[\w\[\]\-.,=]+)*$")
+# Under tests/, or a training puzzle's grading tests (training/tests/,
+# training/README.md): outside testpaths, so never collected by the gate.
+_SELECT = re.compile(r"^(tests|training/tests)/(?!.*\.\.)[\w/.-]+\.py(::[\w\[\]\-.,=]+)*$")
 _HEX = re.compile(r"^([0-9a-fA-F]{2})*$")
 # Names a scenario uses to point into its system: a board or bus instance
 # (schema $defs/name) and a board connector or pin. They are matched against
@@ -193,6 +196,18 @@ class CanPeriodic(_Can):
     kind: Literal["can_periodic"]
     period_ms: float = Field(gt=0, le=60_000)
     until_ms: Optional[float] = Field(None, ge=0)   # default: to the end
+
+
+class CanWire(_Model):
+    """Opens (connected: false) or closes a board's stub to a bus at at_ms:
+    the controller `node` (an endpoint of `bus`, e.g. ams.FDCAN1) is cut off,
+    hears nothing and gets no ACK (models/renode/VhilCanBus.cs, Open wire)."""
+    kind: Literal["can_wire"]
+    name: Optional[str] = Field(None, pattern=_ROW)
+    at_ms: float = Field(0, ge=0)
+    bus: str = Field(pattern=_NAME)
+    node: str = Field(pattern=r"^[A-Za-z_]\w{0,63}\.[A-Za-z0-9_]{1,32}$")
+    connected: bool
 
 
 class GpioSet(_Model):
@@ -262,7 +277,7 @@ class PlantSet(_Model):
 
 
 Stimulus = Annotated[Union[CanSend, CanPeriodic, StopPeriodic, GpioSet, AnalogSet, WatchOp,
-                           PlantSet], Field(discriminator="kind")]
+                           PlantSet, CanWire], Field(discriminator="kind")]
 
 
 class SymbolWatch(_Model):
@@ -417,11 +432,30 @@ class PytestScenario(_Model):
     @classmethod
     def _select(cls, v: str) -> str:
         if not _SELECT.match(v):
-            raise ValueError("select must be a test node id under tests/ (tests/…/x.py[::name])")
+            raise ValueError("select must be a test node id under tests/ or training/tests/ "
+                             "(tests/…/x.py[::name])")
         return v
 
 
 Scenario = Annotated[Union[RunScenario, PytestScenario], Field(discriminator="kind")]
+
+# An image's ref when the run builds it from a developer's working tree, the
+# one this server was started with (VHIL_LOCAL_SOURCES): uncommitted edits
+# included, rebuilt (incrementally) before every run that asks for it.
+LOCAL_REF = "@local"
+
+
+def local_sources(env: Optional[dict] = None) -> dict[str, Path]:
+    """Firmware id -> its working tree in the container, from
+    VHIL_LOCAL_SOURCES ("<id>=<dir> ...", scripts/vhil-docker.sh editor sets
+    it from FW_LOCAL, the VS Code extension's firmware repository)."""
+    text = (os.environ if env is None else env).get("VHIL_LOCAL_SOURCES", "")
+    out = {}
+    for pair in text.split():
+        fid, sep, d = pair.partition("=")
+        if sep and fid and d.startswith("/"):
+            out[fid] = Path(d)
+    return out
 
 
 class RunRequest(_Model):
@@ -430,6 +464,10 @@ class RunRequest(_Model):
     # image key (System.images: "<board>", "<board>.bootloader") -> firmware
     # ref; missing or null = the catalogue firmware's default ref.
     firmware: dict[str, Optional[str]] = {}
+    # Build every image of a firmware this server has a working tree of
+    # (VHIL_LOCAL_SOURCES: the VS Code extension's firmware repository) from
+    # that tree instead, uncommitted edits included (vhil.worker.LOCAL_REF).
+    local: bool = False
     scenario: Scenario
 
     @field_validator("system")
@@ -458,6 +496,19 @@ def firmware_commits(request, system: System, refs: dict) -> dict[str, dict]:
     from vhil.worker import resolve_commits
     return resolve_commits(system, {k: v for k, v in refs.items() if v}, _refs(request),
                            log=lambda m: log.warning("run firmware: %s", m))
+
+
+def local_images(system: System) -> dict[str, str]:
+    """Image key -> LOCAL_REF for each image whose firmware this server has a
+    working tree of (local_sources)."""
+    from vhil.worker import image_ref
+    trees = local_sources()
+    out = {}
+    for key in system.images():
+        fw, _ = image_ref(system, key, {})
+        if fw is not None and fw["id"] in trees:
+            out[key] = LOCAL_REF
+    return out
 
 
 def check_against_system(req: RunRequest, system: System, workspace: Path) -> list[str]:
@@ -498,6 +549,12 @@ def check_scenario(sc: RunScenario, system: System) -> list[str]:
         if isinstance(s, (CanSend, CanPeriodic)):
             if s.bus not in system.buses:
                 errors.append(f"{where}: no bus '{s.bus}' in {system.id}")
+        elif isinstance(s, CanWire):
+            if s.bus not in system.buses:
+                errors.append(f"{where}: no bus '{s.bus}' in {system.id}")
+            elif s.node not in system.buses[s.bus]["nodes"]:
+                errors.append(f"{where}: {s.node} is not on bus '{s.bus}' "
+                              f"({', '.join(system.buses[s.bus]['nodes'])})")
         elif isinstance(s, GpioSet):
             pin(s.board, s.pin, "gpio", where)
             owner = system.plant_driven_pins().get(f"{s.board}.{s.pin}")
@@ -569,7 +626,8 @@ CREATE TABLE IF NOT EXISTS runs (
     owner      TEXT NOT NULL DEFAULT '',
     token      TEXT NOT NULL DEFAULT '',
     firmware_commits TEXT NOT NULL DEFAULT '{}',
-    imported   TEXT NOT NULL DEFAULT '{}'
+    imported   TEXT NOT NULL DEFAULT '{}',
+    seed       TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS runs_state ON runs (state, id);
 """
@@ -578,7 +636,7 @@ CREATE INDEX IF NOT EXISTS runs_state ON runs (state, id);
 _ADDED = {"heartbeat": "REAL", "attempts": "INTEGER NOT NULL DEFAULT 0",
           "ref_name": "TEXT NOT NULL DEFAULT ''", "owner": "TEXT NOT NULL DEFAULT ''",
           "token": "TEXT NOT NULL DEFAULT ''", "firmware_commits": "TEXT NOT NULL DEFAULT '{}'",
-          "imported": "TEXT NOT NULL DEFAULT '{}'"}
+          "imported": "TEXT NOT NULL DEFAULT '{}'", "seed": "TEXT NOT NULL DEFAULT '{}'"}
 
 
 class RunStore:
@@ -631,12 +689,14 @@ class RunStore:
     def create(self, system: str, ref: str, firmware: dict, scenario: dict,
                ref_name: str = "", owner: str = "", max_active: Optional[int] = None,
                max_active_per_user: Optional[int] = None,
-               firmware_commits: Optional[dict] = None) -> int:
+               firmware_commits: Optional[dict] = None, seed: Optional[dict] = None) -> int:
         """A queued run. `ref`: the workspace commit its system file is read
         at ("" outside git); `ref_name`: the branch/tag/commit it was asked as;
         `owner`: the login of who started it ("dev" in dev mode);
         `firmware_commits`: image key -> {ref, commit} its firmware refs
-        resolved to (vhil.worker.resolve_commits). Each run gets
+        resolved to (vhil.worker.resolve_commits); `seed`: a training
+        run's seeded firmware (vhil/training_fw.py; only the training API
+        sets it). Each run gets
         a random token, which its trace's header must carry for the API to
         serve the trace (trace_header). Raises QueueFull when the active runs
         (queued or running) already number `max_active`, or `max_active_per_user`
@@ -658,10 +718,11 @@ class RunStore:
                                     "queued or running runs: wait for one to finish or cancel one")
                 row = db.execute(
                     "INSERT INTO runs (state, system, ref, firmware, scenario, created, ref_name, "
-                    "owner, token, firmware_commits) VALUES ('queued', ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "RETURNING id",
+                    "owner, token, firmware_commits, seed) "
+                    "VALUES ('queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                     (system, ref, json.dumps(firmware), json.dumps(scenario), now_iso(), ref_name,
-                     owner, uuid.uuid4().hex, json.dumps(firmware_commits or {}))).fetchone()
+                     owner, uuid.uuid4().hex, json.dumps(firmware_commits or {}),
+                     json.dumps(seed or {}))).fetchone()
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
@@ -824,7 +885,7 @@ def _now(now: Optional[float]) -> float:
 
 def _row(row: sqlite3.Row) -> dict:
     d = dict(row)
-    for key in ("firmware", "scenario", "summary", "firmware_commits", "imported"):
+    for key in ("firmware", "scenario", "summary", "firmware_commits", "imported", "seed"):
         if key in d:
             d[key] = json.loads(d[key]) if d[key] else {}
     return d
@@ -1162,6 +1223,80 @@ def check_limits(req: RunRequest, limits: Limits) -> list[str]:
     return errors
 
 
+def _login(request: Request) -> str:
+    user = getattr(request.state, "user", None) or {}
+    return user.get("login") or ""
+
+
+def submit(req: RunRequest, request: Request, settings, workspace, store: "RunStore",
+           limits: Limits, seed: Optional[dict] = None) -> int:
+    """Queue a run as POST /api/runs does (checked against the limits, the
+    system and its firmware refs): its id. The training API's runs come here
+    too (vhil/server/training.py), with a puzzle's `seed` (RunStore.create)."""
+    from vhil.server.workspace import NotFound
+    login = _login
+    sc = req.scenario
+    if isinstance(sc, RunScenario) and sc.live and "virtual_ms" not in sc.model_fields_set:
+        # Open-ended: until stopped, idle, or this server's cap.
+        req = req.model_copy(update={"scenario": sc.model_copy(
+            update={"virtual_ms": limits.max_live_ms})})
+    over = check_limits(req, limits)
+    if over:
+        raise HTTPException(422, over)
+    head = workspace.ref()
+    commit = head
+    if req.ref:
+        if not _REF.match(req.ref):
+            raise HTTPException(422, f"ref {req.ref!r} is not a plain git ref")
+        commit = resolve_ref(workspace.root, req.ref) if head else None
+        if not commit:
+            raise HTTPException(422, f"no ref '{req.ref}' in the workspace "
+                                     f"({'no git' if not head else 'not a branch, tag or commit'})")
+    with tempfile.TemporaryDirectory(prefix="vhil-run-") as tmp:
+        if commit and commit != head:
+            # Runs at a saved ref (above): the ref's system file, this tree's code.
+            if isinstance(req.scenario, PytestScenario):
+                raise HTTPException(422, f"a pytest scenario runs the workspace's tests and "
+                                         f"systems as checked out: ref {req.ref} is not HEAD")
+            changed = code_changes(workspace.root, head, commit)
+            if changed:
+                raise HTTPException(422, code_mismatch(workspace.root, head, commit, req.ref,
+                                                       req.system, changed))
+            try:
+                path = materialise_system(workspace.root, commit, req.system, Path(tmp))
+            except RuntimeError:
+                raise HTTPException(422, f"no system '{req.system}' at {req.ref}")
+        else:
+            try:
+                path = workspace.system_path(req.system)
+            except NotFound:
+                raise HTTPException(422, f"no system '{req.system}' in the workspace")
+        try:
+            system = System(path)
+        except SystemError as e:
+            raise HTTPException(422, f"system '{req.system}' does not validate: {e}")
+    errors = check_against_system(req, system, workspace.root)
+    if req.local:
+        req.firmware = {**req.firmware, **local_images(system)}
+        if not any(v == LOCAL_REF for v in req.firmware.values()):
+            errors.append(f"local: no image of {system.id} is a firmware this server has a working "
+                          f"tree of ({', '.join(local_sources()) or 'none'})")
+    if errors:
+        raise HTTPException(422, errors)
+    # Each image's ref as the commit it is at now: the run builds and
+    # runs that commit, whatever the branch does next (vhil.worker).
+    fw_commits = firmware_commits(request, system, req.firmware)
+    try:
+        run_id = store.create(req.system, commit, req.firmware, req.scenario.model_dump(),
+                              ref_name=req.ref or "", owner=login(request),
+                              max_active=limits.max_active,
+                              max_active_per_user=limits.max_active_per_user,
+                              firmware_commits=fw_commits, seed=seed)
+    except QueueFull as e:
+        raise HTTPException(429, str(e))
+    return run_id
+
+
 def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
     """/api/runs over settings.db and settings.results."""
     from vhil.server.workspace import NotFound
@@ -1195,61 +1330,7 @@ def router(settings, workspace, limits: Optional[Limits] = None) -> APIRouter:
 
     @r.post("", status_code=201)
     def create(req: RunRequest, request: Request):
-        sc = req.scenario
-        if isinstance(sc, RunScenario) and sc.live and "virtual_ms" not in sc.model_fields_set:
-            # Open-ended: until stopped, idle, or this server's cap.
-            req = req.model_copy(update={"scenario": sc.model_copy(
-                update={"virtual_ms": limits.max_live_ms})})
-        over = check_limits(req, limits)
-        if over:
-            raise HTTPException(422, over)
-        head = workspace.ref()
-        commit = head
-        if req.ref:
-            if not _REF.match(req.ref):
-                raise HTTPException(422, f"ref {req.ref!r} is not a plain git ref")
-            commit = resolve_ref(workspace.root, req.ref) if head else None
-            if not commit:
-                raise HTTPException(422, f"no ref '{req.ref}' in the workspace "
-                                         f"({'no git' if not head else 'not a branch, tag or commit'})")
-        with tempfile.TemporaryDirectory(prefix="vhil-run-") as tmp:
-            if commit and commit != head:
-                # Runs at a saved ref (above): the ref's system file, this tree's code.
-                if isinstance(req.scenario, PytestScenario):
-                    raise HTTPException(422, f"a pytest scenario runs the workspace's tests and "
-                                             f"systems as checked out: ref {req.ref} is not HEAD")
-                changed = code_changes(workspace.root, head, commit)
-                if changed:
-                    raise HTTPException(422, code_mismatch(workspace.root, head, commit, req.ref,
-                                                           req.system, changed))
-                try:
-                    path = materialise_system(workspace.root, commit, req.system, Path(tmp))
-                except RuntimeError:
-                    raise HTTPException(422, f"no system '{req.system}' at {req.ref}")
-            else:
-                try:
-                    path = workspace.system_path(req.system)
-                except NotFound:
-                    raise HTTPException(422, f"no system '{req.system}' in the workspace")
-            try:
-                system = System(path)
-            except SystemError as e:
-                raise HTTPException(422, f"system '{req.system}' does not validate: {e}")
-        errors = check_against_system(req, system, workspace.root)
-        if errors:
-            raise HTTPException(422, errors)
-        # Each image's ref as the commit it is at now: the run builds and
-        # runs that commit, whatever the branch does next (vhil.worker).
-        fw_commits = firmware_commits(request, system, req.firmware)
-        try:
-            run_id = store.create(req.system, commit, req.firmware, req.scenario.model_dump(),
-                                  ref_name=req.ref or "", owner=login(request),
-                                  max_active=limits.max_active,
-                                  max_active_per_user=limits.max_active_per_user,
-                                  firmware_commits=fw_commits)
-        except QueueFull as e:
-            raise HTTPException(429, str(e))
-        return {"run_id": run_id}
+        return {"run_id": submit(req, request, settings, workspace, store, limits)}
 
     @r.get("")
     def history(request: Request, limit: int = Query(100, ge=1, le=1000),

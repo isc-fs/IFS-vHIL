@@ -36,7 +36,13 @@ frame, jitter under one kernel tick), not exact 10 000 µs intervals.
 
 The model works at frame granularity, with no bit-level physics. It follows
 ISO 11898-1 (Bosch CAN 2.0B) for the bus, and RM0468's FDCAN chapter for the
-controller (`Stm32H7Fdcan.cs`).
+H733's controller (`Stm32H7Fdcan.cs`). The STM32L496's bxCAN
+(`Stm32BxCan.cs`, after RM0351's bxCAN chapter) joins the bus the same way:
+its three Tx mailboxes are offered by lowest ID, or in request order with
+`MCR.TXFP`; `MCR.NART` plays DAR's part (`TSR.ALSTx`/`TERRx` instead of
+`TXBCF`); `TSR` and `ESR.TEC/LEC/EWGF/EPVF` read the bus's verdicts; the bit
+rate comes from BTR on PCLK1; the Tx interrupt (`IER.TMEIE`) is raised, the
+status-change interrupt is not.
 
 | | |
 |---|---|
@@ -45,6 +51,7 @@ controller (`Stm32H7Fdcan.cs`).
 | Frame time | SOF to EOF at the transmitter's bit rate, from NBTP on the 24 MHz kernel clock. It counts the exact stuff bits for the frame's contents, then 3 bits of intermission. A receiver gets the frame at the next-to-last EOF bit; the transmitter completes at the last (`TXBTO`, `IR.TC`, the FIFO slot freed). |
 | ACK | A frame no other node acknowledges gets an ACK error: error flag, delimiter and intermission, then a retry (or with DAR, a cancel). A node acknowledges when it is running: not in INIT, bus-off or bus monitoring mode, and at the same bit rate. The probe acknowledges unless `set_ack(False)` makes it listen only. |
 | Errors | ACK errors only. The transmitter's TEC rises by 8 per error, but not once it is error-passive (rule 3, exception 1), and falls by 1 per good frame. An error-passive transmitter waits 8 extra bits after each frame. `ECR.TEC`, `PSR.LEC/EW/EP` read the result. A lone node climbs to 128, error-passive, and stays there, retrying. |
+| Tx races | A `TXBAR` bit for a buffer still pending changes nothing (RM0468, FDCAN_TXBAR), so the frame written into that element since is never sent. The FDCAN counts these in `TxRequestsDropped`, and Tx FIFO requests for any buffer but the put index in `TxRequestsOffPut` (`sysbus.fdcanN_h7 TxRequestsDropped`). Both come from two tasks adding to one Tx FIFO without a lock; the first of each is logged with the IDs involved (#415). |
 | Load | Busy time (frames, error frames, intermission) over a window: `CanBus.load()`. The worker writes it per bus and slice to the run's trace as `bus_load`, and the editor's Bus tab shows it. |
 
 **Not modelled:**
@@ -53,6 +60,7 @@ controller (`Stm32H7Fdcan.cs`).
 - Bus-off reached from errors. `ForceBusOff` still forces it.
 - CAN FD frames, which are timed as classic frames.
 - The FDCAN's Tx and error interrupts (`IR.TC/TCF/TFE`, the Tx event FIFO, `IR.EP/EW/BO/PEA`), and the Tx event FIFO itself.
+- The bxCAN's error (status change) interrupt.
 
 The model logs these once when a firmware asks for them. Neither firmware does: both poll `PSR`, `TXFQS` and `TXBRP`.
 

@@ -11,6 +11,8 @@
 # One origin, as on a host: `proxy` (Caddy, the same deploy/Caddyfile)
 # publishes the app on 127.0.0.1:8080 and the editor under /editor/ behind
 # the API's login check; the api and the editor publish no port of their own.
+# scripts/vhil-docker.sh runs it as one project per checkout (ifs-vhil-<id>,
+# its runs in /vhil/server/<id>) on VHIL_WEB_PORT; `name:` is for by hand.
 # VHIL_AUTH=dev: no login, the default here (unset in the server means
 # github: it fails closed). The server refuses dev mode off loopback; the api
 # listens on 0.0.0.0 inside its container, reachable only through the proxy,
@@ -29,8 +31,11 @@ services:
       - vhil-data:/vhil
     environment:
       VHIL_WORKSPACE: /work
-      VHIL_DATA: /vhil/server
+      VHIL_DATA: ${VHIL_SERVER_DATA:-/vhil/server}
       VHIL_AUTH: ${VHIL_AUTH:-dev}
+      # A firmware working tree a run may build (scripts/vhil-docker.sh
+      # editor, from FW_LOCAL): "<id>=/src/local", else none.
+      VHIL_LOCAL_SOURCES: ${VHIL_LOCAL_SOURCES:-}
       # Read only with VHIL_AUTH=dev: the api is reached through the proxy,
       # whose port is on 127.0.0.1 only.
       VHIL_ALLOW_DEV_ON_NETWORK: "1"
@@ -62,11 +67,14 @@ services:
     volumes:
       - ..:/work
       - vhil-data:/vhil
+      # That working tree, read-only (unset: the checkout, never read).
+      - ${VHIL_LOCAL_DIR:-..}:/src/local:ro
     environment:
       VHIL_WORKSPACE: /work
-      VHIL_DATA: /vhil/server
+      VHIL_DATA: ${VHIL_SERVER_DATA:-/vhil/server}
       VHIL_AUTH: dev
       VHIL_FW_DIR: /vhil/fw
+      VHIL_LOCAL_SOURCES: ${VHIL_LOCAL_SOURCES:-}
   editor:
     image: ${VHIL_IMAGE:-ifs-vhil}-editor:${VHIL_EDITOR_TAG:-latest}
     command: scripts/editor.sh

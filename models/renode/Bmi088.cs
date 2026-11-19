@@ -1,9 +1,16 @@
 //
-// Bosch BMI088 6-axis IMU on I2C: two dies in one package, each its own I2C
-// target, compiled by Renode at load time. In a platform description:
+// Bosch BMI088 6-axis IMU: two dies in one package, compiled by Renode at
+// load time. On I2C each die is its own target; on SPI the package is one
+// slave with a chip select per die (Bmi088Spi, below). In a platform
+// description:
 //
 //     imu_acc: Sensors.Bmi088Accelerometer @ i2c2_h7 0x18
 //     imu_gyr: Sensors.Bmi088Gyroscope @ i2c2_h7 0x68
+//
+//     imu: Sensors.Bmi088Spi @ spi3
+//     gpioPortC:
+//         4 -> imu@0      // CSB1, the accelerometer
+//         5 -> imu@1      // CSB2, the gyroscope
 //
 // Source: Bosch BMI088 datasheet (BST-BMI088-DS001); register names are its
 // register maps', sections its chapters (3 Quick Start Guide, 4 Functional
@@ -14,6 +21,18 @@
 //   register address; further bytes, and the bytes of a read after a
 //   repeated START, go to/come from consecutive registers (auto-increment).
 //   The accelerometer's dummy byte applies to SPI reads only, not to I2C.
+//
+//   SPI (ch. 6.1, mode 0 or 3): a transaction is the chip select's low
+//   window. Its first byte is the register address with bit 7 set for a read
+//   (the Bosch BMI08x API's BMI08_SPI_RD_MASK 0x80); a write's next bytes,
+//   and a read's, go to/come from consecutive registers. On an accelerometer
+//   read the first byte after the address is a dummy byte, then the data;
+//   the gyroscope sends data at once. The accelerometer starts in I2C mode
+//   and switches to SPI on a rising edge of CSB1, until the next power-on
+//   (ch. 6.1); a soft reset puts it back, which is why the BMI08x API
+//   repeats the dummy read after one (bmi08a.c bmi08a_soft_reset). Until
+//   then it ignores SPI. Bytes the chip does not drive (the address byte's,
+//   the dummy byte, an ignored or unpowered die) read 0x00.
 //   Chip IDs (ch. 5, ACC_CHIP_ID / GYRO_CHIP_ID, reg 0x00): 0x1E and 0x0F.
 //   Accelerometer power (ch. 3 and ch. 4 power modes): after power-on it is
 //   suspended (ACC_PWR_CONF 0x7C = 0x03) and off (ACC_PWR_CTRL 0x7D = 0x00);
@@ -40,7 +59,12 @@
 // logged as Renode logs an unmodelled register, so the peripheral guard
 // fails a run that reads or writes one.
 //
-// Test API, per die (monitor): SetAcceleration(xMg, yMg, zMg) on the
+// Test API on SPI (Bmi088Spi): SetAcceleration, SetAngularRate,
+// AccelerometerResponds / GyroscopeResponds (false: the die never drives
+// MISO and ignores writes), AccelerometerSpiMode, AccelerometerReadCount /
+// GyroscopeReadCount(register), AccelerometerRegister / GyroscopeRegister.
+//
+// Test API on I2C, per die (monitor): SetAcceleration(xMg, yMg, zMg) on the
 // accelerometer, SetAngularRate(xDps, yDps, zDps) on the gyroscope; on
 // both: Respond (false: the die NACKs its address, as an unpowered or missing
 // chip does), ReadCount(register) (reads that started at that register),
@@ -49,8 +73,10 @@
 //
 using System;
 using System.Collections.Generic;
+using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.I2C;
+using Antmicro.Renode.Peripherals.SPI;
 
 namespace Antmicro.Renode.Peripherals.Sensors
 {
@@ -91,28 +117,21 @@ namespace Antmicro.Renode.Peripherals.Sensors
             {
                 if(expectRegister)
                 {
-                    pointer = b & 0x7F;
+                    Point(b);
                     expectRegister = false;
                     continue;
                 }
-                WriteRegister(pointer, b);
-                pointer = (pointer + 1) & 0x7F;
+                WriteNext(b);
             }
         }
 
         public byte[] Read(int count = 1)
         {
-            readCounts.TryGetValue(pointer, out var n);
-            readCounts[pointer] = n + 1;
-            if(Converting)
-            {
-                Convert(held);
-            }
+            BeginRead();
             var result = new byte[count];
             for(var i = 0; i < count; i++)
             {
-                result[i] = ReadRegister(pointer);
-                pointer = (pointer + 1) & 0x7F;
+                result[i] = ReadNext();
             }
             expectRegister = true;
             return result;
@@ -136,6 +155,41 @@ namespace Antmicro.Renode.Peripherals.Sensors
         {
             return registers[register & 0x7F];
         }
+
+        // The register access both interfaces share: point at a register,
+        // start a read (the data registers latch one conversion for the whole
+        // burst), then read or write consecutive registers.
+        internal void Point(int register)
+        {
+            pointer = register & 0x7F;
+        }
+
+        internal void BeginRead()
+        {
+            readCounts.TryGetValue(pointer, out var n);
+            readCounts[pointer] = n + 1;
+            if(Converting)
+            {
+                Convert(held);
+            }
+        }
+
+        internal byte ReadNext()
+        {
+            var value = ReadRegister(pointer);
+            pointer = (pointer + 1) & 0x7F;
+            return value;
+        }
+
+        internal void WriteNext(byte value)
+        {
+            WriteRegister(pointer, value);
+            pointer = (pointer + 1) & 0x7F;
+        }
+
+        // On SPI the dies are not peripherals of their own: they log as the
+        // package (Bmi088Spi), so the peripheral guard names it.
+        internal IPeripheral Owner { get; set; }
 
         // Register file contents at power-on.
         protected abstract void ResetRegisters();
@@ -173,7 +227,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
             {
                 return value.Value;
             }
-            this.Log(LogLevel.Warning, "Unhandled read from offset 0x{0:X2}", register);
+            LogAs().Log(LogLevel.Warning, "Unhandled read from offset 0x{0:X2}{1}", register, Die);
             return 0;
         }
 
@@ -181,9 +235,13 @@ namespace Antmicro.Renode.Peripherals.Sensors
         {
             if(!WriteOther(register, value))
             {
-                this.Log(LogLevel.Warning, "Unhandled write to offset 0x{0:X2}, value 0x{1:X2}", register, value);
+                LogAs().Log(LogLevel.Warning, "Unhandled write to offset 0x{0:X2}, value 0x{1:X2}{2}", register, value, Die);
             }
         }
+
+        private IPeripheral LogAs() => Owner ?? this;
+
+        private string Die => Owner == null ? "" : $" ({GetType().Name})";
 
         private readonly short[] held = new short[3];
         private readonly Dictionary<int, int> readCounts = new Dictionary<int, int>();
@@ -202,11 +260,16 @@ namespace Antmicro.Renode.Peripherals.Sensors
             mg[2] = zMg;
         }
 
+        // Whether the die listens on SPI: from a rising edge of CSB1 until a
+        // power-on or a soft reset (header).
+        internal bool SpiMode { get; set; }
+
         // Lying flat at rest: 1 g along +Z.
         private readonly double[] mg = { 0, 0, 1000 };
 
         protected override void ResetRegisters()
         {
+            SpiMode = false;
             registers[ChipId] = 0x1E;
             registers[Conf] = 0xA8;
             registers[Range] = 0x01;
@@ -365,5 +428,141 @@ namespace Antmicro.Renode.Peripherals.Sensors
         private const int Bandwidth = 0x10;
         private const int Lpm1 = 0x11;
         private const int SoftReset = 0x14;
+    }
+
+    // The package on SPI: one slave on the controller, the dies picked by
+    // their chip selects (GPIO inputs 0 = CSB1, the accelerometer, and 1 =
+    // CSB2, the gyroscope; active low). Header: protocol and test API.
+    public class Bmi088Spi : ISPIPeripheral, IGPIOReceiver
+    {
+        public Bmi088Spi()
+        {
+            acc = new Bmi088Accelerometer { Owner = this };
+            gyr = new Bmi088Gyroscope { Owner = this };
+            dies = new Bmi088Die[] { acc, gyr };
+            Reset();
+        }
+
+        public void Reset()
+        {
+            // The chip select levels are the MCU's pins: they keep their state.
+            acc.Reset();
+            gyr.Reset();
+            phase = Phase.Address;
+        }
+
+        public void OnGPIO(int number, bool value)
+        {
+            if(number < 0 || number > 1)
+            {
+                this.Log(LogLevel.Warning, "No chip select {0}: 0 is CSB1, 1 is CSB2", number);
+                return;
+            }
+            if(csHigh[number] == value)
+            {
+                return;
+            }
+            csHigh[number] = value;
+            // Either edge ends one transaction; a falling one starts the next.
+            phase = Phase.Address;
+            if(value && number == 0)
+            {
+                acc.SpiMode = true;
+            }
+        }
+
+        public byte Transmit(byte data)
+        {
+            var die = Selected();
+            if(die == null)
+            {
+                return 0;
+            }
+            switch(phase)
+            {
+            case Phase.Address:
+                die.Point(data);
+                if((data & 0x80) != 0)
+                {
+                    die.BeginRead();
+                    phase = die == acc ? Phase.Dummy : Phase.Read;
+                }
+                else
+                {
+                    phase = Phase.Write;
+                }
+                return 0;
+            case Phase.Dummy:
+                phase = Phase.Read;
+                return 0;
+            case Phase.Read:
+                return die.ReadNext();
+            default:
+                die.WriteNext(data);
+                return 0;
+            }
+        }
+
+        // The frame is the chip select's window (OnGPIO), not the controller's
+        // transfer: a HAL call can split one transaction (address, then data).
+        public void FinishTransmission()
+        {
+        }
+
+        public void SetAcceleration(double xMg, double yMg, double zMg) => acc.SetAcceleration(xMg, yMg, zMg);
+
+        public void SetAngularRate(double xDps, double yDps, double zDps) => gyr.SetAngularRate(xDps, yDps, zDps);
+
+        public bool AccelerometerResponds { get => acc.Respond; set => acc.Respond = value; }
+
+        public bool GyroscopeResponds { get => gyr.Respond; set => gyr.Respond = value; }
+
+        public bool AccelerometerSpiMode => acc.SpiMode;
+
+        public int AccelerometerReadCount(int register) => acc.ReadCount(register);
+
+        public int GyroscopeReadCount(int register) => gyr.ReadCount(register);
+
+        public int AccelerometerRegister(int register) => acc.RegisterValue(register);
+
+        public int GyroscopeRegister(int register) => gyr.RegisterValue(register);
+
+        // The die a byte goes to: the one whose chip select is low, if it
+        // listens. Null (MISO undriven) for none, both (a host bug), an
+        // unpowered die, or the accelerometer still in I2C mode.
+        private Bmi088Die Selected()
+        {
+            if(!csHigh[0] && !csHigh[1])
+            {
+                this.Log(LogLevel.Warning, "Both chip selects low: neither die answers");
+                return null;
+            }
+            if(csHigh[0] && csHigh[1])
+            {
+                this.Log(LogLevel.Warning, "SPI transfer with both chip selects high");
+                return null;
+            }
+            var die = dies[csHigh[0] ? 1 : 0];
+            if(!die.Respond || (die == acc && !acc.SpiMode))
+            {
+                return null;
+            }
+            return die;
+        }
+
+        private readonly Bmi088Accelerometer acc;
+        private readonly Bmi088Gyroscope gyr;
+        private readonly Bmi088Die[] dies;
+        // Renode's GPIO starts low: both selected until the MCU drives them.
+        private readonly bool[] csHigh = new bool[2];
+        private Phase phase;
+
+        private enum Phase
+        {
+            Address,
+            Dummy,
+            Read,
+            Write,
+        }
     }
 }

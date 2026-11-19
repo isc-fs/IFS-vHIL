@@ -35,24 +35,27 @@ port=${VHIL_WEB_PORT:-8080}
 keys() { "$repo/scripts/image-key.sh"; }
 key() { keys | sed -n "s/^$1=//p"; }
 
-# --json: one JSON object, {"ok": bool, "checks": [{"level", "message"}]},
-# for the desktop app; levels are ok, warn and fail.
+# --json: one JSON object, {"ok": bool, "checks": [{"level", "message", "id"}]},
+# for the desktop app; levels are ok, warn and fail, and id (docker, colima,
+# compose, vm, images, firmware, disk) names the check for callers.
 doctor() {
     local fail=0 json=false
     [ "${1:-}" = --json ] && json=true
     local g='' y='' r='' n='' checks=()
     [ -t 1 ] && [ "$json" = false ] && g=$'\033[32m' y=$'\033[33m' r=$'\033[31m' n=$'\033[0m'
+    # say <level> <id> <message> <colour>
     say() {
         if [ "$json" = true ]; then
-            local m=${2//\\/\\\\}; m=${m//\"/\\\"}
-            checks+=("{\"level\": \"$1\", \"message\": \"$m\"}")
+            local m=${3//\\/\\\\}; m=${m//\"/\\\"}
+            checks+=("{\"level\": \"$1\", \"message\": \"$m\", \"id\": \"$2\"}")
         else
-            printf '  %s%-4s%s  %s\n' "$3" "$1" "$n" "$2"
+            printf '  %s%-4s%s  %s\n' "$4" "$1" "$n" "$3"
         fi
     }
-    ok() { say ok "$*" "$g"; }
-    warn() { say warn "$*" "$y"; }
-    bad() { say fail "$*" "$r"; fail=1; }
+    # ok|warn|bad <id> <message...>
+    ok() { local id=$1; shift; say ok "$id" "$*" "$g"; }
+    warn() { local id=$1; shift; say warn "$id" "$*" "$y"; }
+    bad() { local id=$1; shift; say fail "$id" "$*" "$r"; fail=1; }
     finish() {
         if [ "$json" = true ]; then
             local IFS=,
@@ -65,57 +68,72 @@ doctor() {
     }
 
     [ "$json" = true ] || echo "vhil doctor ($repo)"
-    if command -v docker >/dev/null; then ok "docker CLI"; else bad "docker CLI missing (macOS: brew install docker colima)"; fi
+    if command -v docker >/dev/null; then ok docker "docker CLI"; else bad docker "docker CLI missing (macOS: brew install colima docker docker-compose)"; fi
     if [ "$mac" = true ]; then
         if ! command -v colima >/dev/null; then
-            bad "colima missing: brew install colima"
+            bad colima "colima missing: brew install colima docker docker-compose"
         elif colima status "$profile" >/dev/null 2>&1; then
-            ok "Colima VM '$profile' running"
+            ok vm "Colima VM '$profile' running"
         else
-            bad "Colima VM '$profile' not running: vhil setup (or scripts/vhil-docker.sh vm)"
+            bad vm "Colima VM '$profile' not running: vhil setup (or scripts/vhil-docker.sh vm)"
         fi
     fi
+    # `editor`/`ui` and `stop` run docker compose; the jobs don't.
+    if command -v docker >/dev/null && ! docker compose version >/dev/null 2>&1; then
+        warn compose "docker compose plugin missing: brew install docker-compose"
+    fi
     if "${docker[@]}" info >/dev/null 2>&1; then
-        ok "Docker reachable (context $context)"
+        ok docker "Docker reachable (context $context)"
     else
-        if [ "$mac" = true ]; then bad "Docker not reachable on context $context"
-        else bad "Docker not reachable on context $context: start it, and add yourself to the docker group (Linux) or turn on Docker Desktop's WSL integration (Windows)"
+        if [ "$mac" = true ]; then bad docker "Docker not reachable on context $context"
+        else bad docker "Docker not reachable on context $context: start it, and add yourself to the docker group (Linux) or turn on Docker Desktop's WSL integration (Windows)"
         fi
         finish; return
     fi
 
-    local base editor clean
-    base=$(key base); editor=$(key editor); clean=$(key clean)
+    # The wrapper's read-only status (its header has the format): each image
+    # on its own, as the jobs fetch them.
+    local st base_state editor_state clean built
+    st=$("$wrapper" status 2>/dev/null) || st=
+    base_state=$(sed -n 's/.* base_state=//p' <<<"$st")
+    editor_state=$(sed -n 's/.* editor_state=//p' <<<"$st")
+    clean=$(sed -n 's/^clean=//p' <<<"$st")
+    built=$(sed -n 's/^built=\([^=]*\)=.*/\1/p' <<<"$st" | tr '\n' ' ')
     if [ "$clean" != true ]; then
-        warn "docker/ or the editor's sources have uncommitted changes: the images build locally"
+        warn images "docker/ or the editor's sources have uncommitted changes: the images build locally"
     fi
-    if "${docker[@]}" image inspect "ifs-vhil:$base" >/dev/null 2>&1 \
-        && "${docker[@]}" image inspect "ifs-vhil-editor:$editor" >/dev/null 2>&1; then
-        ok "images of this checkout present (ifs-vhil:$base)"
-    elif docker buildx imagetools inspect "$registry/ifs-vhil:$base" >/dev/null 2>&1; then
-        warn "images not pulled yet (published as $registry/ifs-vhil:$base): vhil setup"
-    else
-        warn "no published image for ifs-vhil:$base (or the registry needs a login): vhil setup builds it (~30 min)"
-    fi
+    image_check() {  # <name> <key> <state> <build time>
+        case $3 in
+        local) ok images "$1:$2 present" ;;
+        published) warn images "$1:$2 not pulled yet (published on $registry): vhil setup pulls it" ;;
+        missing) warn images "$1:$2 not published: the first job builds it ($4)" ;;
+        *) warn images "$1:$2: can't tell whether $registry publishes it (offline, or it needs a login)" ;;
+        esac
+    }
+    image_check ifs-vhil "$(key base)" "$base_state" "Renode from source, ~30 min"
+    image_check ifs-vhil-editor "$(key editor)" "$editor_state" "a few minutes"
 
-    if "${docker[@]}" image inspect ifs-vhil >/dev/null 2>&1; then
-        if "${docker[@]}" run --rm -v vhil-data:/vhil ifs-vhil test -s /vhil/fw/built.txt 2>/dev/null; then
-            ok "firmware built ($("${docker[@]}" run --rm -v vhil-data:/vhil ifs-vhil \
-                sh -c "cut -d= -f1 /vhil/fw/built.txt | sort -u | tr '\n' ' '"))"
-        else
-            warn "no firmware built yet: vhil setup"
+    if [ "$base_state" = local ]; then
+        if [ -n "$built" ]; then ok firmware "firmware built ($built)"
+        else warn firmware "no firmware built yet: vhil setup"
         fi
     fi
 
     local avail
     if [ "$mac" = true ]; then
-        avail=$(colima ssh -p "$profile" -- df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc 0-9)
+        # || : colima may be missing (reported above), and pipefail would end doctor here.
+        avail=$(colima ssh -p "$profile" -- df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc 0-9) || avail=
     else
-        avail=$(df -BG --output=avail "$("${docker[@]}" info -f '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null | tail -1 | tr -dc 0-9)
+        # Docker Desktop (WSL) keeps its root in its own VM, not in this distro:
+        # df / then, and || : pipefail would end doctor here with no message.
+        local root
+        root=$("${docker[@]}" info -f '{{.DockerRootDir}}' 2>/dev/null) || root=
+        [ -n "$root" ] && [ -d "$root" ] || root=/
+        avail=$(df -BG --output=avail "$root" 2>/dev/null | tail -1 | tr -dc 0-9) || avail=
     fi
-    if [ -z "$avail" ]; then warn "free disk unknown"
-    elif [ "$avail" -lt 10 ]; then bad "only ${avail} GB free for Docker (the images and firmware need ~10 GB)"
-    else ok "${avail} GB free for Docker"
+    if [ -z "$avail" ]; then warn disk "free disk unknown"
+    elif [ "$avail" -lt 10 ]; then bad disk "only ${avail} GB free for Docker (the images and firmware need ~10 GB)"
+    else ok disk "${avail} GB free for Docker"
     fi
 
     finish

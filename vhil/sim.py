@@ -63,6 +63,9 @@ class Instrumentation:
     # Called with the Sim when a `with Sim(...)` block exits on an exception,
     # before Renode stops: the last chance to snapshot it (tests/sim/conftest.py).
     on_error_exit: Optional[Callable[["Sim"], None]] = None
+    # Called with the Sim as it stops, while Renode still answers: the last
+    # chance to read what it recorded (the per-test trace, vhil/testtrace.py).
+    on_stop: Optional[Callable[["Sim"], None]] = None
 
 
 INSTRUMENT = Instrumentation()
@@ -281,6 +284,21 @@ class CanBus:
         of the car would). False: it only listens, like an adapter in
         listen-only mode, so a board alone on the bus gets no ACK."""
         self._bus(f"SetAck {rn.quote(self.probe)} {_arg(bool(ack))}")
+
+    def set_connected(self, endpoint: str, connected: bool) -> None:
+        """Cut a board's controller (an endpoint of this bus, e.g. "ams.FDCAN1")
+        off the bus, or put it back: an open stub at its connector. Cut off, it
+        receives nothing and its frames get no ACK (VhilCanBus.cs, Open wire)."""
+        if endpoint not in self.sim.system.buses[self.name]["nodes"]:
+            raise ValueError(f"{endpoint} is not on bus '{self.name}'")
+        board = endpoint.split(".")[0]
+        path = self.sim.system.resolve(endpoint)[2]
+        leaf = path.split(".")[-1]
+        names = [n for n, v in self.nodes().items()
+                 if v["machine"] == board and n.split(":")[-1].split(".")[-1] == leaf]
+        if len(names) != 1:
+            raise ValueError(f"{endpoint}: no single node of bus '{self.name}' is {board}'s {path}")
+        self._bus(f"SetConnected {rn.quote(names[0])} {_arg(bool(connected))}")
 
     def frames(self, ids=None, since_us: int = 0) -> list[Frame]:
         return parse_frames(self.sim.monitor(f'{self.probe} Frames {_ids(ids)} {_int(since_us)}'))
@@ -567,6 +585,9 @@ class Sim:
             self._start_coverage(Path(self.coverage_dir))
         if self.uart_log_dir is not None:
             self._capture_uarts(self.uart_log_dir)
+        # VHIL_DEBUG=<board>:<port>: wait for an outside debugger (#425).
+        from vhil import debugattach
+        debugattach.maybe_attach(self)
         _live.append(self)
         return self
 
@@ -613,6 +634,11 @@ class Sim:
         aborted = False
         if self._monitor is not None:
             aborted = self._monitor.aborted is not None
+            if not aborted and INSTRUMENT.on_stop is not None:
+                try:
+                    INSTRUMENT.on_stop(self)
+                except Exception:
+                    pass   # a trace never keeps a Sim from stopping
             if not aborted:
                 try:
                     self._monitor.execute("quit")
@@ -721,7 +747,7 @@ class Sim:
         b = self.system.boards[board]
         if b.bootloader is None:
             return True
-        base = b.firmware.get("load", {}).get("vector_table", APP_BASE)
+        base = (b.firmware or {}).get("load", {}).get("vector_table", APP_BASE)
         return int(self.monitor(f"{rn.ident(b.platform['renode'].get('cpu', 'cpu'))} PC",
                                 board=board).strip(), 16) >= base
 
@@ -774,8 +800,7 @@ class Sim:
         (vhil.broker.power_on_commands): a cold boot, the backup domain wiped
         when the board has no VBAT."""
         from vhil.broker import power_on_commands
-        vbat = self.system.boards[board].board.get("vbat", True)
-        for command in power_on_commands(board, vbat):
+        for command in power_on_commands(board, self.system.power_cut(board)):
             self.monitor(command, board=board)
 
     def read_symbol(self, board: str, symbol: str, size: int = 1) -> int:

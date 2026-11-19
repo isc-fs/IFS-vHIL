@@ -95,13 +95,14 @@ from vhil import runlog
 from vhil import expect as vexpect
 from vhil import stateview
 from vhil.server.config import Settings
-from vhil.server.runs import (HEARTBEAT_S, MAX_ATTEMPTS, RECLAIM_AFTER_S, TRACE, Limits,
-                              RunStore, code_changes, materialise_system, trace_header)
+from vhil.server.runs import (HEARTBEAT_S, LOCAL_REF, MAX_ATTEMPTS, RECLAIM_AFTER_S, TRACE, Limits,
+                              RunStore, code_changes, local_sources, materialise_system,
+                              trace_header)
 from vhil.server.session import SessionStore
 from vhil.server.workspace import Workspace
 from vhil.system import (COMMIT, GATE_QUANTUM_US, System, SystemError, built_images,
                          commit_image_path, commit_source_dir, find_build, image_path,
-                         quantum_us, stamp_ref)
+                         local_source_dir, quantum_us, stamp_ref)
 
 DEFAULT_FW_DIR = Path(os.environ.get("VHIL_FW_DIR", "/vhil/fw"))
 
@@ -494,6 +495,11 @@ def execute_scenario(sim, scenario: dict, trace: TraceWriter, *,
             at(t_us, lambda b=s["board"], port=port, pin=pin, lv=s["level"]:
                sim.io(b).set_input(port, pin, lv))
             note(t_us, f"{what} {s['board']}.{s['pin']} = {int(s['level'])}")
+        elif kind == "can_wire":
+            at(t_us, lambda bus=sim.can(s["bus"]), n=s["node"], c=s["connected"]:
+               bus.set_connected(n, c))
+            note(t_us, f"{what} {s['bus']}: {s['node']} "
+                       f"{'connected' if s['connected'] else 'cut off (open stub)'}")
         elif kind == "analog":
             at(t_us, lambda b=s["board"], pin=s["pin"], v=s["volts"]: sim.io(b).set_voltage(pin, v))
             note(t_us, f"{what} {s['board']}.{s['pin']} = {s['volts']} V")
@@ -1000,7 +1006,8 @@ def load_summary(loads: dict[str, list[float]]) -> dict:
             for bus, v in loads.items() if v}
 
 
-STIMULUS_KINDS = ("can_send", "can_periodic", "stop_periodic", "gpio", "analog", "watch", "plant")
+STIMULUS_KINDS = ("can_send", "can_periodic", "stop_periodic", "gpio", "analog", "watch", "plant",
+                  "can_wire")
 
 
 def has_symbol(sim, board: str, name: str) -> bool:
@@ -1028,6 +1035,33 @@ def symbol_size(sim, board: str, name: str) -> int:
     except (OSError, KeyError, ValueError):
         return 1
     return size if size in (1, 2, 4) else 1
+
+
+# A MainLite's CAN bootloader jumps to the app 2 s after power-on (CLAUDE.md
+# invariant 5); the run's warning names it.
+BOOT_WINDOW_S = 2
+
+
+def run_warnings(scenario: dict, summary: dict, in_app: dict, end_us: int) -> list:
+    """Why a run that ended without a verdict may still have shown nothing.
+
+    A `run` scenario without expects ends "passed" when its time is up, which
+    says nothing about the firmware: a run that stopped inside the bootloader's
+    auto-jump window never ran an app, and one whose bus stayed silent saw no
+    frame. `in_app` maps each board to whether it ran its application at the
+    end (empty when unknown). Runs with expects are judged by them, so they
+    get none (#390)."""
+    if scenario.get("expect"):
+        return []
+    out = []
+    waiting = sorted(b for b, up in in_app.items() if not up)
+    if waiting:
+        at = f"run ended at {end_us / 1e6:.1f} s, auto-jump at {BOOT_WINDOW_S} s"
+        out.append(f"the app never started ({at})" if len(waiting) == len(in_app)
+                   else f"the app never started on {', '.join(waiting)} ({at})")
+    elif not sum((summary.get("frames") or {}).values()):
+        out.append("no CAN frames: the bus saw none")
+    return out
 
 
 def evaluate_expects(run_dir: Path, scenario: dict, system: System, firmware: dict,
@@ -1167,6 +1201,9 @@ def resolve_commits(system: System, refs: dict, lister, known: Optional[dict] = 
     known, out, listed = known or {}, {}, {}
     for key in system.images():
         fw, ref = image_ref(system, key, refs)
+        if ref == LOCAL_REF:
+            out[key] = {"ref": ref, "commit": None}       # a working tree has no commit
+            continue
         k = known.get(key) or {}
         if k.get("ref") == ref and isinstance(k.get("commit"), str) and COMMIT.fullmatch(k["commit"]):
             out[key] = {"ref": ref, "commit": k["commit"]}
@@ -1217,6 +1254,13 @@ class Image(NamedTuple):
     commit: Optional[str] = None
 
 
+def _missing(want: dict[str, Image], built) -> list[str]:
+    """The images to build: those not built yet, and every working tree's
+    (its edits since the last run; the build is incremental)."""
+    return [k for k, im in want.items()
+            if im.ref == LOCAL_REF or im.path not in built or not im.path.is_file()]
+
+
 class FirmwareResolver:
     """Image key -> ELF for a system at the requested refs and their
     commits (module doc). `lister` resolves a ref the run has no commit for
@@ -1253,7 +1297,9 @@ class FirmwareResolver:
             fw, ref = image_ref(system, key, refs)
             c = (commits or {}).get(key)
             commit = c.get("commit") if isinstance(c, dict) else c
-            if commit:
+            if ref == LOCAL_REF:
+                path = (local_source_dir(self.fw_dir, fw) / fw["build"]["elf"]).resolve()
+            elif commit:
                 path = find_build(self.fw_dir, fw, commit, built) or \
                     commit_image_path(self.fw_dir, fw, commit).resolve()
             else:
@@ -1272,7 +1318,7 @@ class FirmwareResolver:
         with fwprune.reuse_lock(self.fw_dir):
             want = self.expected(system, refs, commits)
             built = self._built()
-            missing = [k for k, im in want.items() if im.path not in built or not im.path.is_file()]
+            missing = _missing(want, built)
             self._used(system, refs, {k: im for k, im in want.items() if k not in missing})
         if missing:
             if not self.build:
@@ -1290,13 +1336,21 @@ class FirmwareResolver:
                     fcntl.flock(lock, fcntl.LOCK_EX)
                 want = self.expected(system, refs, commits)    # another worker may have built it
                 built = self._built()
-                missing = [k for k, im in want.items()
-                           if im.path not in built or not im.path.is_file()]
+                missing = _missing(want, built)
                 if missing:
                     cmd = [sys.executable, "-m", "vhil.system", "build", str(system.path),
                            "--workdir", str(self.fw_dir)]
+                    trees = local_sources()
                     for key in missing:
-                        cmd += ["--only", key, "--ref", f"{key}={want[key].ref}"]
+                        cmd += ["--only", key]
+                        if want[key].ref == LOCAL_REF:
+                            fw, _ = image_ref(system, key, refs)
+                            if fw["id"] not in trees:
+                                raise RuntimeError(f"{key}: no working tree of {fw['id']} on this "
+                                                   f"server (VHIL_LOCAL_SOURCES)")
+                            cmd += ["--source", f"{fw['id']}={trees[fw['id']]}"]
+                            continue
+                        cmd += ["--ref", f"{key}={want[key].ref}"]
                         if want[key].commit:
                             cmd += ["--commit", f"{key}={want[key].commit}"]
                     self.log("building firmware: " + " ".join(cmd))
@@ -1304,8 +1358,11 @@ class FirmwareResolver:
                         f"{k} at {want[k].ref}" + (f" ({want[k].commit[:12]})" if want[k].commit else "")
                         for k in missing))
                     built_out = run_build(cmd, say)
+                    # A working tree's build is this run's alone: not one to reuse.
+                    kept = "".join(line for line in built_out.splitlines(keepends=True)
+                                   if "@local/" not in line)
                     with open(self.fw_dir / "built.txt", "a") as f:
-                        f.write(built_out)
+                        f.write(kept)
         # A commit build remembers each name it was run as (vhil.system
         # newest_build: the editor's contract before a run).
         for key, im in want.items():
@@ -1481,6 +1538,20 @@ class Worker:
             try:
                 firmware = self.resolver.resolve(system, run["firmware"], commits,
                                                  on_line=build_line)
+                seed = run.get("seed") or {}
+                if seed:
+                    # A training puzzle's seeded bug (vhil/training_fw.py):
+                    # only the training API sets a run's seed.
+                    from vhil import training_fw
+                    image = seed["image"]
+                    firmware[image] = training_fw.seeded_image(
+                        self.resolver.fw_dir, system, image,
+                        (commits.get(image) or {}).get("commit") or "", seed["patch"],
+                        seed.get("edits") or {}, log=build_line,
+                        source_out=run_dir / "firmware-source")
+                    trace.log(0, f"training: {image} is the pinned commit with puzzle "
+                                 f"{seed.get('puzzle')}'s seeded bug"
+                                 + (" and your edits" if seed.get("edits") else ""))
             finally:
                 if build_log["f"] is not None:
                     build_log["f"].close()
@@ -1509,6 +1580,12 @@ class Worker:
                         summary = execute_run(sim, scenario, trace, cancelled=cancelled,
                                               progress=on_progress, state_view=True,
                                               session=session, logs=logs)
+                        in_app = {}
+                        if not scenario.get("expect"):
+                            try:
+                                in_app = {b: bool(sim.in_app(b)) for b in system.boards}
+                            except Exception:  # noqa: BLE001 - a warning is not worth the run
+                                pass
                 finally:
                     # What Renode and the UARTs said last (an abort, a quit).
                     try:
@@ -1522,6 +1599,10 @@ class Worker:
                                                     virtual_us, trace))
                     if summary["expects_failed"]:
                         state = "failed"
+                warnings = run_warnings(scenario, summary, in_app, virtual_us)
+                if warnings:
+                    summary["warnings"] = warnings
+                    trace.log(virtual_us, "warning: " + "; ".join(warnings))
             elif scenario["kind"] == "pytest":
                 state, summary = execute_pytest(scenario, run_dir, Path(self.settings.workspace),
                                                 image_env(system, firmware), trace, cancelled,

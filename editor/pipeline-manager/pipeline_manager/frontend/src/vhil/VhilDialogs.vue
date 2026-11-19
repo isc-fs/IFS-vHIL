@@ -2,7 +2,9 @@
 vHIL: Commit…, Open PR, Save session as scenario, Run tests (a pytest run,
 step 18: what the shell's Runs form started) and the keyboard map, as modal
 dialogs (CHANGELOG-VHIL.md): what the shell's Save and PR forms did. Native
-<dialog>: focus moves in and back, and Escape closes it.
+<dialog>: focus moves in and back, and Escape closes it. Plus the workspace's
+yes/no question (workspace.js ask), in place of window.confirm, over any of
+them.
 -->
 
 <template>
@@ -76,12 +78,19 @@ dialogs (CHANGELOG-VHIL.md): what the shell's Save and PR forms did. Native
             <label>Body
                 <textarea v-model="ws.pr.body" class="vhil-input" rows="4" />
             </label>
-            <p v-if="!ws.config.can_open_pr" class="vhil-note">
+            <p v-if="!ws.config.can_open_pr && framed" class="vhil-note">
+                No GitHub credentials on the server: VS Code pushes a committed branch with
+                your git and opens its pull request (its notification, or the branch in the
+                vHIL view).
+            </p>
+            <p v-else-if="!ws.config.can_open_pr" class="vhil-note">
                 No GitHub credentials on the server (VHIL_GITHUB_TOKEN or the GitHub App):
                 committed branches stay in the workspace. Push and open the PR by hand.
             </p>
             <p v-if="prUrl" class="vhil-note">
-                Opened <a :href="prUrl" target="_blank" rel="noopener">{{ prUrl }}</a>
+                Opened <a
+                    :href="prUrl" target="_blank" rel="noopener" @click="externalLink"
+                >{{ prUrl }}</a>
             </p>
             <div class="vhil-actions">
                 <span class="vhil-spacer" />
@@ -169,6 +178,22 @@ dialogs (CHANGELOG-VHIL.md): what the shell's Save and PR forms did. Native
             <button type="button" class="vhil-btn" @click="close">Close</button>
         </div>
     </dialog>
+
+    <dialog
+        ref="askDlg" class="vhil-dialog" role="alertdialog" aria-labelledby="vhil-ask-text"
+        @close="answer(false)"
+    >
+        <form class="vhil-form" @submit.prevent="answer(true)">
+            <div id="vhil-ask-text">
+                <p v-for="(para, i) in askText" :key="i">{{ para }}</p>
+            </div>
+            <div class="vhil-actions">
+                <span class="vhil-spacer" />
+                <button type="button" class="vhil-btn" @click="answer(false)">Cancel</button>
+                <button type="submit" class="vhil-btn --primary">{{ ws.ask?.ok || 'OK' }}</button>
+            </div>
+        </form>
+    </dialog>
     </div>
 </template>
 
@@ -177,7 +202,8 @@ import {
     computed, defineComponent, ref, watch,
 } from 'vue';
 import {
-    ws, check, commit, loadTests, openPr, problemCount, runPytest, saveSession,
+    ws, answer, check, commit, externalLink, framed, loadTests, openPr, problemCount, runPytest,
+    saveSession,
 } from './workspace.js';
 import { replay } from './replay.js';
 import { SHORTCUTS } from './shortcuts.js';
@@ -188,6 +214,7 @@ export default defineComponent({
         const commitDlg = ref(null);
         const prDlg = ref(null);
         const keysDlg = ref(null);
+        const askDlg = ref(null);
         const saveDlg = ref(null);
         const pytestDlg = ref(null);
         const prUrl = ref('');
@@ -209,6 +236,15 @@ export default defineComponent({
             if (name === 'save-session') saveName.value = `live-run-${replay.id}`;
             if (name === 'pytest') loadTests();
         });
+        // The question opens over whatever dialog is open (a takeover asks
+        // from Commit…); answering closes it (answer clears ws.ask).
+        watch(() => ws.ask, (q) => {
+            const dlg = askDlg.value;
+            if (!dlg) return;
+            if (q && !dlg.open) dlg.showModal();
+            else if (!q && dlg.open) dlg.close();
+        });
+        const askText = computed(() => (ws.ask?.text || '').split('\n\n'));
         const close = () => { ws.dialog = null; };
         const closed = () => {
             if (!Object.values(dialogs).some((d) => d.value?.open)) ws.dialog = null;
@@ -235,6 +271,11 @@ export default defineComponent({
             commitDlg,
             prDlg,
             keysDlg,
+            askDlg,
+            askText,
+            answer,
+            externalLink,
+            framed,
             saveDlg,
             saveName,
             doSave,

@@ -19,21 +19,40 @@ canvas's hotkeys. No style attribute (the editor's CSP is style-src 'self').
         class="vhil-board-controls"
         no-drag="true"
         role="group"
-        :aria-label="`${name}: role and firmware`"
+        :aria-label="roles.length ? `${name}: role and firmware` : `${name}: firmware`"
         @keydown.stop
         @dblclick.stop
     >
-        <label class="vhil-board-row --role">
+        <!-- Only a board with roles (the MainLite) has one: the SensorHub is
+             not a main control unit and runs its one firmware. -->
+        <label v-if="roles.length" class="vhil-board-row --role">
             <span class="vhil-board-key">Role</span>
             <select
                 class="vhil-board-select"
                 :aria-label="`${name} role`"
                 :value="role"
-                :disabled="locked || !roles.length"
+                :disabled="locked"
                 :title="ROLE_NOTE"
                 @change="(ev) => setRole(ev.target.value)"
             >
                 <option v-for="r in roles" :key="r" :value="r" :selected="r === role">{{ r }}</option>
+            </select>
+        </label>
+        <!-- A board without roles picks its firmware here: a catalogue one, or
+             none (its image is given at run: --firmware <board>=<elf>). -->
+        <label v-else class="vhil-board-row --firmware">
+            <span class="vhil-board-key">Firmware</span>
+            <select
+                class="vhil-board-select mono"
+                :aria-label="`${name} firmware`"
+                :value="firmware"
+                :disabled="locked"
+                :title="FIRMWARE_NOTE"
+                @change="(ev) => setFirmware(ev.target.value)"
+            >
+                <option v-for="f in firmwares" :key="f" :value="f" :selected="f === firmware">
+                    {{ f === NO_FIRMWARE ? "none: an image given at run" : f }}
+                </option>
             </select>
         </label>
         <label v-if="boot" class="vhil-board-row --boot">
@@ -75,7 +94,7 @@ canvas's hotkeys. No style attribute (the editor's CSP is style-src 'self').
                 {{ app.fwId }}<span v-if="app.fw" class="muted"> · {{ app.fw.repo }}</span>
             </span>
             <p v-if="!app.fw" class="vhil-board-warn" role="note">
-                ▲ No {{ app.fwId }} firmware in the catalogue yet: this role can't run.
+                ▲ No {{ app.fwId }} firmware in the catalogue yet: {{ roles.length ? "this role" : "this board" }} can't run.
             </p>
             <template v-else>
                 <select
@@ -124,7 +143,7 @@ import {
     computed, defineComponent, reactive, ref, watch,
 } from 'vue';
 import {
-    ws, boardFirmware, isLive, pickRef, refreshDirty, refsOf,
+    ws, boardFirmware, isLive, NO_FIRMWARE, pickRef, refreshDirty, refsOf,
 } from './workspace.js';
 import {
     nodeName, prop, setProp, specNode,
@@ -134,6 +153,8 @@ import {
 } from './refs.js';
 
 const ROLE_NOTE = 'Sets its firmware, node ID, flash bus and pin labels.';
+const FIRMWARE_NOTE = 'The catalogue firmware it builds and runs (catalog/firmware), '
+    + 'or none: a run gives the image (--firmware <board>=<elf>).';
 
 export default defineComponent({
     props: {
@@ -145,6 +166,9 @@ export default defineComponent({
         const roles = computed(() => specNode(props.node.type)?.properties
             ?.find((p) => p.name === 'role')?.values ?? []);
         const role = computed(() => prop(props.node, 'role')?.value ?? '');
+        const firmwares = computed(() => specNode(props.node.type)?.properties
+            ?.find((p) => p.name === 'firmware')?.values ?? []);
+        const firmware = computed(() => prop(props.node, 'firmware')?.value ?? NO_FIRMWARE);
         const parts = computed(() => {
             ws.firmware; // eslint-disable-line no-unused-expressions
             return boardFirmware(props.node);
@@ -196,6 +220,12 @@ export default defineComponent({
             setProp(props.node, 'role', value);
             refreshDirty();
         };
+        // A new firmware starts on the catalogue's ref.
+        const setFirmware = (value) => {
+            setProp(props.node, 'firmware', value);
+            setProp(props.node, 'firmware_ref', '');
+            refreshDirty();
+        };
 
         return {
             name,
@@ -213,6 +243,11 @@ export default defineComponent({
             choose,
             setRole,
             ROLE_NOTE,
+            firmwares,
+            firmware,
+            setFirmware,
+            FIRMWARE_NOTE,
+            NO_FIRMWARE,
         };
     },
 });

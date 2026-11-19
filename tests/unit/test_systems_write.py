@@ -162,11 +162,14 @@ def test_dev_mode_takes_the_author_from_the_request(env):
 
 
 @pytest.mark.parametrize("body, message", [
-    ("kind: system\nid: ams\nboards: [unclosed\n", "not YAML"),
+    ("kind: system\nid: ams\nboards: [unclosed\n", "ams.yaml:"),
     ("- a\n- list\n", "YAML mapping"),
     ("kind: system\nid: other\nboards:\n  a: {board: mainlite, role: ams}\n",
      "does not match the file name"),
     ("kind: system\nid: ams\nboards: {}\n", "should be non-empty"),
+    ("kind: system\nid: ams\nboards:\n  a: {board: mainlite, role: ams}\n"
+     "buses:\n  can_1: {kind: can, nodes: []}\n",
+     "bus 'can_1' has no nodes: wire a board's CAN connector (e.g. FDCAN1) to it"),
     ("kind: system\nid: ams\nwheels: 4\nboards:\n  a: {board: mainlite, role: ams}\n",
      "wheels"),
     ("kind: system\nid: ams\nboards:\n  a: {board: no-such-board, firmware: ams}\n",
@@ -306,6 +309,21 @@ def test_unknown_systems_are_404_unless_new(env):
     assert env.client.get("/api/systems/nope/dataflow").status_code == 404
     t = env.client.get("/api/systems/nope/dataflow", params={"new": True}).json()
     assert not t["exists"] and t["errors"] == []
+
+
+def _template_role(env, **params):
+    t = env.client.get("/api/systems/nope/dataflow", params={"new": True, **params}).json()
+    assert not t["exists"] and t["errors"] == []
+    return yaml.safe_load(t["yaml"])["boards"]["board0"].get("role")
+
+
+def test_a_new_system_for_a_firmware_starts_on_its_role(env):
+    # VS Code's New system in a firmware repo (the AMS's) names it.
+    assert _template_role(env, firmware="ams") == "ams"
+
+
+def test_a_new_system_for_an_unknown_firmware_falls_back(env):
+    assert _template_role(env, firmware="nope") == _template_role(env)
 
 
 # -- PRs ------------------------------------------------------------------------------

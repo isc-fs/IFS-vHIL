@@ -38,7 +38,7 @@ def test_the_policy_allows_nothing_unsafe():
     directives = dict(d.split(" ", 1) for d in EDITOR_CSP.split("; "))
     for name in ("default-src", "script-src", "style-src", "connect-src"):
         assert directives[name] == "'self'", name
-    assert directives["frame-ancestors"] == "'self'"
+    assert directives["frame-ancestors"] == "'self' vscode-webview: vscode-file:"
     assert "unsafe" not in EDITOR_CSP and "*" not in EDITOR_CSP
 
 

@@ -14,12 +14,13 @@ firmware coverage (vhil/coverage.py).
 """
 from __future__ import annotations
 
+import itertools
 import re
 from pathlib import Path
 
 import pytest
 
-from vhil import sim as sim_module, snapshot
+from vhil import sim as sim_module, snapshot, testtrace
 from vhil.bench import REPO
 from vhil.sim import Sim
 from vhil.system import System
@@ -51,10 +52,15 @@ def images(firmware):
     return get
 
 
-@pytest.fixture(scope="session")
+_sim_count = itertools.count()     # log names stay unique across modules
+
+
+@pytest.fixture(scope="module")
 def make_sim(request, images):
     """Factory: make_sim("ecu", advance_immediately=False) -> a started Sim,
-    stopped at the end of the session, its boards past their bootloader's
+    stopped at the end of the module that made it (not the session: each
+    Sim is a Renode process, and a session's worth of them held the whole
+    suite at ~7 GB, #408), its boards past their bootloader's
     auto-jump window and running their apps (Sim.wait_for_app). With
     wait_for_app=False it is left at power-on, for a test that sets something
     up before the boards boot."""
@@ -63,7 +69,7 @@ def make_sim(request, images):
 
     def make(system: str, wait_for_app: bool = True, **kwargs) -> Sim:
         sys_file = REPO / "systems" / f"{system}.yaml"
-        sim = Sim(sys_file, images(system), **_with_log(kwargs, log_dir, system, len(sims))).start()
+        sim = Sim(sys_file, images(system), **_with_log(kwargs, log_dir, system, next(_sim_count))).start()
         if wait_for_app:
             sim.wait_for_app()
         sims.append(sim)
@@ -122,6 +128,7 @@ def _snapshot_report(item, when: str):
     _exited.clear()
     if not taken:
         return None
+    testtrace.keep_snapshots(item.nodeid, taken)
     log_dir = item.config.getoption("--sim-log-dir")
     out_dir = None
     if log_dir:

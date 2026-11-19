@@ -179,16 +179,16 @@ def _system(tmp_path, body):
     ("bench:\n  power:\n    - {board: ecu, relay: {addr: 0x20, port: 0, pin: 3}, ina_addr: 0x45,"
      " current_A: 0.1}\n  gpio_routes:\n    - {tca: 0x20, port: 0, pin: 3, to: ecu.PB5}\n",
      "power relay"),
-    ("bench:\n  gpio_routes:\n    - {tca: 0x50, port: 1, pin: 0, to: ecu.PB5}\n", "not valid"),
-    ("bench:\n  gpio_routes:\n    - {tca: 0x22, port: 2, pin: 0, to: ecu.PB5}\n", "not valid"),
+    ("bench:\n  gpio_routes:\n    - {tca: 0x50, port: 1, pin: 0, to: ecu.PB5}\n", "tca: 80 is greater than"),
+    ("bench:\n  gpio_routes:\n    - {tca: 0x22, port: 2, pin: 0, to: ecu.PB5}\n", "port: 2 is greater than"),
     ("bench:\n  adc_routes:\n    - {adc: 0, channel: 0, from: ecu.FDCAN1}\n",
      "ADC route from 'ecu.FDCAN1': can, not a GPIO"),
     ("bench:\n  adc_routes:\n    - {adc: 0, channel: 0, from: ecu.PB4}\n"
      "    - {adc: 0, channel: 0, from: ecu.PB5}\n", "routed twice"),
-    ("bench:\n  adc_routes:\n    - {adc: 0, channel: 8, from: ecu.PB4}\n", "not valid"),
+    ("bench:\n  adc_routes:\n    - {adc: 0, channel: 8, from: ecu.PB4}\n", "channel: 8 is greater than"),
     ("bench:\n  cell_stimulus: {device: isospi, cell_mV: 3750, temp_dC: 250}\n",
      "not an isoSPI bridge"),
-    ("bench:\n  cell_stimulus: {device: isospi, cell_mV: 9000, temp_dC: 250}\n", "not valid"),
+    ("bench:\n  cell_stimulus: {device: isospi, cell_mV: 9000, temp_dC: 250}\n", "cell_mV: 9000 is greater than"),
 ])
 def test_bad_systems_are_rejected_with_a_reason(tmp_path, body, message):
     with pytest.raises(SystemError, match=message):
@@ -246,7 +246,7 @@ def test_render_can_hub_puts_renodes_hub_on_every_bus(tmp_path, path):
 def test_arbitration_is_a_boolean(tmp_path, value):
     body = "buses:\n  a: {kind: can, nodes: [ecu.FDCAN1], arbitration: %s}\n" % (
         "null" if value is None else repr(value) if isinstance(value, str) else value)
-    with pytest.raises(SystemError, match="arbitration must be true or false|not valid"):
+    with pytest.raises(SystemError, match=r"arbitration: .* is not of type 'boolean'"):
         System(_system(tmp_path, body))
 
 
@@ -258,7 +258,7 @@ def test_a_firmware_can_contract_must_name_a_can_connector_of_its_board(tmp_path
     with pytest.raises(SystemError, match="CAN contract rides FDCAN9, which mainlite lacks"):
         System(REPO / "systems" / "ecu.yaml", catalog)
     fw.write_text(fw.read_text().replace("contract: [FDCAN9]", "contract: []"))
-    with pytest.raises(SystemError, match="'contract': \\[\\]"):   # schema: minItems 1
+    with pytest.raises(SystemError, match=r"can.contract: \[\] should be non-empty"):   # schema: minItems 1
         System(REPO / "systems" / "ecu.yaml", catalog)
 
 
@@ -413,9 +413,18 @@ def _ams(tmp_path, devices):
     ("  b: {model: ltc6820, spi: ams.SPI1, cs: ams.PB9}\n"
      "  c: {model: ltc6811, attach: b, params: {bogus: 1}}\n", "unknown params"),    ("  i: {model: ssa-2-250a, outputs: {out_p: ams.PF7}}\n", "drives outputs"),
     ("  i: {model: acs758lcb-050b, outputs: {out: ams.FDCAN1}}\n", "not an analog input"),
-    ("  imu: {model: bmi088}\n", "needs 'i2c'"),
+    ("  imu: {model: bmi088}\n", r"wires one of i2c, spi \(its protocol\), got none"),
+    ("  imu: {model: bmi088, i2c: ams.I2C2, spi: ams.SPI1}\n", "got i2c, spi"),
+    ("  imu: {model: bmi088, spi: ams.SPI1}\n", r"wires pins \['csb1', 'csb2'\], got \[\]"),
+    ("  imu: {model: bmi088, i2c: ams.I2C2, pins: {csb1: ams.PB9, csb2: ams.PB8}}\n",
+     r"wires pins \[\], got"),
     ("  imu: {model: bmi088, i2c: ams.SDMMC1}\n", "is sdmmc, not i2c"),
     ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, i2c: ams.I2C2}\n", "takes no 'i2c'"),
+    ("  gnss: {model: zed-f9p, uart: ams.I2C2}\n", "is i2c, not uart"),
+    ("  gnss: {model: zed-f9p, uart: ams.USART10, i2c: ams.I2C2}\n", "got i2c, uart"),
+    ("  sd: {model: sd-card, sdmmc: ams.SDMMC1, uart: ams.USART10}\n", "takes no 'uart'"),
+    ("  gnss: {model: zed-f9p, i2c: ams.I2C2, uarts: {uart3: ams.USART10}}\n", "has no UART port 'uart3'"),
+    ("  gnss: {model: zed-f9p, i2c: ams.I2C2, uarts: {uart2: ams.I2C2}}\n", "uarts.uart2 'ams.I2C2' is i2c, not uart"),
 ])
 def test_bad_devices_are_rejected_with_a_reason(tmp_path, devices, message):
     with pytest.raises(SystemError, match=message):
@@ -443,7 +452,9 @@ def test_an_i2c_model_must_place_its_targets(tmp_path):
     (catalog / "models" / "no-targets.yaml").write_text(
         "kind: model\nid: no-targets\ninterface: {i2c: true}\nbackend: renode\n"
         "renode: {type: Sensors.Nothing}\n")
-    with pytest.raises(SystemError, match="an i2c model gives renode targets"):
+    with pytest.raises(SystemError, match=r"no-targets\.yaml\), wired as x on ams\.I2C2: its renode "
+                                          r"section needs `targets` .* it has `type`\. "
+                                          r"`python -m vhil\.part new`"):
         System(_ams(tmp_path, "  x: {model: no-targets, i2c: ams.I2C2}\n"), catalog=catalog)
 
 
@@ -537,7 +548,10 @@ def test_every_mainlite_boots_through_the_can_bootloader(path):
     2026-10-05; PROVISIONING.md step 1.3). No system boots its app directly."""
     system = System(path)
     roles = {"ecu": (1, "FDCAN2"), "ams": (2, "FDCAN1"), "udv": (3, "FDCAN2")}
-    for b in system.boards.values():
+    mainlites = [b for b in system.boards.values() if b.board["id"] == "mainlite"]
+    if not mainlites:
+        pytest.skip("no MainLite in this system")
+    for b in mainlites:
         assert b.bootloader["id"] == "can-bootloader"
         assert f"{b.name}.bootloader" in system.images()
         assert (b.node_id, b.flash_bus) == roles[b.role]
@@ -623,8 +637,16 @@ def test_a_board_without_roles_names_its_firmware(tmp_path):
     p = tmp_path / "r.yaml"
     p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain, firmware: ams}\n")
     assert System(p, catalog).boards["a"].firmware["id"] == "ams"
+    # Without one (a firmware not in the catalogue yet, the SensorHub's) its
+    # image is given at render, and there is nothing to build.
     p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain}\n")
-    with pytest.raises(SystemError, match="has no roles, so it needs a firmware"):
+    system = System(p, catalog)
+    assert system.boards["a"].firmware is None and system.images() == ["a"]
+    assert "running the image given at render" in system.render_renode({"a": Path("a.elf")})
+    with pytest.raises(SystemError, match="no firmware in the catalogue to build"):
+        system.build_firmware(tmp_path / "fw")
+    p.write_text("kind: system\nid: r\nboards:\n  a: {board: plain, firmware_ref: dev}\n")
+    with pytest.raises(SystemError, match="a firmware_ref needs a firmware"):
         System(p, catalog)
 
 
@@ -735,6 +757,53 @@ def test_a_single_ended_transfer_other_than_identity_is_rendered():
     assert "SingleEndedNoise" not in script
 
 
+def test_the_bus_a_bmi088_wires_picks_its_protocol():
+    """The same catalogue model: I2C dies on the MainLite, one SPI slave with
+    its chip selects on the SensorHub."""
+    ams = System(REPO / "systems" / "ams.yaml").render_renode()
+    assert "imu_acc: Sensors.Bmi088Accelerometer @ i2c2_h7 0x18" in ams and "Bmi088Spi" not in ams
+    hub = System(REPO / "systems" / "sensorhub.yaml").render_renode()
+    assert "imu: Sensors.Bmi088Spi @ spi3" in hub and "Bmi088Accelerometer" not in hub
+    assert "gpioPortC:\n    4 -> imu@0\n    5 -> imu@1" in hub
+
+
+def test_the_bus_a_zed_f9p_wires_picks_its_port(tmp_path):
+    """I2C (systems/sensorhub.yaml), SPI with its chip select, or UART: the
+    UART's far end sits on sysbus at no address and holds the MCU's UART."""
+    hub = System(REPO / "systems" / "sensorhub.yaml").render_renode()
+    assert "gnss_rx: Sensors.ZedF9pI2c @ i2c2 0x42" in hub
+    for wiring, want in (("spi: sensorhub.SPI1, cs: sensorhub.PA4",
+                          "gnss: Sensors.ZedF9pSpi @ spi1\n\ngpioPortA:\n    4 -> gnss@0"),
+                         ("uart: sensorhub.USART2", "gnss: Sensors.ZedF9pUart @ sysbus\n    uart: usart2")):
+        p = tmp_path / "s.yaml"
+        p.write_text("kind: system\nid: t\nboards:\n  sensorhub: {board: sensorhub}\n"
+                     f"devices:\n  gnss: {{model: zed-f9p, {wiring}}}\n")
+        script = System(p).render_renode()
+        assert want in script and "ZedF9pI2c" not in script
+    p.write_text("kind: system\nid: t\nboards:\n  sensorhub: {board: sensorhub}\n"
+                 "devices:\n  gnss: {model: zed-f9p, i2c: sensorhub.I2C2, uarts: {uart2: sensorhub.USART2}}\n")
+    assert "gnss_rx: Sensors.ZedF9pI2c @ i2c2 0x42\n    uart2: usart2" in System(p).render_renode()
+
+
+def test_a_board_without_roles_takes_its_own_front_end():
+    """The SensorHub's 0-5 V inputs: 5k11 / 10k dividers (R15/R16) on PC0-PC3,
+    so 5 V at J1 is 3.31 V at the pin (catalog/boards/sensorhub.yaml)."""
+    system = System(REPO / "systems" / "sensorhub.yaml")
+    assert system.sensor_to_pin("sensorhub.PC0", 5.0) == pytest.approx(3.309, abs=1e-3)
+    assert system.sensor_to_pin("sensorhub.PC3", 0.0) == 0.0
+
+
+def test_a_power_cut_wipes_what_the_platform_says():
+    """vbat: false runs the platform's power_cut first (the RTC backup
+    registers of each MCU); a board with VBAT runs nothing."""
+    hub, ams = System(REPO / "systems" / "sensorhub.yaml"), System(REPO / "systems" / "ams.yaml")
+    assert hub.power_cut("sensorhub")[0] == "sysbus WriteDoubleWord 0x40002850 0x0"
+    assert ams.power_cut("ams")[0] == "sysbus WriteDoubleWord 0x58004050 0x0"
+    assert ams.power_cut("ams")[-1] == "sysbus.backupSram ZeroAll"
+    ams.boards["ams"].board = dict(ams.boards["ams"].board, vbat=True)
+    assert ams.power_cut("ams") == []
+
+
 def test_a_sensor_side_voltage_reaches_the_pin_through_the_front_end():
     """#326: sensor_to_pin applies the backplane's divider (ECU brake 2/3,
     uDV EBS pressure 1/3, the 10k/1k taps 1/11; APPS a series RC, 1), and
@@ -754,22 +823,22 @@ def test_a_sensor_side_voltage_reaches_the_pin_through_the_front_end():
     # The schema refuses a label, a firmware id or a page that isn't one
     # (test_injection checks System() refuses them without it); System()
     # what the schema can't see.
-    ("      PF8: APPS_1 ", "      PF8: 'APPS 1' ", "not valid under any"),
-    ("  SDMMC1: microSD", "  SDMMC1: 'micro\"SD'", "not valid under any"),
-    ("    firmware: udv\n", "    firmware: ../udv\n", "not valid under any"),
-    ("doc: docs/backplanes/udv.md", "doc: ../../etc/passwd", "not valid under any"),
+    ("      PF8: APPS_1 ", "      PF8: 'APPS 1' ", "roles.ecu.pins.PF8: 'APPS 1' must match"),
+    ("  SDMMC1: microSD", "  SDMMC1: 'micro\"SD'", "onboard.SDMMC1: .* must match"),
+    ("    firmware: udv\n", "    firmware: ../udv\n", "roles.udv.firmware: '../udv' must match"),
+    ("doc: docs/backplanes/udv.md", "doc: ../../etc/passwd", "backplane.doc: .* must match"),
     ("      PF8: APPS_1 ", "      PX9: APPS_1 ", "role ecu labels 'PX9', which its pin model "
                                                  "v1.0 lacks"),
     ("      PF9: {port: sysbus.gpioPortF, pin: 9}", "      PB4: {port: sysbus.gpioPortB, pin: 4}",
      "makes 'PB4' a GPIO, but the board models no analog input"),
     ("      PF7: {gain: 0.92, offset_codes: 6,", "      PF9: {gain: 0.92, offset_codes: 6,",
      "gives 'PF9' a differential ADC transfer, but it is not an analog input"),
-    ("      PF7: {gain: 0.92,", "      PF7: {gain: 0.2,", "not valid under any"),
-    ("noise_codes_rms: 1.07", "noise_codes_rms: -1", "not valid under any"),
+    ("      PF7: {gain: 0.92,", "      PF7: {gain: 0.2,", r"PF7.gain: 0.2 is less than"),
+    ("noise_codes_rms: 1.07", "noise_codes_rms: -1", "noise_codes_rms: -1 is less than"),
     ("      PC0: {noise_codes_rms: 0.42,", "      PC1: {noise_codes_rms: 0.42,",
      "gives 'PC1' a single-ended ADC transfer, but it is not an analog input"),
-    ("front_end_ratio: 0.6667", "front_end_ratio: 1.5", "not valid under any"),
-    ("      PF8: {noise_codes_rms: 0.42, front_end_ratio: 1}", "      PF8: {}", "not valid under any"),
+    ("front_end_ratio: 0.6667", "front_end_ratio: 1.5", "front_end_ratio: 1.5 is greater than"),
+    ("      PF8: {noise_codes_rms: 0.42, front_end_ratio: 1}", "      PF8: {}", "PF8: {} should be non-empty"),
 ])
 def test_the_roles_table_is_checked(tmp_path, old, new, message):
     with pytest.raises(SystemError, match=message):
@@ -877,7 +946,7 @@ def test_build_at_a_commit_fetches_it_into_its_commit_dir(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("entry, message", [
     ("{board: mainlite}", "needs a role \\(ecu, ams, udv\\)"),
-    ("{board: mainlite, role: dash}", "'role': 'dash'"),
+    ("{board: mainlite, role: dash}", r"boards.ecu.role: 'dash' is not one of \['ecu', 'ams', 'udv'\]"),
 ])
 def test_a_mainlite_needs_one_of_its_roles(tmp_path, entry, message):
     p = tmp_path / "r.yaml"
@@ -912,3 +981,134 @@ def test_an_empty_firmware_ref_is_a_schema_error(tmp_path):
                  "  ecu: {board: mainlite, role: ecu, firmware_ref: ''}\n")
     with pytest.raises(SystemError):
         System(p)
+
+
+# -- readable errors (#391) ----------------------------------------------------
+
+def _raw_system(tmp_path, text):
+    p = tmp_path / "s.yaml"
+    p.write_text(text)
+    return p
+
+
+ECU = "  ecu: {board: mainlite, role: ecu}\n"
+
+
+@pytest.mark.parametrize("text, message", [
+    # a mainlite without a role
+    ("kind: system\nid: t\nboards:\n  ecu: {board: mainlite}\n",
+     "board 'ecu': a mainlite needs a role (ecu, ams, udv)"),
+    # a connector the board lacks: closest names
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  b: {kind: can, nodes: [ecu.FDCAN9]}\n",
+     "no connector or pin 'FDCAN9'"),
+    # a board id that is a typo
+    ("kind: system\nid: t\nboards:\n  x: {board: mainlte, role: ecu}\n",
+     "no board 'mainlte' in the catalogue"),
+    # a bus name with a space
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  CAN bus: {kind: can, nodes: [ecu.FDCAN1]}\n",
+     "buses.'CAN bus': name must match ^[A-Za-z_][A-Za-z0-9_]*$ (letters, digits, underscore)"),
+    # an endpoint on an instance the system does not have
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  b: {kind: can, nodes: [ams.FDCAN1]}\n",
+     "no board instance 'ams'"),
+    # a gpio pin on a can bus
+    ("kind: system\nid: t\nboards:\n" + ECU +
+     "buses:\n  b: {kind: can, nodes: [ecu.PB0]}\n",
+     "bus 'b' is can but 'ecu.PB0' is gpio: a can bus takes can connectors (FDCAN1"),
+    # a bus without nodes
+    ("kind: system\nid: t\nboards:\n" + ECU + "buses:\n  can_1: {kind: can, nodes: []}\n",
+     "bus 'can_1' has no nodes: wire a board's CAN connector (e.g. FDCAN1) to it"),
+    # unterminated flow mapping
+    ("kind: system\nid: t\nboards: {ecu: {board: mainlite\n",
+     "s.yaml:"),
+])
+def test_errors_say_where_and_what_to_do(tmp_path, text, message):
+    with pytest.raises(SystemError) as e:
+        System(_raw_system(tmp_path, text))
+    assert message in str(e.value)
+    assert "\n" not in str(e.value) and "{'kind'" not in str(e.value)
+
+
+def test_suggestions_name_the_closest_candidates(tmp_path):
+    for text, hint in [
+        ("kind: system\nid: t\nboards:\n  x: {board: mainlte, role: ecu}\n", "did you mean 'mainlite'"),
+        ("kind: system\nid: t\nboards:\n" + ECU +
+         "buses:\n  b: {kind: can, nodes: [ecu.FDCAN9]}\n", "did you mean 'FDCAN"),
+        ("kind: system\nid: t\nboards:\n" + ECU +
+         "buses:\n  b: {kind: can, nodes: [eco.FDCAN1]}\n", "did you mean 'ecu'"),
+    ]:
+        with pytest.raises(SystemError, match=hint):
+            System(_raw_system(tmp_path, text))
+
+
+def test_yaml_errors_are_file_line_col(tmp_path):
+    p = _raw_system(tmp_path, "kind: system\nid: t\nboards: {ecu: {board: mainlite\n")
+    with pytest.raises(SystemError, match=r"s\.yaml:\d+:\d+: "):
+        System(p)
+
+
+def test_a_device_model_typo_is_suggested(tmp_path):
+    p = _raw_system(tmp_path, "kind: system\nid: t\nboards:\n" + ECU +
+                "devices:\n  r: {model: nrf24l01, pins: {}}\n")
+    with pytest.raises(SystemError, match="did you mean 'nrf24l01p'"):
+        System(p)
+
+
+def test_the_cli_help_has_an_example_per_subcommand(capsys):
+    from vhil.system import main
+    for cmd in ("validate", "render", "build", "bench"):
+        with pytest.raises(SystemExit):
+            main([cmd, "-h"])
+        out = capsys.readouterr().out
+        assert "Example:" in out and f"vhil.system {cmd}" in out
+
+
+# -- local working-tree builds (--source) --------------------------------------
+def test_sync_tree_copies_changes_and_keeps_our_build_dir(tmp_path):
+    import os
+    from vhil.system import sync_tree
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "app").mkdir(parents=True)
+    (src / "app" / "main.c").write_text("int main;")
+    (src / "gone.c").write_text("x")
+    (src / "build").mkdir()
+    (src / "build" / "host.elf").write_text("the developer's own build")
+    os.symlink("app/main.c", src / "link.c")
+    assert sync_tree(src, dst, "build") == 3
+    assert (dst / "app" / "main.c").read_text() == "int main;"
+    assert os.readlink(dst / "link.c") == "app/main.c"
+    assert not (dst / "build").exists()
+    (dst / "build").mkdir()
+    (dst / "build" / "ours.o").write_text("incremental")
+    # Unchanged: nothing copied, mtimes kept.
+    assert sync_tree(src, dst, "build") == 0
+    (src / "app" / "main.c").write_text("int main(void);")
+    (src / "gone.c").unlink()
+    assert sync_tree(src, dst, "build") == 1
+    assert (dst / "app" / "main.c").read_text() == "int main(void);"
+    assert not (dst / "gone.c").exists()
+    assert (dst / "build" / "ours.o").read_text() == "incremental"
+
+
+def test_a_source_builds_the_working_tree_and_only_local_skips_the_rest(tmp_path, monkeypatch):
+    import vhil.system as vs
+    tree = tmp_path / "IFS08-CE-ECU"
+    tree.mkdir()
+    (tree / "main.c").write_text("dirty edit")
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("cwd")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(vs.subprocess, "run", run)
+    s = System(REPO / "systems" / "ecu.yaml")
+    fw = yaml.safe_load((REPO / "catalog" / "firmware" / "ecu.yaml").read_text())
+    out = s.build_firmware(tmp_path / "fw", log=lambda m: None,
+                           sources={"ecu": tree}, only_local=True)
+    src = vs.local_source_dir(tmp_path / "fw", fw)
+    assert out == {"ecu": src / "build" / "ECU08.elf"}
+    assert (src / "main.c").read_text() == "dirty edit"
+    assert not any(isinstance(c, list) and c[:2] == ["git", "clone"] for c, _ in calls)
+    assert [c for c, cwd in calls if cwd == src] == [fw["build"]["configure"], fw["build"]["build"]]

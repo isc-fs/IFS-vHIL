@@ -2,6 +2,21 @@
 
 ## Docker (any host, nothing installed natively)
 
+### Before you start
+
+- macOS: `brew install colima docker docker-compose`, then
+  `scripts/vhil-docker.sh vm` (or `bin/vhil setup`, which also pulls the
+  images and builds firmware). Linux: Docker with the compose plugin, vcan
+  loaded.
+- ~10 GB free for Docker. The first run pulls the images (several GB), plus
+  the ~3.5 GB x86 image on an arm64 host (for `fw`, below).
+- The base image builds Renode from source (~30 min) only when no published
+  image matches the checkout (a `docker/` change not on `dev` yet). An
+  unpublished editor image alone builds on the published base in a few
+  minutes.
+- `bin/vhil doctor` checks all of this; `scripts/vhil-docker.sh status`
+  reports what is there without pulling or building anything.
+
 [`docker/Dockerfile`](../../docker/Dockerfile) holds everything below at the
 pinned versions, for amd64 and arm64. [`scripts/vhil-docker.sh`](../../scripts/vhil-docker.sh)
 runs each CI job in it; firmware and the IFS_HIL checkout live in the
@@ -13,8 +28,16 @@ hashes the files each image's build reads, and
 `ghcr.io/isc-fs/ifs-vhil:<key>` and `ifs-vhil-editor:<key>` (amd64 + arm64)
 on every `dev` push and release tag that changes them, plus the moving tags
 `dev` and `vX.Y.Z`. Every job uses the images of the checkout it runs from:
-local by key, else pulled, else built. It builds only when none is published
-(a `docker/` change not on `dev` yet) or `docker/` has uncommitted changes.
+local by key, else pulled, else built, each image on its own. It builds only
+the image that isn't published (a `docker/` change not on `dev` yet), or both
+when `docker/` has uncommitted changes. A registry that doesn't answer stops
+the job rather than starting a build; `VHIL_BUILD_ON_PULL_FAIL=1` builds then.
+
+**Git worktrees.** The jobs work from a worktree: its git dir (the main
+checkout's `.git`) is mounted read-only beside it. The system editor and the
+web app (`editor`, `server`, `vhil ui`) must still start from the main
+checkout: the compose stack mounts the checkout alone, and they refuse a
+worktree up front.
 
 [`bin/vhil`](../../bin/vhil) wraps these with set-up checks (`vhil doctor`,
 `vhil setup`) and plain verbs (`vhil test`, `vhil scenario`, `vhil ui`);
@@ -24,6 +47,7 @@ the wrapper's own commands are below.
 scripts/vhil-docker.sh vm          # macOS: Colima VM `vhil` with vcan (once; needs colima)
 scripts/vhil-docker.sh pull        # the published images of this checkout (any job pulls them when missing)
 scripts/vhil-docker.sh image       # build the images locally instead (Renode from source, ~30 min)
+scripts/vhil-docker.sh status      # what's there (Docker, images, firmware), read-only
 scripts/vhil-docker.sh fw          # build ECU + AMS from their systems (or: fw ecu ams udv)
 scripts/vhil-docker.sh unit
 scripts/vhil-docker.sh smoke ecu   # or ams
@@ -37,6 +61,18 @@ scripts/vhil-docker.sh server      # the web app (API + shell) on http://localho
 scripts/vhil-docker.sh shell
 ```
 
+What a host needs (cores, RAM, disk, VM size): [hardware.md](hardware.md).
+
+On an arm64 host (Apple Silicon, arm64 Linux), `fw` builds in the x86 image,
+through Rosetta (Colima's `--vz-rosetta`, Docker Desktop) or qemu. Arm's
+x86-hosted and arm64-hosted builds of the same toolchain release ship
+different prebuilt C libraries, so only an x86-hosted build gives the image
+CI builds, byte for byte; the uDV's fingerprints differ otherwise (#351). It
+pulls the x86 image once (`ifs-vhil:<key>-amd64`, ~3.5 GB). With local
+images (uncommitted `docker/` changes), no Rosetta or qemu, or
+`VHIL_FW_NATIVE=1`, it builds natively and warns. A Colima VM created
+before this needs `colima stop vhil && colima start vhil --vz-rosetta` once.
+
 On macOS it uses a Colima VM rather than Docker Desktop: Docker Desktop's
 LinuxKit kernel has no vcan, so IFS_HIL's suites could not reach the buses.
 Colima's Ubuntu image lacks `linux-modules-extra` for its shipped kernel, so
@@ -45,6 +81,10 @@ host, load vcan and set `VHIL_DOCKER_CONTEXT=default`. Only `ifs-hil` runs
 its container `--privileged --network host` (it creates `can0..can2`); every
 other job runs unprivileged on Docker's default network (`VHIL_DOCKER_VCAN=1`
 gives `shell`/`run` vcan too), and `server`/`editor` publish on 127.0.0.1.
+
+In VS Code, the extension in [`vscode/`](../../vscode/README.md) lists every
+unit, sim and scenario test in the Testing panel and runs them through these
+same jobs, with Run and Cancel per test, file or folder.
 
 ### Emulator monitor, card images and what a system file may say
 
@@ -300,6 +340,14 @@ single-bus systems such as `ams` do.
 `scripts/vhil-docker.sh server` serves the shared web app on
 http://localhost:8080 with no login (`VHIL_AUTH=dev`). GitHub login, the
 GitHub App and their environment: [`web-app.md`](web-app.md).
+
+Each checkout runs a stack of its own: compose project `ifs-vhil-<id>` (from
+the checkout's path; `scripts/vhil-docker.sh status` prints it) with its runs
+in `/vhil/server/<id>` of the `vhil-data` volume, so another clone (or the VS
+Code extension's checkout, which takes a port of its own) never replaces this
+one's containers or claims its runs. Firmware builds stay shared. The port is
+`VHIL_WEB_PORT` (8080): a second checkout's needs another one, and the script
+names whatever holds the port when it is taken.
 
 ## Branching
 

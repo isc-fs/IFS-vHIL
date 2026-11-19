@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import difflib
 import hashlib
 import json
 import math
@@ -72,6 +73,8 @@ CARD_DIR_ENV = "VHIL_CARD_DIR"
 PIN_MODEL_FILE = re.compile(r"[a-z0-9][a-z0-9-]*\.pins\.yaml")
 # The board sections whose connectors and pins the emulator wires.
 WIRED = ("can", "spi", "uart", "sdmmc", "i2c", "gpio", "analog_in")
+# A device's fields that name a board endpoint it attaches to by its bus.
+DEVICE_PORTS = ("spi", "cs", "sdmmc", "i2c", "uart")
 
 
 def card_dirs() -> list[Path]:
@@ -141,6 +144,69 @@ def commit_source_dir(workdir: Path, fw: dict, commit: str) -> Path:
 def commit_image_path(workdir: Path, fw: dict, commit: str) -> Path:
     """The ELF a build of `fw` at `commit` with today's recipe gives."""
     return commit_source_dir(workdir, fw, commit) / fw["build"]["elf"]
+
+
+def local_source_dir(workdir: Path, fw: dict) -> Path:
+    """Where a build of `fw` from a local working tree (--source) goes: one
+    directory per firmware, kept between builds so they are incremental."""
+    return Path(workdir) / f"{fw['id']}@local"
+
+
+def sync_tree(src: Path, dst: Path, keep: str) -> int:
+    """Make `dst` a copy of working tree `src`, uncommitted edits included,
+    copying only what changed (size or mtime), with mtimes kept so the
+    recipe's build stays incremental. The top-level `keep` (the recipe's
+    output directory) is neither copied from `src`, where it is the
+    developer's own build, nor removed from `dst`, where it is ours.
+    Returns the number of files copied."""
+    src, dst = Path(src), Path(dst)
+    if not src.is_dir():
+        raise SystemError(f"local firmware source {src} is not a directory")
+    copied, seen = 0, set()
+    for root, dirs, files in os.walk(src):
+        rel = Path(root).relative_to(src)
+        if rel == Path("."):
+            dirs[:] = [d for d in dirs if d != keep]
+        (dst / rel).mkdir(parents=True, exist_ok=True)
+        seen.add(rel)
+        for name in files + [d for d in dirs if (Path(root) / d).is_symlink()]:
+            a, b = Path(root) / name, dst / rel / name
+            seen.add(rel / name)
+            if a.is_symlink():
+                if not b.is_symlink() or os.readlink(a) != os.readlink(b):
+                    if b.is_symlink() or b.is_file():
+                        b.unlink()
+                    elif b.is_dir():
+                        shutil.rmtree(b)
+                    os.symlink(os.readlink(a), b)
+                    copied += 1
+                continue
+            sa = a.stat()
+            if b.is_file() and not b.is_symlink():
+                sb = b.stat()
+                if sb.st_size == sa.st_size and int(sb.st_mtime) == int(sa.st_mtime):
+                    continue
+            elif b.is_dir() and not b.is_symlink():
+                shutil.rmtree(b)
+            elif b.is_symlink():
+                b.unlink()
+            shutil.copy2(a, b)
+            copied += 1
+        dirs[:] = [d for d in dirs if not (Path(root) / d).is_symlink()]
+    # What the working tree no longer has.
+    for root, dirs, files in os.walk(dst, topdown=True):
+        rel = Path(root).relative_to(dst)
+        if rel == Path("."):
+            dirs[:] = [d for d in dirs if d != keep]
+        for name in list(dirs):
+            if rel / name not in seen:
+                p = Path(root) / name
+                p.unlink() if p.is_symlink() else shutil.rmtree(p)
+                dirs.remove(name)
+        for name in files:
+            if rel / name not in seen:
+                (Path(root) / name).unlink()
+    return copied
 
 
 def built_images(workdir: Path) -> dict[Path, str]:
@@ -249,11 +315,98 @@ def _validator():
     return Draft202012Validator(json.loads(SCHEMA.read_text()))
 
 
+def suggest(word, options, what: str = "") -> str:
+    """A hint for a name that is not among `options`: ` (did you mean 'x'?)`
+    for the closest, else the first few options (` (known: a, b, c)`)."""
+    options = sorted({str(o) for o in options})
+    close = difflib.get_close_matches(str(word), options, n=3, cutoff=0.6)
+    if close:
+        return f" (did you mean {' or '.join(repr(c) for c in close)}?)"
+    if options:
+        shown = ", ".join(options[:8]) + (", ..." if len(options) > 8 else "")
+        return f" ({what + ': ' if what else 'known: '}{shown})"
+    return ""
+
+
+_PATTERN_HINTS = {
+    "^[A-Za-z_][A-Za-z0-9_]*$": "letters, digits, underscore",
+    "^[a-z0-9][a-z0-9-]*$": "lowercase letters, digits, hyphen",
+}
+
+
+def _where(path) -> str:
+    out = ""
+    for part in path:
+        if isinstance(part, int):
+            out += f"[{part}]"
+        else:
+            text = str(part)
+            out += ("." if out else "") + (text if re.fullmatch(r"\w+", text) else repr(text))
+    return out or "(top)"
+
+
+def format_schema_error(e) -> str:
+    """One line for one jsonschema error: where it is, what is wrong and,
+    for the common slips, the fix. The CLI and the editor's Check share it."""
+    path = list(e.absolute_path)
+    where = _where(path)
+    if (e.validator == "minItems" and e.validator_value == 1 and len(path) == 3
+            and path[0] == "buses" and path[2] == "nodes"):
+        return (f"bus '{path[1]}' has no nodes: wire a board's CAN connector "
+                f"(e.g. FDCAN1) to it")
+    if e.validator == "pattern":
+        hint = _PATTERN_HINTS.get(e.validator_value)
+        hint = f" ({hint})" if hint else ""
+        # `(?![\s\S])` only stops `$` matching before a final newline: not for people.
+        shown = e.validator_value.removesuffix("(?![\\s\\S])")
+        if "propertyNames" in e.schema_path:
+            return f"{where}.{e.instance!r}: name must match {shown}{hint}"
+        return f"{where}: {e.instance!r} must match {shown}{hint}"
+    msg = e.message
+    if isinstance(e.instance, (dict, list)) and len(msg) > 120:
+        msg = f"does not fit the schema ({e.validator})"   # never dump the document
+    return f"{where}: {msg}"
+
+
+def schema_errors(doc, limit: int = 10) -> list[str]:
+    """The located one-line errors of `doc` against the schema's branch for
+    its `kind` (the top level is a oneOf over kinds, whose own error is
+    "not valid under any of the given schemas", with the whole document)."""
+    from jsonschema import Draft202012Validator
+    schema = json.loads(SCHEMA.read_text())
+    kinds = {}
+    for branch in schema["oneOf"]:
+        name = branch["$ref"].rsplit("/", 1)[-1]
+        const = schema["$defs"][name].get("properties", {}).get("kind", {}).get("const")
+        kinds[const] = name
+    kind = doc.get("kind") if isinstance(doc, dict) else None
+    if kind not in kinds:
+        known = ", ".join(map(str, kinds))
+        return [f"kind: {kind!r} is not one of {known}" if kind is not None
+                else f"kind: missing (a file's kind is one of {known})"]
+    branch = Draft202012Validator({"$ref": f"#/$defs/{kinds[kind]}", "$defs": schema["$defs"]})
+    errors = sorted(branch.iter_errors(doc), key=lambda e: [str(x) for x in e.absolute_path])
+    return [format_schema_error(e) for e in errors[:limit]]
+
+
+def yaml_error(path, e: yaml.YAMLError) -> str:
+    """`file:line:col: message` for a YAML syntax error."""
+    mark = getattr(e, "problem_mark", None) or getattr(e, "context_mark", None)
+    problem = getattr(e, "problem", None) or str(e).splitlines()[0]
+    context = getattr(e, "context", None)
+    text = f"{problem} ({context})" if context else str(problem)
+    at = f"{path}:{mark.line + 1}:{mark.column + 1}" if mark is not None else str(path)
+    return f"{at}: {text}"
+
+
 def _load(path: Path, kind: str) -> dict:
-    doc = yaml.safe_load(Path(path).read_text())
-    errors = sorted(_validator().iter_errors(doc), key=str)
+    try:
+        doc = yaml.safe_load(Path(path).read_text())
+    except yaml.YAMLError as e:
+        raise SystemError(yaml_error(path, e))
+    errors = schema_errors(doc, 3)
     if errors:
-        raise SystemError(f"{path}: " + "; ".join(e.message for e in errors[:3]))
+        raise SystemError(f"{path}: " + "; ".join(errors))
     if doc["kind"] != kind:
         raise SystemError(f"{path}: expected a {kind}, found a {doc['kind']}")
     return doc
@@ -266,7 +419,9 @@ def _entry(kind: str, ident: str, catalog: Path) -> dict:
         raise SystemError(f"{kind} id {ident!r} is not a catalogue id")
     path = catalog / folder / f"{ident}.yaml"
     if not path.is_file():
-        raise SystemError(f"no {kind} '{ident}' in the catalogue ({path})")
+        known = [p.stem for p in (catalog / folder).glob("*.yaml")]
+        raise SystemError(f"no {kind} '{ident}' in the catalogue ({path})"
+                          + suggest(ident, known))
     doc = _load(path, kind)
     if doc["id"] != ident:
         raise SystemError(f"{path}: id '{doc['id']}' does not match its file name")
@@ -292,6 +447,9 @@ class Board:
     def ref(self, image: str = "firmware") -> str:
         """The branch or tag to build: the system's, else the catalogue's."""
         fw = self.firmware if image == "firmware" else self.bootloader
+        if fw is None:
+            raise SystemError(f"board '{self.name}': no {image} in the catalogue to build; "
+                              f"give its image at render (--firmware {self.name}=<elf>)")
         return (self.firmware_ref if image == "firmware" else self.bootloader_ref) or fw["ref"]
 
     def endpoint(self, connector: str) -> tuple[str, object]:
@@ -318,8 +476,11 @@ class Board:
             raise SystemError(f"{where}: {connector} is not routed off the "
                               f"{model.board_name} ({model.label}: class {status.cls}"
                               f"{', ' + status.where if status.cls == 'onboard' else ''})")
+        known = [c for sec in ("can", "spi", "uart", "sdmmc", "i2c", "analog_in", "gpio")
+                 for c in self.board.get(sec, {})]
         raise SystemError(f"{where} has no connector or pin '{connector}'"
-                          + (f" (nor has its {model.label})" if model is not None else ""))
+                          + (f" (nor has its {model.label})" if model is not None else "")
+                          + suggest(connector, known, f"{self.board['id']} has"))
 
     def routed(self, connector: str) -> bool | None:
         """Whether the role's backplane connects a connector or pin: one of
@@ -352,6 +513,36 @@ def require_gate_quantum(us: int, what: str) -> None:
     if us != GATE_QUANTUM_US:
         raise SystemError(f"{what} runs at a {us} us sync quantum: the gate runs at "
                           f"{GATE_QUANTUM_US} us only; 1 ms is a non-gate run's opt-in (#348)")
+
+
+def device_interface(name: str, dev: dict) -> dict:
+    """What a device attaches to: its model's interface, and for a model that
+    speaks several buses (`protocols`, a BMI088's I2C or SPI) the one the
+    device wires, with what that choice adds (SPI's chip selects)."""
+    iface = dev["model_doc"].get("interface", {})
+    protocols = iface.get("protocols")
+    if not protocols:
+        return iface
+    chosen = [p for p in protocols if p in dev]
+    if len(chosen) != 1:
+        raise SystemError(f"device '{name}' ({dev['model']}) wires one of "
+                          f"{', '.join(sorted(protocols))} (its protocol), got "
+                          f"{', '.join(chosen) or 'none'}")
+    base = {k: v for k, v in iface.items() if k != "protocols"}
+    return {**base, chosen[0]: True, **protocols[chosen[0]]}
+
+
+def _renode_kind(interface: dict) -> str:
+    """The renode section key that places a device on what it wires."""
+    return "targets" if interface.get("i2c") else "uart" if interface.get("uart") else "type"
+
+
+# What each renode section key holds, for validate's errors.
+_RENODE_KIND_HELP = {
+    "targets": "on I2C: {<name>: {type: Sensors.<Class>, address: 0x..}}, one per address",
+    "uart": "on a UART: {type: Sensors.<Class>, argument: <its IUART constructor argument>}",
+    "type": "on SPI or anything else: type: Sensors.<Class>",
+}
 
 
 class System:
@@ -410,7 +601,8 @@ class System:
     def resolve(self, endpoint: str) -> tuple[Board, str, object]:
         name, connector = endpoint.split(".", 1)
         if name not in self.boards:
-            raise SystemError(f"'{endpoint}': no board instance '{name}' in {self.path}")
+            raise SystemError(f"'{endpoint}': no board instance '{name}' in {self.path}"
+                              + suggest(name, self.boards, "boards in this system"))
         kind, target = self.boards[name].endpoint(connector)
         return self.boards[name], kind, target
 
@@ -452,9 +644,12 @@ class System:
         for name, dev in self.devices.items():
             need(NAME, name, "device name")
             need(ID, dev["model"], f"device '{name}': model")
-            for port in ("spi", "cs", "sdmmc", "i2c"):
+            for port in DEVICE_PORTS:
                 if port in dev:
                     need(ENDPOINT, dev[port], f"device '{name}': {port}")
+            for port, endpoint in dev.get("uarts", {}).items():
+                need(NAME, port, f"device '{name}': uart port")
+                need(ENDPOINT, endpoint, f"device '{name}': uarts.{port}")
             if "attach" in dev:
                 need(NAME, dev["attach"], f"device '{name}': attach")
             for out, endpoint in dev.get("outputs", {}).items():
@@ -551,10 +746,10 @@ class System:
         dev["params"] = {**dev.get("params", {}), **values}
 
     @staticmethod
-    def _firmware(b: Board, spec: dict, catalog: Path) -> dict:
+    def _firmware(b: Board, spec: dict, catalog: Path) -> dict | None:
         """The catalogue firmware a board runs: its role's, for a board with
         roles (a system names none: an ECU runs the ECU firmware), else the
-        one the system names."""
+        one the system names, else None (an image given at render)."""
         if b.role_spec is not None:
             ident = b.role_spec.get("firmware")
             if "firmware" in spec:
@@ -565,8 +760,10 @@ class System:
                                   f"catalogue yet (catalog/firmware/{ident}.yaml)")
             return _entry("firmware", ident, catalog)
         if "firmware" not in spec:
-            raise SystemError(f"board '{b.name}': {b.board['id']} has no roles, so it needs "
-                              f"a firmware")
+            # A board whose firmware is not in the catalogue yet (the
+            # SensorHub's): its image is given at render (`--firmware`) and
+            # there is nothing to build.
+            return None
         return _entry("firmware", spec["firmware"], catalog)
 
     @staticmethod
@@ -701,7 +898,9 @@ class System:
             if b.write_protect and "write_protect" not in b.platform.get("renode", {}):
                 raise SystemError(f"board '{b.name}': platform {b.platform['id']} has no "
                                   f"option bytes to write-protect sectors in")
-            for connector in b.firmware.get("can", {}).get("contract", []):
+            if b.firmware is None and b.firmware_ref is not None:
+                raise SystemError(f"board '{b.name}': a firmware_ref needs a firmware")
+            for connector in (b.firmware or {}).get("can", {}).get("contract", []):
                 if connector not in b.board.get("can", {}):
                     raise SystemError(f"board '{b.name}': firmware {b.firmware['id']}'s CAN "
                                       f"contract rides {connector}, which {b.board['id']} lacks")
@@ -710,15 +909,18 @@ class System:
             for node in spec["nodes"]:
                 _, kind, _ = self.resolve(node)
                 if kind != spec["kind"]:
-                    raise SystemError(f"bus '{bus}' is {spec['kind']} but '{node}' is {kind}")
+                    own = list(self.boards[node.split(".", 1)[0]].board.get(spec["kind"], {}))
+                    raise SystemError(f"bus '{bus}' is {spec['kind']} but '{node}' is {kind}: "
+                                      f"a {spec['kind']} bus takes {spec['kind']} connectors"
+                                      + (f" ({', '.join(own)})" if own else ""))
                 if node in seen:
                     raise SystemError(f"'{node}' is on both '{seen[node]}' and '{bus}'")
                 seen[node] = bus
         for name, dev in self.devices.items():
-            interface = dev["model_doc"].get("interface", {})
+            interface = device_interface(name, dev)
             boards = set()
             for port, want in (("spi", "spi"), ("cs", "gpio"), ("sdmmc", "sdmmc"),
-                               ("i2c", "i2c")):
+                               ("i2c", "i2c"), ("uart", "uart")):
                 if interface.get(port) and port not in dev:
                     raise SystemError(f"device '{name}' ({dev['model']}) needs '{port}'")
                 if port in dev:
@@ -737,11 +939,24 @@ class System:
                                       f"every analog_out and follow one of its params")
             elif "renode" not in doc:
                 raise SystemError(f"model '{doc['id']}': backend renode needs a renode section")
-            elif bool(interface.get("i2c")) != ("targets" in doc["renode"]):
+            elif (_renode_kind(interface) not in doc["renode"]
+                  or ("protocols" not in doc.get("interface", {})
+                      and sum(k in doc["renode"] for k in ("targets", "uart", "type")) != 1)):
                 # An I2C device is one or more targets, each at its address
-                # (a BMI088's two dies); anything else is one peripheral.
-                raise SystemError(f"model '{doc['id']}': an i2c model gives renode targets "
-                                  f"(a type and an address each), any other model a renode type")
+                # (a BMI088's two dies); a UART device the far end of a UART
+                # (renode.uart); anything else one peripheral (type). A model
+                # with protocols gives each choice its own.
+                want = _renode_kind(interface)
+                found = sorted(k for k in ("targets", "uart", "type") if k in doc["renode"])
+                raise SystemError(
+                    f"model '{doc['id']}' (catalog/models/{doc['id']}.yaml), wired as {name} on "
+                    f"{dev.get('i2c') or dev.get('spi') or dev.get('uart') or 'its bus'}: its renode "
+                    f"section needs `{want}` ({_RENODE_KIND_HELP[want]}); it has "
+                    f"{', '.join(f'`{k}`' for k in found) or 'none of targets, uart, type'}"
+                    + ("" if "protocols" in doc.get("interface", {}) or len(found) <= 1
+                       else ", one too many for a single-protocol model")
+                    + ". `python -m vhil.part new` writes a model with it "
+                      "(docs/development/adding-a-part.md)")
             want_out = set(interface.get("analog_out", []))
             if set(dev.get("outputs", {})) != want_out:
                 raise SystemError(f"device '{name}' ({dev['model']}) drives outputs "
@@ -761,6 +976,9 @@ class System:
                 if ins & outs or ins | outs != set(want_pins):
                     raise SystemError(f"model '{doc['id']}': renode gpio_in and gpio_out must "
                                       f"split its gpio pins {want_pins} between them")
+            if set(interface.get("uarts", [])) != set(doc.get("renode", {}).get("uarts", {})):
+                raise SystemError(f"model '{doc['id']}': renode uarts must name a constructor "
+                                  f"argument for each of its uarts {interface.get('uarts', [])}")
             if set(dev.get("pins", {})) != set(want_pins):
                 raise SystemError(f"device '{name}' ({dev['model']}) wires pins "
                                   f"{sorted(want_pins)}, got {sorted(dev.get('pins', {}))}")
@@ -782,6 +1000,16 @@ class System:
                                       f"{interface['attach']} port")
             elif "attach" in dev or "count" in dev:
                 raise SystemError(f"device '{name}' ({dev['model']}) does not attach to a device")
+            # A model's further UART ports (a ZED-F9P's UART2), each wired to
+            # a board UART or left open.
+            for port, endpoint in dev.get("uarts", {}).items():
+                if port not in interface.get("uarts", []):
+                    raise SystemError(f"device '{name}' ({dev['model']}) has no UART port "
+                                      f"'{port}' (has {interface.get('uarts', [])})")
+                board, kind, _ = self.resolve(endpoint)
+                if kind != "uart":
+                    raise SystemError(f"device '{name}': uarts.{port} '{endpoint}' is {kind}, not uart")
+                boards.add(board.name)
             if len(boards) > 1:
                 raise SystemError(f"device '{name}' spans boards {sorted(boards)}")
             self._check_params(name, dev, dev.get("params", {}))
@@ -843,7 +1071,8 @@ class System:
         """Every board endpoint the system wires, once each, in file order."""
         used = [node for spec in self.buses.values() for node in spec["nodes"]]
         for dev in self.devices.values():
-            used += [dev[p] for p in ("spi", "cs", "sdmmc", "i2c") if p in dev]
+            used += [dev[p] for p in DEVICE_PORTS if p in dev]
+            used += list(dev.get("uarts", {}).values())
             used += list(dev.get("outputs", {}).values())
             used += list(dev.get("pins", {}).values())
         for spec in self.doc.get("port", {}).get("signals", {}).values():
@@ -963,7 +1192,7 @@ class System:
         """The buses a board's firmware CAN contract rides: the buses of the
         connectors its catalogue firmware names (`can.contract`), or every
         bus the board is on if it names none."""
-        wanted = self.boards[board].firmware.get("can", {}).get("contract")
+        wanted = (self.boards[board].firmware or {}).get("can", {}).get("contract")
         out = []
         for bus, spec in self.buses.items():
             if spec["kind"] != "can":
@@ -978,7 +1207,7 @@ class System:
         if name in _seen:
             raise SystemError(f"devices attach in a cycle: {' -> '.join(_seen + (name,))}")
         dev = self.devices[name]
-        for port in ("spi", "cs", "sdmmc", "i2c"):
+        for port in DEVICE_PORTS:
             if port in dev:
                 return self.resolve(dev[port])[0].name
         for endpoint in [*dev.get("outputs", {}).values(), *dev.get("pins", {}).values()]:
@@ -1025,17 +1254,19 @@ class System:
     def sensor_to_pin(self, endpoint: str, volts: float) -> float:
         """The pin voltage a sensor-side source of `volts` gives on a board's
         analog input (`ecu.PF7`): its backplane front end's DC ratio
-        (`adc_single_ended` `front_end_ratio` in the role, cited there; 1
-        without one). Every stimulus written at the pin (plants, scenario
-        `volts:` rows, the bench DAC routes) is already pin volts and never
-        goes through it; a model that gives volts at the sensor must (#326)."""
+        (`adc_single_ended` `front_end_ratio` in the role, cited there), else
+        the board's own (`analog_in` `front_end_ratio`), else 1. Every
+        stimulus written at the pin (plants, scenario `volts:` rows, the bench
+        DAC routes) is already pin volts and never goes through it; a model
+        that gives volts at the sensor must (#326)."""
         board, _, pin = endpoint.partition(".")
         b = self.boards.get(board)
         if (b is None or pin not in (b.board.get("analog_in") or {})
                 or pin in ((b.role_spec or {}).get("gpio") or {})):
             raise SystemError(f"{endpoint!r} is not an analog input of this system")
         t = ((b.role_spec or {}).get("adc_single_ended") or {}).get(pin) or {}
-        return volts * float(t.get("front_end_ratio", 1))
+        ratio = t.get("front_end_ratio", b.board["analog_in"][pin].get("front_end_ratio", 1))
+        return volts * float(ratio)
 
     def _renode_device(self, name: str, dev: dict) -> str:
         """Platform-description text attaching one device (or a counted chain).
@@ -1062,13 +1293,22 @@ class System:
                 return str(v).lower()
             return rn.quote(v) if isinstance(v, str) else rn.number(v)
         body = [f"    {k}: {value(v)}" for k, v in args.items()]
+        # Further UART ports, each a constructor argument naming the MCU's UART.
+        body += [f"    {rn.ident(renode['uarts'][port])}: {local(self.resolve(endpoint)[2])}"
+                 for port, endpoint in dev.get("uarts", {}).items()]
         name = rn.ident(name)
         lines = []
         if "attach" in dev:
             for i in range(int(dev.get("count", 1))):
                 lines += [f"{name}{i}: {rn.path(renode['type'])} @ {rn.ident(dev['attach'])} {i}"]
                 lines += body
-        elif "targets" in renode:
+        elif "uart" in dev:
+            # On the system bus at no address (so the monitor finds it as
+            # sysbus.<device>): the model holds the MCU's UART.
+            lines += [f"{name}: {rn.path(renode['uart']['type'])} @ sysbus",
+                      f"    {rn.ident(renode['uart']['argument'])}: {local(self.resolve(dev['uart'])[2])}"]
+            lines += body
+        elif "targets" in renode and "i2c" in dev:
             # One peripheral per I2C target, named <device>_<target>.
             bus = local(self.resolve(dev["i2c"])[2])
             for part, t in renode["targets"].items():
@@ -1172,8 +1412,9 @@ class System:
             platform = b.platform["renode"]
             cpu = rn.ident(platform.get("cpu", "cpu"))
             var = f"elf_{rn.ident(b.name)}"
-            out.append(rn.comment(f"# --- {b.name}: {b.board['id']} running {b.firmware['id']} "
-                                  f"({b.firmware['repo']})"))
+            out.append(rn.comment(f"# --- {b.name}: {b.board['id']} running "
+                                  + (f"{b.firmware['id']} ({b.firmware['repo']})"
+                                     if b.firmware is not None else "the image given at render")))
             if own_time:
                 out += [f"emulation CreateVhilMachine {rn.quote(b.name)}", f"mach set {rn.quote(b.name)}"]
             else:
@@ -1212,7 +1453,7 @@ class System:
                                f"{rn.number(float(t.get('noise_codes_rms', 0)))} "
                                f"{rn.number(float(t.get('start_noise_codes_rms', 0)))} "
                                f"{self.noise_seed(b.name)}")
-            if "cpu" in b.firmware:
+            if "cpu" in (b.firmware or {}):
                 # The rate the chip runs this firmware's code at, which its
                 # caches and memory placement set (docs/cpu-timing.md); the
                 # platform's otherwise.
@@ -1264,7 +1505,7 @@ class System:
                 # A board that carries no bootloader boots its image from where
                 # the image's vector table is linked.
                 out += ["macro reset", '"""', f"    sysbus LoadELF ${var}"]
-                vtor = b.firmware.get("load", {}).get("vector_table")
+                vtor = (b.firmware or {}).get("load", {}).get("vector_table")
             if vtor is not None:
                 out.append(f"    {cpu} VectorTableOffset 0x{vtor:08X}")
             # Renode runs the macro on every reset, the CPU's own (watchdog,
@@ -1305,12 +1546,19 @@ class System:
         path.write_bytes(data)
         return path
 
+    def power_cut(self, board: str) -> list[str]:
+        """What a power-on runs first on a board without VBAT (`vbat: false`):
+        its platform's commands that wipe the backup domain (`renode.power_cut`);
+        nothing for a board whose VBAT keeps it."""
+        b = self.boards[board]
+        return [] if b.board.get("vbat", True) else list(b.platform["renode"].get("power_cut", []))
+
     def bench_config(self) -> dict:
         """The virtual broker's wiring (see vhil/broker.py)."""
         power = [{"machine": c["board"], "slot": c.get("slot"), "relay": c["relay"],
                      "ina_addr": c["ina_addr"], "current_A": c["current_A"],
                      "can": self.can_of(c["board"]),
-                     "vbat": self.boards[c["board"]].board.get("vbat", True)}
+                     "power_cut": self.power_cut(c["board"])}
                     for c in self.bench.get("power", [])]
         routes = []
         for r in self.bench.get("dac_routes", []):
@@ -1345,7 +1593,9 @@ class System:
 
     def build_firmware(self, workdir: Path, refs: dict[str, str] | None = None,
                        log=print, commits: dict[str, str] | None = None,
-                       only: Iterable[str] | None = None) -> dict[str, Path]:
+                       only: Iterable[str] | None = None,
+                       sources: dict[str, Path] | None = None,
+                       only_local: bool = False) -> dict[str, Path]:
         """Clone each firmware source at its ref and build it with its recipe.
         The ref is `refs[image]` if given, else the board's firmware_ref /
         bootloader_ref in the system file, else the catalogue entry's. An
@@ -1353,16 +1603,43 @@ class System:
         was resolved to) is fetched at that commit instead and built in its
         commit directory (commit_source_dir), which then gets a stamp naming
         the ref. With `only`, just those images are built (the others a
-        caller already has). Returns image key (System.images: "<board>",
+        caller already has). An image whose catalogue firmware id is in
+        `sources` (firmware id -> a local working tree, uncommitted edits
+        included) is built from a copy of that tree with the same recipe
+        (local_source_dir; never cached); with `only_local`, only those
+        images are built. Returns image key (System.images: "<board>",
         "<board>.bootloader") -> ELF; a flat .bin is written next to it."""
         refs, commits, built, workdir = refs or {}, commits or {}, {}, Path(workdir)
+        trees = {k: Path(v) for k, v in (sources or {}).items()}
         only = None if only is None else set(only)
         by_source: dict[tuple, Path] = {}
-        sources = [(b.name, b.firmware, b.ref("firmware")) for b in self.boards.values()]
+        # A board with no catalogue firmware has nothing to build: asked for
+        # (or with `only` unset) its ref says so.
+        sources = [(b.name, b.firmware, b.ref("firmware")) for b in self.boards.values()
+                   if b.firmware is not None or only is None or b.name in only]
         sources += [(f"{b.name}.bootloader", b.bootloader, b.ref("bootloader"))
                     for b in self.boards.values() if b.bootloader is not None]
         for name, fw, default_ref in sources:
             if only is not None and name not in only:
+                continue
+            local = fw is not None and fw["id"] in trees
+            if only_local and not local:
+                continue
+            if local:
+                key = (fw["id"], "local")
+                if key not in by_source:
+                    src = local_source_dir(workdir, fw)
+                    keep = Path(fw["build"]["elf"]).parts[0]
+                    n = sync_tree(trees[fw["id"]], src, keep)
+                    log(f"[{name}] local working tree {trees[fw['id']]}: {n} file(s) changed")
+                    elf = src / fw["build"]["elf"]
+                    for step in ("configure", "build"):
+                        log(f"[{name}] {fw['build'][step]}")
+                        subprocess.run(fw["build"][step], shell=True, cwd=src, check=True,
+                                       stdout=sys.stderr)
+                    _objcopy(elf)
+                    by_source[key] = elf
+                built[name] = by_source[key]
                 continue
             ref, commit = refs.get(name, default_ref), commits.get(name)
             if commit is not None and not COMMIT.fullmatch(commit):
@@ -1449,9 +1726,20 @@ def _pairs(items) -> dict[str, str]:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("validate", "render", "bench", "build"):
-        s = sub.add_parser(name)
-        s.add_argument("system", type=Path)
+    helps = {
+        "validate": ("check a system file against the schema and the catalogue",
+                     "python -m vhil.system validate systems/ecu.yaml"),
+        "render": ("print the Renode script for a system (-o FILE to write it)",
+                   "python -m vhil.system render systems/ecu.yaml --firmware ecu=build/ecu.elf"),
+        "build": ("build the firmware images a system runs (needs Docker and network)",
+                  "python -m vhil.system build systems/ecu.yaml --ref ecu=dev"),
+        "bench": ("print the system's bench configuration as JSON",
+                  "python -m vhil.system bench systems/ecu.yaml"),
+    }
+    for name, (summary, example) in helps.items():
+        s = sub.add_parser(name, help=summary, description=f"{summary}.\n\nExample:\n  {example}",
+                           formatter_class=argparse.RawDescriptionHelpFormatter)
+        s.add_argument("system", type=Path, help="path to a systems/<id>.yaml file")
         if name == "render":
             s.add_argument("--firmware", action="append", metavar="BOARD=ELF")
             s.add_argument("--socketcan", action="store_true")
@@ -1472,6 +1760,12 @@ def main(argv=None) -> int:
                                 "resolved to), in a directory keyed by commit and recipe")
             s.add_argument("--only", action="append", metavar="IMAGE",
                            help="build just this image (repeatable; default: every image)")
+            s.add_argument("--source", action="append", metavar="FIRMWARE=DIR",
+                           help="build this catalogue firmware (its id: ecu, ams, udv, "
+                                "can-bootloader) from a local working tree, uncommitted "
+                                "edits included, with its recipe")
+            s.add_argument("--only-local", action="store_true",
+                           help="build just the images a --source gives")
     args = p.parse_args(argv)
     try:
         system = System(args.system)
@@ -1499,7 +1793,9 @@ def main(argv=None) -> int:
             for board, elf in system.build_firmware(args.workdir, _pairs(args.ref),
                                                     log=lambda m: print(m, file=sys.stderr),
                                                     commits=_pairs(args.commit),
-                                                    only=args.only).items():
+                                                    only=args.only,
+                                                    sources=_pairs(args.source),
+                                                    only_local=args.only_local).items():
                 print(f"{board}={elf}")
     except SystemError as e:
         print(f"error: {e}", file=sys.stderr)

@@ -110,6 +110,7 @@ select.vhil-input option { padding: 2px var(--sp-2); }
 .vhil-badge { display: inline-flex; gap: 3px; align-items: center; padding: 0 var(--sp-2);
   border: 1px solid currentColor; border-radius: var(--r-pill); font-size: var(--fs-small); font-weight: 600; }
 .vhil-badge.--passed { color: var(--status-ok); }
+.vhil-badge.--completed { color: var(--status-warn); }
 .vhil-badge.--failed { color: var(--status-failed); }
 .vhil-badge.--error { color: var(--status-error); }
 .vhil-badge.--running { color: var(--status-running); }
