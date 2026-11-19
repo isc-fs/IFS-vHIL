@@ -111,7 +111,11 @@ Set up / Retry**, to try again.
   and **Run its scenarios**. **+** makes a new system: name it, then place
   boards and wire buses on the editor's empty canvas and save it with the
   editor's **Commit…** (a branch and PR on IFS-vHIL, from a firmware
-  repository too). **Tools…** at the bottom in the vHIL repository.
+  repository too). With no GitHub token on the editor's server (the usual
+  case), VS Code offers to push the committed branch with your git and opens
+  its pull request on GitHub; in a firmware repository, a branch committed
+  but not pushed stays listed in the view (**Push and open a pull
+  request**), since the checkout it lives in is VS Code's own. **Tools…** at the bottom in the vHIL repository.
 - **Run on save**: the Testing panel's continuous run (the eye icon) runs
   the selection again whenever you save a source, header, linker script,
   `.ioc` or build file (`CMakeLists.txt`, `Makefile`, `*.cmake`, `*.mk`);

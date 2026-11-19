@@ -104,6 +104,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "vhil.pushSystemBranch",
+        "title": "Push and open a pull request",
+        "category": "vHIL",
+        "icon": "$(cloud-upload)"
+      },
+      {
         "command": "vhil.newPart",
         "title": "New part\u2026",
         "category": "vHIL"
@@ -275,6 +281,10 @@
           "when": "vhil.active && !vhil.firmwareRepo"
         },
         {
+          "command": "vhil.pushSystemBranch",
+          "when": "vhil.active && vhil.firmwareRepo"
+        },
+        {
           "command": "vhil.openSystemYaml",
           "when": "vhil.active"
         },
@@ -300,6 +310,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "vhil.pushSystemBranch",
+          "when": "view == vhil.systems && viewItem == vhilBranch",
+          "group": "inline@0"
+        },
         {
           "command": "vhil.openSystemYaml",
           "when": "view == vhil.systems && viewItem =~ /^vhilSystem/",

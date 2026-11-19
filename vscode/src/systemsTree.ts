@@ -27,8 +27,9 @@ export class SystemsView implements vscode.TreeDataProvider<Row> {
     item.iconPath = new vscode.ThemeIcon(r.icon);
     item.contextValue = r.context;
     if (r.command) {
-      const system = r.kind === "system" ? r.label : undefined;
-      item.command = { command: r.command, title: r.label, arguments: system ? [system] : [] };
+      // A system's or a branch's row passes its name.
+      const arg = r.kind === "system" || r.kind === "branch" ? r.label : undefined;
+      item.command = { command: r.command, title: r.label, arguments: arg ? [arg] : [] };
     }
     return item;
   }
