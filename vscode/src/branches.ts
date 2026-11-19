@@ -22,7 +22,10 @@ export function unpushed(refs: string, current: string): string[] {
     if (ref.startsWith("refs/heads/")) heads.set(ref.slice("refs/heads/".length), sha);
     else if (ref.startsWith("refs/remotes/origin/")) remote.set(ref.slice("refs/remotes/origin/".length), sha);
   }
-  return [...heads].filter(([b, sha]) => b !== current && remote.get(b) !== sha).map(([b]) => b).sort();
+  // shared/<login>/<name> is the team store's (vhil/server/team.py): the
+  // editor's Team view shares it, it is no pull request branch.
+  return [...heads].filter(([b, sha]) => b !== current && !b.startsWith("shared/") && remote.get(b) !== sha)
+    .map(([b]) => b).sort();
 }
 
 /** The system ids among `git diff-tree --name-only` paths: systems/<id>.yaml. */

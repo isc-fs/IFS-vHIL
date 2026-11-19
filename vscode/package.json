@@ -92,6 +92,31 @@
         "category": "vHIL"
       },
       {
+        "command": "vhil.signIn",
+        "title": "Sign in with GitHub (share with the team)",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.signOut",
+        "title": "Sign out of GitHub",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.updateClone",
+        "title": "Update your clone (fast-forward)",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.switchToDev",
+        "title": "Switch your clone to dev",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.setUpStack",
+        "title": "Set up the vHIL (VM, images, firmware)",
+        "category": "vHIL"
+      },
+      {
         "command": "vhil.showTrace",
         "title": "Show bus trace",
         "category": "vHIL",
@@ -251,6 +276,26 @@
         {
           "command": "vhil.updateVhil",
           "when": "vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.signIn",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.signOut",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.updateClone",
+          "when": "vhil.active && !vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.switchToDev",
+          "when": "vhil.active && !vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.setUpStack",
+          "when": "vhil.active"
         },
         {
           "command": "vhil.diagnose",

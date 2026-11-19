@@ -27,8 +27,9 @@ import {
 } from "./firmware";
 import { boardsOf as debugBoards, debugConfig, entryBreakpoint, Ready } from "./debug";
 import {
-  barOf, DebuggerHealth, findings, Fix, GROUP, groupId, holdBack, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
+  barOf, DebuggerHealth, doctorFindings, findings, Fix, GROUP, groupId, holdBack, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
 } from "./status";
+import { cloneAdvice, CloneStatus, parseClone } from "./clone";
 import { judge, parseStack, StackInfo, stackId } from "./stack";
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems, webPort } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
@@ -355,6 +356,12 @@ class Vhil implements vscode.Disposable {
   private systems: SystemInfo[] = [];
   /** The editor's commits in the extension's checkout that aren't pushed (firmware repositories). */
   private branches: SavedBranch[] = [];
+  /** The GitHub account the vHIL shares as; null: signed out; undefined: not known (an old checkout). */
+  private account: string | null | undefined;
+  /** Your own clone against GitHub (vhil-clone status), and when it was last fetched. */
+  private clone: CloneStatus | undefined;
+  private cloneChecked = 0;
+  private cloneWarned = "";
   // A test's bus trace (.trace.jsonl, absolute) and its failure snapshots.
   private readonly traces = new Map<string, string>();
   private readonly snapshots = new Map<string, Snapshot[]>();
@@ -450,6 +457,11 @@ class Vhil implements vscode.Disposable {
         void vscode.window.showInformationMessage("vHIL: no bus trace for that test: run it first.");
       }),
       command("vhil.updateVhil", () => this.updateVhil()),
+      command("vhil.signIn", () => this.signIn()),
+      command("vhil.signOut", () => this.signOut()),
+      command("vhil.updateClone", () => this.moveClone("update")),
+      command("vhil.switchToDev", () => this.moveClone("switch")),
+      command("vhil.setUpStack", () => this.setUpStack()),
     );
     if (local) {
       this.log.appendLine(`${local.dir}: ${local.firmware.id} (${local.firmware.repo}), ` +
@@ -732,6 +744,9 @@ class Vhil implements vscode.Disposable {
       baseState: this.baseState, editorState: this.editorState, built: this.built,
       needed: NEEDED_FW, editorUp: this.editorUp, webPort: this.webPort, debugger: await this.debuggerHealth(),
     });
+    // What only `vhil doctor` checks (the compose plugin, free disk), as the desktop app shows it.
+    const doctor = await this.binScript("vhil", ["doctor", "--json"]);
+    if (doctor) list.push(...doctorFindings(doctor.out));
     const fixes: { [f in Fix]: string } = {
       startVm: "Start the Docker VM", pullImages: "Get the images", buildFirmware: "Build firmware",
       openSettings: "Open the setting", openEditor: "Open the system editor",
@@ -786,6 +801,8 @@ class Vhil implements vscode.Disposable {
   }
 
   refresh(): Promise<void> {
+    void this.readAccount();
+    void this.readClone(false);
     this.refreshing ??= this.collect().finally(() => { this.refreshing = undefined; });
     return this.refreshing;
   }
@@ -1613,7 +1630,140 @@ class Vhil implements vscode.Disposable {
   private updateView() {
     this.systemsView.update(rows(this.mySystems(),
       { dockerUp: this.dockerUp, editorUp: this.editorUp, context: this.config().context,
-        baseState: this.baseState, editorState: this.editorState }, !this.local, this.branches));
+        baseState: this.baseState, editorState: this.editorState, account: this.account,
+        clone: this.clone }, !this.local, this.branches));
+  }
+
+  // -- your GitHub account and your clone (as the desktop app has them) -------
+
+  /** A bin/ script of the checkout, run with bash (the checkout's own copy). */
+  private binScript(name: string, args: string[], timeout = 60000): Promise<{ ok: boolean; out: string; err: string }> | undefined {
+    const file = path.join(this.repo, "bin", name);
+    if (!fs.existsSync(file)) return undefined; // a checkout from before it
+    return new Promise((resolve) => cp.execFile("bash", [file, ...args], { cwd: this.repo, env: this.env(), timeout },
+      (e, out, err) => resolve({ ok: !e, out: String(out), err: String(err || e || "") })));
+  }
+
+  /** Who the team store shares as (vhil-account whoami: ~/.config/vhil/github, read live by the vHIL). */
+  private async readAccount() {
+    const r = await this.binScript("vhil-account", ["whoami"], 10000);
+    const next = r === undefined ? undefined : (r.ok && r.out.trim()) || null;
+    if (next !== this.account) {
+      this.account = next;
+      this.updateView();
+    }
+  }
+
+  /**
+   * GitHub's device flow (vhil-account login): the code is copied and
+   * GitHub's page opened; the vHIL picks the account up without a restart.
+   */
+  private async signIn() {
+    const file = path.join(this.repo, "bin", "vhil-account");
+    if (!fs.existsSync(file)) {
+      void vscode.window.showErrorMessage("vHIL: this checkout has no bin/vhil-account: update it first.");
+      return;
+    }
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification, title: "vHIL: signing in to GitHub…", cancellable: true,
+    }, (progress, token) => new Promise<void>((resolve) => {
+      const proc = cp.spawn("bash", [file, "login"], { cwd: this.repo, env: this.env() });
+      token.onCancellationRequested(() => proc.kill());
+      let out = "";
+      const onData = (b: Buffer) => {
+        const text = b.toString();
+        out += text;
+        this.log.append(text);
+        const m = /^Open (\S+) and enter (\S+)$/m.exec(text);
+        if (m) {
+          const [, uri, code] = m;
+          progress.report({ message: `enter ${code} on GitHub (copied)` });
+          void vscode.env.clipboard.writeText(code);
+          void vscode.env.openExternal(vscode.Uri.parse(uri));
+          void vscode.window.showInformationMessage(
+            `vHIL: enter ${code} on GitHub (copied to the clipboard), then approve.`, "Open GitHub")
+            .then((a) => { if (a) void vscode.env.openExternal(vscode.Uri.parse(uri)); });
+        }
+      };
+      proc.stdout.on("data", onData);
+      proc.stderr.on("data", onData);
+      proc.on("close", async (code) => {
+        await this.readAccount();
+        if (code === 0 && this.account) {
+          void vscode.window.showInformationMessage(`vHIL: signed in as ${this.account}: what you commit in the editor is shared with the team.`);
+        } else if (!token.isCancellationRequested) {
+          void vscode.window.showErrorMessage(`vHIL: sign-in failed: ${out.trim().split("\n").at(-1) ?? ""}`);
+        }
+        resolve();
+      });
+    }));
+  }
+
+  private async signOut() {
+    const a = await vscode.window.showWarningMessage(
+      `Sign ${this.account ?? "you"} out of GitHub on this computer? The vHIL stops sharing your commits.`,
+      { modal: true }, "Sign out");
+    if (a !== "Sign out") return;
+    await this.binScript("vhil-account", ["logout"], 10000);
+    await this.readAccount();
+  }
+
+  /**
+   * Your own clone (not the checkout VS Code keeps for a firmware repository,
+   * which Update vHIL moves): behind its upstream, or on a branch merged into
+   * dev already. Fetches, so at most every 10 min unless `force`.
+   */
+  private async readClone(force: boolean) {
+    if (this.local) return;
+    if (!force && Date.now() - this.cloneChecked < 10 * 60 * 1000) return;
+    this.cloneChecked = Date.now();
+    const r = await this.binScript("vhil-clone", ["status", this.repo, "dev"]);
+    this.clone = r?.ok ? parseClone(r.out) : undefined;
+    this.updateView();
+    const a = this.clone && cloneAdvice(this.clone);
+    // Said once per window and finding; the Systems view keeps showing it.
+    const key = a ? `${this.clone!.branch}:${a.text}` : "";
+    if (a && !force && key !== this.cloneWarned) {
+      this.cloneWarned = key;
+      const go = a.action === "update" ? "Update" : a.action === "switch" ? "Switch to dev" : undefined;
+      void vscode.window.showWarningMessage(`vHIL: ${a.detail.replace(/ Click to .*$/, "")}`, ...(go ? [go] : []))
+        .then((pick) => { if (pick) void this.moveClone(a.action!); });
+    }
+  }
+
+  /** Fast-forward your clone, or switch it to dev (vhil-clone): never a merge. */
+  private async moveClone(how: "update" | "switch") {
+    if (this.local) return;
+    const r = await this.binScript("vhil-clone", how === "update" ? ["update", this.repo] : ["switch", this.repo, "dev"]);
+    if (!r) {
+      void vscode.window.showErrorMessage("vHIL: this checkout has no bin/vhil-clone: update it with git.");
+      return;
+    }
+    this.log.append(r.out + r.err);
+    if (!r.ok) {
+      void vscode.window.showErrorMessage(`vHIL: ${how === "update" ? "updating" : "switching"} failed: ` +
+        `${(r.err || r.out).trim().split("\n").at(-1) ?? ""}`, "Show output").then((a) => { if (a) this.log.show(); });
+    }
+    await this.readClone(true);
+    this.readSystems();
+    await this.refresh();
+    // An open editor tab moves to the new code (ensureOwnStack restarts it).
+    if (r.ok && this.editorPanel) {
+      this.editorReady = false;
+      void this.waitForEditor();
+    }
+  }
+
+  /** bin/vhil setup: the VM (macOS), the images and the firmware, then doctor (the app's Run set-up). */
+  private async setUpStack() {
+    if (!fs.existsSync(path.join(this.repo, "bin", "vhil"))) {
+      void vscode.window.showErrorMessage("vHIL: this checkout has no bin/vhil: update it first.");
+      return;
+    }
+    const t = new vscode.Task({ type: "vhil", args: ["setup"] }, this.folder, "Set up", "vHIL",
+      new vscode.ShellExecution("./bin/vhil", ["setup"], { cwd: this.repo, env: this.overrides() }));
+    t.presentationOptions = { reveal: vscode.TaskRevealKind.Always, panel: vscode.TaskPanelKind.Dedicated, clear: true };
+    await vscode.tasks.executeTask(t);
   }
 
   /** The checkout's unpushed system branches, into the Systems view (firmware repositories only). */
