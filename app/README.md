@@ -36,6 +36,9 @@ Download yours from the team's app store,
 that the app updates itself: a newer release shows **Install and restart**,
 the download is checked against the signing key built into the app, and the
 app's own copy of the repository moves to the new release on the next start.
+Open restarts a vHIL that is still running older code than its checkout (its
+server reports the commit it started at), so an update never needs Stop then
+Open.
 None is signed with a certificate (that needs paid developer accounts,
 #373's "later" list), so each OS warns once.
 
