@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from vhil.server import auth, security
-from vhil.server import systems_write
+from vhil.server import systems_write, team
 from vhil.server import bundle, decode, runs, scenarios, session, sources, training
 from vhil.server.config import Settings
 from vhil.server.workspace import NotFound, Workspace
@@ -55,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, f"no system '{system_id}'")
 
     app.include_router(systems_write.router)
+    app.include_router(team.router)
     app.include_router(runs.router(settings, ws))
     app.include_router(session.router(settings, ws))
     app.include_router(runs.pickers_router(ws))
