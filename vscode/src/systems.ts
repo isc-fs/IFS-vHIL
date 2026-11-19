@@ -114,3 +114,18 @@ export function validationProblems(output: string, text: string): Problem[] {
   }
   return out;
 }
+
+/**
+ * The web app's port for a vHIL checkout (the script's VHIL_WEB_PORT): the
+ * one set, else 8080 for a checkout of your own and, for the extension's own
+ * checkout (a firmware repository's), a port of its own from its path, so its
+ * stack runs beside the one of your checkout instead of fighting for 8080.
+ */
+export function webPort(checkout: string, extensionOwned: boolean, set?: string): number {
+  const n = Number(set);
+  if (set && Number.isInteger(n) && n > 0 && n < 65536) return n;
+  if (!extensionOwned) return 8080;
+  let h = 0x811c9dc5; // FNV-1a
+  for (const c of checkout) h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0;
+  return 8100 + (h % 800);
+}
