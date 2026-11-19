@@ -71,7 +71,9 @@ def test_a_board_picks_its_role_firmware_and_bootloader_on_its_node():
     controls = (VHIL / "VhilBoardControls.vue").read_text()
     template = controls.split("<script>")[0]
     assert 'no-drag="true"' in template and "@keydown.stop" in template
-    assert template.count("<select") == 3
+    # Role, or on a board without roles its firmware; then branch and tag.
+    assert template.count("<select") == 4
+    assert '@change="(ev) => setFirmware(ev.target.value)"' in template
     assert "pickRef(props.node, part.refProp, value)" in controls
     assert "setProp(props.node, 'role', value)" in controls
     assert "No {{ app.fwId }} firmware in the catalogue yet" in template
