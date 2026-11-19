@@ -161,11 +161,13 @@ open_when_up() {
 # in WSL) and keeps the token like the GitHub CLI does: a file only you can
 # read, $XDG_CONFIG_HOME/vhil/github (~/.config/vhil/github). `vhil ui` hands
 # it to the stack, which pushes your shared/<login>/... branches with it.
-# The OAuth app is the team's (isc-fs, device flow on); its client ID is
-# public. Scope public_repo: push branches to the public repository.
+# The OAuth app is the team's, "ISC vHIL" in isc-fs (device flow on, tokens
+# don't expire, as the GitHub CLI's); its client ID is public, not a secret.
+# VHIL_DEVICE_CLIENT_ID overrides it (empty: none). Scope public_repo: push
+# branches to the public repository.
 github_web=${VHIL_GITHUB_WEB:-https://github.com}
 github_api=${VHIL_GITHUB_API:-https://api.github.com}
-device_client_id=${VHIL_DEVICE_CLIENT_ID:-}
+device_client_id=${VHIL_DEVICE_CLIENT_ID-Ov23lijKjGq1XpuDCjJB}
 account_file=${XDG_CONFIG_HOME:-$HOME/.config}/vhil/github
 
 account() {  # <key>: login or token from the account file, else empty

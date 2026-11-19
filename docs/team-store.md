@@ -60,9 +60,10 @@ proposes it for `dev`, where it is reviewed and CI runs.
 member on a shared server; on a desktop `VHIL_TEAM_LOGIN`, else the login of
 `VHIL_GITHUB_TOKEN`.
 
-## Set-up (once, an isc-fs owner)
+## The OAuth app
 
-Register an OAuth app in the isc-fs organisation with **Enable Device Flow**
-on, and put its client ID (public, not a secret) in `bin/vhil` as
-`VHIL_DEVICE_CLIENT_ID`'s default. Until then `vhil login` says it isn't set
-up.
+Sign-in is the isc-fs organisation's OAuth app **ISC vHIL** (Settings →
+OAuth apps), with Device Flow on and tokens that don't expire (as the
+GitHub CLI's). Its client ID is public and set in `bin/vhil`
+(`VHIL_DEVICE_CLIENT_ID` overrides it). **Revoke all user tokens** there
+signs everyone out.

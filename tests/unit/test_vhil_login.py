@@ -45,6 +45,12 @@ def test_login_keeps_the_account_for_you_alone(tmp_path):
     assert vhil(tmp_path, "whoami").returncode == 1
 
 
+def test_the_teams_oauth_app_is_the_default():
+    """ISC vHIL, isc-fs's OAuth app (docs/team-store.md); empty means none."""
+    assert ("device_client_id=${VHIL_DEVICE_CLIENT_ID-Ov23lijKjGq1XpuDCjJB}"
+            in (REPO / "bin/vhil").read_text())
+
+
 def test_login_without_the_teams_oauth_app_says_so(tmp_path):
     r = vhil(tmp_path, "login", VHIL_DEVICE_CLIENT_ID="")
     assert r.returncode == 2 and "VHIL_DEVICE_CLIENT_ID" in r.stderr
