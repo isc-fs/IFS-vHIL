@@ -2,8 +2,20 @@ name: vscode
 
 # The VS Code extension (vscode/README.md) on every pull request that
 # changes it: compile, its tests (src/plan.ts) and the .vsix, kept as an
-# artifact a teammate installs with `code --install-extension`. The runner's
-# preinstalled Node builds it; the tools are pinned in vscode/package-lock.json.
+# artifact. The runner's preinstalled Node builds it; the tools are pinned in
+# vscode/package-lock.json.
+#
+# Its version is package.json's major.minor and, as the patch, the number of
+# dev commits that touched vscode/: every change on dev is a new version
+# without a hand bump. Each one on dev is released:
+#
+#   vscode-v<version>  the .vsix of that version (kept: install an older one)
+#   vscode-latest      vhil-tests.vsix and latest.json ({version, vsix}),
+#                      moved to the newest: the install command
+#                      (vscode/README.md) and the extension's update check
+#                      read it.
+#
+# Not the desktop app's releases (v*, app.yml): neither is ever "Latest".
 
 on:
   pull_request:
@@ -16,14 +28,30 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: vscode-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     defaults:
       run:
         working-directory: vscode
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # the patch counts commits
+          persist-credentials: false
+      - name: Version
+        id: version
+        run: |
+          base=$(node -p 'require("./package.json").version.split(".").slice(0, 2).join(".")')
+          version=$base.$(git rev-list --count HEAD -- .)
+          npm version --no-git-tag-version --allow-same-version "$version" >/dev/null
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
       - run: npm ci
       - run: npm test
       - run: npm run package
@@ -32,3 +60,40 @@ jobs:
           name: vhil-tests-vsix
           path: vscode/*.vsix
           if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: vhil-tests-vsix
+      - name: Release
+        run: |
+          set -euo pipefail
+          vsix=vhil-tests-$VERSION.vsix
+          [ -f "$vsix" ] || { echo "no $vsix" >&2; ls; exit 1; }
+          tag=vscode-v$VERSION
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" "$vsix" --target "$SHA" --latest=false \
+                  --title "VS Code extension $VERSION" \
+                  --notes "The vHIL's VS Code extension at $SHA (vscode/README.md: Install)."
+          fi
+          url=https://github.com/$GH_REPO/releases/download/$tag/$vsix
+          printf '{"version": "%s", "vsix": "%s"}\n' "$VERSION" "$url" > latest.json
+          cp "$vsix" vhil-tests.vsix
+          if ! gh release view vscode-latest >/dev/null 2>&1; then
+              gh release create vscode-latest --target "$SHA" --prerelease --latest=false \
+                  --title "VS Code extension: the newest" \
+                  --notes "Always the newest extension; install with the command in vscode/README.md."
+          fi
+          gh release upload vscode-latest vhil-tests.vsix latest.json --clobber
+          echo "Released \`$tag\` and moved \`vscode-latest\` to it." >> "$GITHUB_STEP_SUMMARY"
