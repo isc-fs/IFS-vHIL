@@ -24,6 +24,8 @@ import {
 } from "./firmware";
 import { barOf, findings, Fix, GROUP, groupId, Phase, scenarioSystem } from "./status";
 import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS } from "./systems";
+import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
+import { TRACE_VIEW, TracePanel } from "./tracePanel";
 
 const SCRIPT = "scripts/vhil-docker.sh";
 // Where the plugin's JSON lines go: results/ is git-ignored and inside /work.
@@ -158,6 +160,11 @@ class Vhil implements vscode.Disposable {
   private editorReady = false;
   private checking: Promise<void> | undefined;
   private systems: SystemInfo[] = [];
+  // A test's bus trace (.trace.jsonl, absolute) and its failure snapshots.
+  private readonly traces = new Map<string, string>();
+  private readonly snapshots = new Map<string, Snapshot[]>();
+  private readonly tracePanel: TracePanel;
+  private readonly problems = vscode.languages.createDiagnosticCollection("vHIL firmware build");
 
   constructor(repo: string, private readonly folder: vscode.WorkspaceFolder,
               private readonly context: vscode.ExtensionContext, private readonly local?: Local) {
@@ -173,6 +180,7 @@ class Vhil implements vscode.Disposable {
     this.setPhase(this.phase);
     this.status.show();
     this.readSystems();
+    this.tracePanel = new TracePanel(context.extensionUri);
 
     // The extension's own checkout changes only when it updates it.
     const watch = (glob: string) => vscode.workspace.createFileSystemWatcher(
@@ -183,7 +191,9 @@ class Vhil implements vscode.Disposable {
     const reread = () => this.readSystems();
     const command = (id: string, f: (...a: any[]) => unknown) => vscode.commands.registerCommand(id, f);
     this.disposables.push(
-      this.controller, this.status, this.log, tests, systems,
+      this.controller, this.status, this.log, tests, systems, this.problems,
+      vscode.window.registerWebviewViewProvider(TRACE_VIEW, this.tracePanel,
+        { webviewOptions: { retainContextWhenHidden: true } }),
       tests.onDidChange(later), tests.onDidCreate(later), tests.onDidDelete(later),
       systems.onDidChange(reread), systems.onDidCreate(reread), systems.onDidDelete(reread),
       vscode.tasks.onDidEndTaskProcess((e) => {
@@ -209,6 +219,13 @@ class Vhil implements vscode.Disposable {
       }),
       command("vhil.stopEditor", () => this.editorTask?.terminate()),
       command("vhil.tools", () => this.tools()),
+      // From the Testing panel (a test item), or a failure's link (its id).
+      command("vhil.showTrace", (item?: vscode.TestItem | string) => {
+        const id = typeof item === "string" ? item : item?.id;
+        const file = id ? this.traces.get(id) : undefined;
+        if (id && file) return this.tracePanel.show(file, labelOf(id), true);
+        void vscode.window.showInformationMessage("vHIL: no bus trace for that test: run it first.");
+      }),
       command("vhil.updateVhil", () => this.updateVhil()),
     );
     if (local) {
@@ -254,6 +271,11 @@ class Vhil implements vscode.Disposable {
 
   private env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     return { ...process.env, ...this.overrides(), ...extra };
+  }
+
+  /** Where the container's files are on the host. */
+  private pathMap(): PathMap {
+    return { repo: this.repo, firmware: this.local?.firmware.id, dir: this.local?.dir };
   }
 
   /** Run vhil-docker.sh with `args`; `onData` gets its output as it comes. */
@@ -545,6 +567,9 @@ class Vhil implements vscode.Disposable {
     } finally {
       run.end();
       this.busy = false;
+      // The first failure's buses, in the panel, without taking focus.
+      const failed = all.find((t) => tally.failed.has(t.id) && this.traces.has(t.id));
+      if (failed) void this.tracePanel.show(this.traces.get(failed.id)!, labelOf(failed.id), false);
       this.setPhase({ kind: "result", passed: tally.passed, failed: tally.failed.size, skipped: tally.skipped,
                       cancelled: token.isCancellationRequested || undefined });
     }
@@ -642,12 +667,34 @@ class Vhil implements vscode.Disposable {
     const code = await proc.done;
     cancel.dispose();
     void this.checkStatus();
+    // The compiler's errors and warnings in Problems, at the working tree's lines.
+    const diags = compilerDiagnostics(text, this.pathMap());
+    this.problems.clear();
+    const byFile = new Map<string, vscode.Diagnostic[]>();
+    for (const d of diags) {
+      const range = new vscode.Range(d.line - 1, Math.max(d.column - 1, 0), d.line - 1, Math.max(d.column - 1, 0));
+      const v = new vscode.Diagnostic(range, d.message,
+        d.severity === "error" ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning);
+      v.source = `vHIL build (${fw})`;
+      byFile.set(d.file, [...(byFile.get(d.file) ?? []), v]);
+    }
+    for (const [file, list] of byFile) this.problems.set(vscode.Uri.file(file), list);
     if (code === 0) return true;
-    const tail = text.trim().split("\n").slice(-20).join("\n");
+    const errors = diags.filter((d) => d.severity === "error");
+    const why = errors.length
+      ? new vscode.TestMessage(`Building ${fw} failed: ${errors.length} error${errors.length > 1 ? "s" : ""}, see Problems.\n\n` +
+          `${path.relative(this.local!.dir, errors[0].file)}:${errors[0].line}: ${errors[0].message}`)
+      : new vscode.TestMessage(`Building ${fw} from ${this.local!.dir} failed (exit ${code}):\n\n` +
+          text.trim().split("\n").slice(-20).join("\n"));
+    if (errors.length) {
+      why.location = new vscode.Location(vscode.Uri.file(errors[0].file),
+        new vscode.Position(errors[0].line - 1, Math.max(errors[0].column - 1, 0)));
+      void vscode.commands.executeCommand("workbench.actions.view.problems");
+    }
     for (const t of tests) {
       if (token.isCancellationRequested) run.skipped(t);
       else {
-        run.errored(t, new vscode.TestMessage(`Building ${fw} from ${this.local!.dir} failed (exit ${code}):\n\n${tail}`));
+        run.errored(t, why);
         tally.failed.add(t.id);
       }
     }
@@ -658,12 +705,21 @@ class Vhil implements vscode.Disposable {
     if (r.kind === "start") {
       const t = this.byId.get(r.id);
       if (t) run.started(t);
+      this.snapshots.delete(r.id);
+      return;
+    }
+    if (r.kind === "snapshot") {
+      this.snapshots.set(r.id, [...(this.snapshots.get(r.id) ?? []), r]);
       return;
     }
     if (r.kind !== "result") return;
     const t = this.byId.get(r.id);
     if (!t) return;
     reported.add(r.id);
+    if (r.trace) {
+      this.traces.set(r.id, path.isAbsolute(r.trace) ? r.trace : path.join(this.repo, r.trace));
+      void vscode.commands.executeCommand("setContext", "vhil.traced", [...this.traces.keys()]);
+    }
     const ms = r.duration * 1000;
     if (r.outcome === "passed") {
       run.passed(t, ms);
@@ -672,7 +728,7 @@ class Vhil implements vscode.Disposable {
       run.skipped(t);
       tally.skipped++;
     } else {
-      const msg = new vscode.TestMessage(r.message ?? r.short ?? "failed");
+      const msg = this.failure(r);
       if (r.file && r.line) {
         msg.location = new vscode.Location(vscode.Uri.file(path.join(this.repo, r.file)),
           new vscode.Position(r.line - 1, 0));
@@ -681,6 +737,36 @@ class Vhil implements vscode.Disposable {
       tally.failed.add(r.id);
     }
     this.progress(tally);
+  }
+
+  /**
+   * A failed test's message: the assertion, then where each board's firmware
+   * was (its C frames, clickable in the working tree) and the last frames on
+   * its buses, with a link to the whole trace. Without a snapshot, pytest's
+   * text as before.
+   */
+  private failure(r: Extract<Record, { kind: "result" }>): vscode.TestMessage {
+    const snaps = this.snapshots.get(r.id) ?? [];
+    this.snapshots.delete(r.id);
+    if (!snaps.length && !r.trace) return new vscode.TestMessage(r.message ?? r.short ?? "failed");
+    const md = new vscode.MarkdownString();
+    md.appendCodeblock(r.short ?? r.message ?? "failed", "text");
+    if (snaps.length) md.appendMarkdown("\n" + snapshotMarkdown(snaps));
+    if (r.trace) {
+      const args = encodeURIComponent(JSON.stringify([r.id]));
+      md.appendMarkdown(`\n[Show the bus trace](command:vhil.showTrace?${args})`);
+      md.isTrusted = { enabledCommands: ["vhil.showTrace"] };
+    }
+    const msg = new vscode.TestMessage(md);
+    const map = this.pathMap();
+    msg.stackTrace = snaps.flatMap((s) => s.frames.map((f) => {
+      const host = f.file ? hostPath(f.file, map) : undefined;
+      const where = f.file ? ` ${f.file.split("/").pop()}:${f.line}` : ` ${f.address}`;
+      return new vscode.TestMessageStackFrame(`${s.board}: ${f.symbol}${host ? "" : where}`,
+        host ? vscode.Uri.file(host) : undefined,
+        host && f.line ? new vscode.Position(f.line - 1, 0) : undefined);
+    }));
+    return msg;
   }
 
   // -- firmware, the system editor, systems -----------------------------------

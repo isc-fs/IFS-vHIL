@@ -57,6 +57,17 @@ fetches anything for a repository on the vHIL's GitHub owner.
    (`vHIL 12/40`, then `vHIL 42` or `vHIL 3 failed`). A failure shows at
    its line, with the test's output. VS Code's Test Results keep the history
    and **Rerun Failed Tests**.
+4. **Understand a failure**: its message shows, under the assertion, where
+   each board's firmware was (exception, task, fault registers, the C
+   frames: those in your working tree open at their line) and the last
+   frames on the bus before it, decoded with the firmware's own `.def`
+   contract. A build error is in **Problems** at its line instead.
+5. **See the buses**: the **vHIL Trace** panel (beside Terminal) shows the
+   first failure of a run, or any test from **Show bus trace** (right-click
+   it, or the link in its failure): one lane per CAN bus, pin or radio on
+   virtual time, the failure marked; drag to zoom, filter by id, message,
+   signal, bus or board, click a frame for its signals. The trace files
+   (`docs/test-trace.md`) sit in `results/` of the vHIL checkout.
 
 - **Testing panel:** the three folders; sim tests by file, scenarios by
   system. The pytest markers are tags (`@can`, `@system_ams`) for the

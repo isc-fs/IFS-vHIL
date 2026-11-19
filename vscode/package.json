@@ -2,7 +2,7 @@
   "name": "vhil-tests",
   "displayName": "ISC vHIL",
   "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel against your working tree, in the vHIL's Docker image.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "isc-fs",
   "private": true,
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/isc-fs/IFS-vHIL"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "Testing"
@@ -85,6 +85,12 @@
         "command": "vhil.updateVhil",
         "title": "Update the vHIL checkout",
         "category": "vHIL"
+      },
+      {
+        "command": "vhil.showTrace",
+        "title": "Show bus trace",
+        "category": "vHIL",
+        "icon": "$(pulse)"
       }
     ],
     "configuration": {
@@ -160,6 +166,11 @@
           "command": "vhil.openSystemInEditor",
           "when": "controllerId == vhil && testId =~ /^group:scenarios\\//",
           "group": "vhil@1"
+        },
+        {
+          "command": "vhil.showTrace",
+          "when": "controllerId == vhil && testId in vhil.traced",
+          "group": "vhil@0"
         }
       ],
       "commandPalette": [
@@ -210,6 +221,29 @@
         {
           "command": "vhil.stopEditor",
           "when": "vhil.active"
+        },
+        {
+          "command": "vhil.showTrace",
+          "when": "false"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "vhil-trace",
+          "title": "vHIL Trace",
+          "icon": "media/vhil.svg"
+        }
+      ]
+    },
+    "views": {
+      "vhil-trace": [
+        {
+          "type": "webview",
+          "id": "vhil.trace",
+          "name": "vHIL Trace",
+          "when": "vhil.active"
         }
       ]
     }
@@ -222,7 +256,7 @@
   },
   "devDependencies": {
     "@types/node": "20.17.10",
-    "@types/vscode": "1.85.0",
+    "@types/vscode": "1.93.0",
     "@vscode/vsce": "3.2.1",
     "typescript": "5.7.2"
   }
