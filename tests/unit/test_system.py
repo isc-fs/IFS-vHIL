@@ -452,7 +452,9 @@ def test_an_i2c_model_must_place_its_targets(tmp_path):
     (catalog / "models" / "no-targets.yaml").write_text(
         "kind: model\nid: no-targets\ninterface: {i2c: true}\nbackend: renode\n"
         "renode: {type: Sensors.Nothing}\n")
-    with pytest.raises(SystemError, match="an i2c model gives renode targets"):
+    with pytest.raises(SystemError, match=r"no-targets\.yaml\), wired as x on ams\.I2C2: its renode "
+                                          r"section needs `targets` .* it has `type`\. "
+                                          r"`python -m vhil\.part new`"):
         System(_ams(tmp_path, "  x: {model: no-targets, i2c: ams.I2C2}\n"), catalog=catalog)
 
 

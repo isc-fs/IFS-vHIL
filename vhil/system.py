@@ -537,6 +537,14 @@ def _renode_kind(interface: dict) -> str:
     return "targets" if interface.get("i2c") else "uart" if interface.get("uart") else "type"
 
 
+# What each renode section key holds, for validate's errors.
+_RENODE_KIND_HELP = {
+    "targets": "on I2C: {<name>: {type: Sensors.<Class>, address: 0x..}}, one per address",
+    "uart": "on a UART: {type: Sensors.<Class>, argument: <its IUART constructor argument>}",
+    "type": "on SPI or anything else: type: Sensors.<Class>",
+}
+
+
 class System:
     def __init__(self, path: Path, catalog: Path = CATALOG,
                  extra_card_dirs: Iterable[Path | str] = ()):
@@ -938,9 +946,17 @@ class System:
                 # (a BMI088's two dies); a UART device the far end of a UART
                 # (renode.uart); anything else one peripheral (type). A model
                 # with protocols gives each choice its own.
-                raise SystemError(f"model '{doc['id']}': an i2c model gives renode targets "
-                                  f"(a type and an address each), a uart model renode uart "
-                                  f"(a type and its UART argument), any other a renode type")
+                want = _renode_kind(interface)
+                found = sorted(k for k in ("targets", "uart", "type") if k in doc["renode"])
+                raise SystemError(
+                    f"model '{doc['id']}' (catalog/models/{doc['id']}.yaml), wired as {name} on "
+                    f"{dev.get('i2c') or dev.get('spi') or dev.get('uart') or 'its bus'}: its renode "
+                    f"section needs `{want}` ({_RENODE_KIND_HELP[want]}); it has "
+                    f"{', '.join(f'`{k}`' for k in found) or 'none of targets, uart, type'}"
+                    + ("" if "protocols" in doc.get("interface", {}) or len(found) <= 1
+                       else ", one too many for a single-protocol model")
+                    + ". `python -m vhil.part new` writes a model with it "
+                      "(docs/development/adding-a-part.md)")
             want_out = set(interface.get("analog_out", []))
             if set(dev.get("outputs", {})) != want_out:
                 raise SystemError(f"device '{name}' ({dev['model']}) drives outputs "
