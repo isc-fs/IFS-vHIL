@@ -8,6 +8,19 @@ make systems. Runs go through `scripts/vhil-docker.sh` in the vHIL's Docker
 image, as CI's jobs do, so the host needs Docker only (on macOS, the Colima
 VM `scripts/vhil-docker.sh vm` makes).
 
+## Before you start
+
+- **Docker.** On macOS: `brew install colima docker docker-compose`; the
+  extension starts the Colima VM itself. On Linux, Docker with vcan loaded.
+- **The first run is heavy:** it pulls the vHIL's images (several GB; keep
+  ~10 GB of disk free). Only when no image is published for your vHIL
+  checkout does it build Renode from source instead (~30 min). The status
+  bar says `vHIL: images needed` until then (click: pull them now).
+- **Debug Test** needs the C/C++ extension (`ms-vscode.cpptools`) and the
+  host's `arm-none-eabi-gdb` (`vhil.gdbPath`).
+- `bin/vhil doctor` in the vHIL checkout checks the host; **vHIL: Diagnose**
+  does the same from VS Code.
+
 ## Install
 
 Download `vhil-tests-<version>.vsix` from the `vscode` workflow's run
@@ -28,11 +41,15 @@ Then open either:
 
 ## In a firmware repository
 
-The extension recognises the repository by its `origin` (the catalogue's
-`repo:` in `catalog/firmware/`) and keeps its own checkout of the vHIL in
-VS Code's extension storage: cloned the first time, brought to `vhil.ref`
-(`dev`) once a day or with **vHIL: Update the vHIL checkout**. It only
-fetches anything for a repository on the vHIL's GitHub owner.
+The extension recognises the repository by its `origin` or, in a fork, its
+`upstream` (the catalogue's `repo:` in `catalog/firmware/`) and keeps its
+own checkout of the vHIL in VS Code's extension storage: cloned the first
+time, brought to `vhil.ref` (`dev`) once a day or with **vHIL: Update the
+vHIL checkout**. It only fetches anything for a repository on the vHIL's
+GitHub owner. A folder with an STM32 project (a top-level `.ioc`) it can't
+set up shows `vHIL: not set up` in the status bar with the reason (not on
+the owner, not in the catalogue, the clone failed); click it, or **vHIL:
+Set up / Retry**, to try again.
 
 - **What you test is your working tree.** Before each run of sim or
   scenario tests, it builds the open folder, uncommitted edits included,
@@ -75,9 +92,12 @@ fetches anything for a repository on the vHIL's GitHub owner.
    `arm-none-eabi-gdb` (`vhil.gdbPath`; STM32CubeCLT ships one) through the
    C/C++ extension: set breakpoints in your C, continue, step. Every board
    stops while one is held, so no firmware timeout fires. Stop debugging and
-   the test runs on to its result. With no breakpoint set, it stops at
-   `main` instead of running through. Limits: no memory or register writes
-   (docs/debugger.md).
+   the test runs on to its result. With no breakpoint in a C, C++ or
+   assembly file (or on a function), it stops at the bootloader's `main`
+   (every board powers on through its CAN bootloader, which runs first):
+   set breakpoints in the app, then Continue. A vHIL checkout from before
+   the debug hold says so instead of running. Limits: no memory or register
+   writes (docs/debugger.md).
 
 - **Testing panel:** the three folders; sim tests by file, scenarios by
   system. The pytest markers are tags (`@can`, `@system_ams`) for the
@@ -92,22 +112,33 @@ fetches anything for a repository on the vHIL's GitHub owner.
   editor's **Commit…** (a branch and PR on IFS-vHIL, from a firmware
   repository too). **Tools…** at the bottom in the vHIL repository.
 - **Run on save**: the Testing panel's continuous run (the eye icon) runs
-  the selection again whenever you save a C file or header (one run at a
-  time; a save during a run queues one more).
+  the selection again whenever you save a source, header, linker script,
+  `.ioc` or build file (`CMakeLists.txt`, `Makefile`, `*.cmake`, `*.mk`);
+  a save during a run queues one more.
+- **One run at a time:** a run started while another goes (the status bar,
+  a system's scenarios, Debug Test, the Testing panel) waits for it. A run
+  of tests a refresh has since replaced runs the current ones.
 - **Listing** happens once per vHIL checkout commit in a firmware
   repository: reopening the window shows the tests at once.
 - **System files** (the vHIL repository): any change to `systems/*.yaml`
   (a save, a checkout, a revert) validates it; its errors show in Problems
   at the line they name.
-- **Cancel** stops the run's container.
-- **Status bar:** `Docker not running` (click: Diagnose), `building
-  ecu@local`, `12/40`, `42` or `3 failed` (click: run again).
-- **vHIL: Diagnose:** Docker, images, firmware and the system editor, each
-  with its fix (start the VM, pull images, build firmware, change the
-  context, open the editor).
-- **vHIL: Open the system editor** opens it in a tab, started if needed;
-  the tab's **Open in the browser** button opens the same page outside VS
-  Code.
+- **Cancel** stops the run's script and its container.
+- **Status bar:** `Docker not running` (click: Diagnose), `images needed`
+  (click: pull them), `building ecu@local`, `12/40`, `42`, `3 failed` or
+  `5 skipped` (nothing ran) (click: run again). Docker down or an image
+  pull that fails is not a result: the tests are skipped and the bar says
+  what's wrong. Checking it starts no container (`vhil-docker.sh status`).
+- **vHIL: Diagnose:** Docker (and its CLI), images (here, published, or
+  built from source), firmware, the system editor and the debugger, each
+  with its fix (start the VM, pull images, build firmware, change a
+  setting, open the editor).
+- **vHIL: Open the system editor** opens it in a tab, started if needed
+  (the tab waits while its terminal runs, and says so if it exits; Retry
+  starts it again). Opening another system in an open tab asks the editor
+  to switch, or, with an editor that can't, asks before reloading it. The
+  tab's **Open in the browser** button opens the same page outside VS Code,
+  and the tab offers it too when the editor doesn't load in 15 s.
 - **vHIL: Tools…** (the vHIL repository only): a shell in the container,
   an IFS_HIL suite, coverage, speed, a smoke suite, validating a system,
   pruning firmware builds, exporting and importing a web app run.
@@ -126,6 +157,7 @@ watched and stopped.
 | `vhil.pytestArgs` | extra pytest arguments, e.g. `--vhil-trace` | |
 | `vhil.repository` | the vHIL a firmware repository is tested with (empty: `https://github.com/isc-fs/IFS-vHIL`) | |
 | `vhil.ref` | its branch or tag (empty: `dev`) | |
+| `vhil.gdbPath` | the host's GDB for **Debug Test** (empty: `arm-none-eabi-gdb`) | |
 
 ## How it works
 
