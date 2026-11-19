@@ -68,6 +68,14 @@ fetches anything for a repository on the vHIL's GitHub owner.
    virtual time, the failure marked; drag to zoom, filter by id, message,
    signal, bus or board, click a frame for its signals. The trace files
    (`docs/test-trace.md`) sit in `results/` of the vHIL checkout.
+6. **Debug it**: **Debug Test** on a sim or scenario test (the Testing
+   panel's debug button). The board (the open firmware's, else picked) waits
+   before its first instruction; VS Code's debugger attaches with your
+   `arm-none-eabi-gdb` (`vhil.gdbPath`; STM32CubeCLT ships one) through the
+   C/C++ extension: set breakpoints in your C, continue, step. Every board
+   stops while one is held, so no firmware timeout fires. Stop debugging and
+   the test runs on to its result. Limits: no memory or register writes
+   (docs/debugger.md).
 
 - **Testing panel:** the three folders; sim tests by file, scenarios by
   system. The pytest markers are tags (`@can`, `@system_ams`) for the
@@ -112,7 +120,7 @@ systems and tools, `src/firmware.ts` which firmware a repository is and which
 tests and systems run it (all tested by `npm test`); `src/extension.ts` is the
 VS Code side.
 
-Not yet: debugging a test, the Robot smoke suites, Windows hosts (the script
+Not yet: the Robot smoke suites, Windows hosts (the script
 is bash; WSL2 works as on Linux).
 
 ## Develop
