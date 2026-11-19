@@ -228,7 +228,8 @@ rules:
 
   # -- the run path's Python (the worker's helpers: scenarios run through it) -----
   - name: frames, contracts, expects, state view, run logs
-    paths: [vhil/canframe.py, vhil/candef.py, vhil/expect.py, vhil/stateview.py, vhil/runlog.py]
+    paths: [vhil/canframe.py, vhil/candef.py, vhil/contract.py, vhil/testtrace.py, vhil/expect.py,
+            vhil/stateview.py, vhil/runlog.py]
     select: {markers: [server], scenarios: ['*'], importers: true}
   - name: host-side bootloader protocol
     paths: [vhil/can_bootloader.py]
