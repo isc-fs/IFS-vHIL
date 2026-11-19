@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from vhil import sim as sim_module, snapshot
+from vhil import sim as sim_module, snapshot, testtrace
 from vhil.bench import REPO
 from vhil.sim import Sim
 from vhil.system import System
@@ -128,6 +128,7 @@ def _snapshot_report(item, when: str):
     _exited.clear()
     if not taken:
         return None
+    testtrace.keep_snapshots(item.nodeid, taken)
     log_dir = item.config.getoption("--sim-log-dir")
     out_dir = None
     if log_dir:

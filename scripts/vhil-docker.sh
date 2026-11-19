@@ -241,11 +241,19 @@ in_container() {
     [ -n "$fw_ref" ] && ref=$fw_ref
     local tty=()
     [ -t 0 ] && [ -t 1 ] && tty=(-it)
+    # VHIL_DEBUG=<board>:<port>: that board waits for a GDB on the host's
+    # 127.0.0.1:<port> (vhil/debugattach.py, the VS Code Debug profile).
+    local debug_args=()
+    if [ -n "${VHIL_DEBUG:-}" ]; then
+        local debug_port=${VHIL_DEBUG##*:}
+        debug_args=(-e VHIL_DEBUG="$VHIL_DEBUG" -p "127.0.0.1:$debug_port:$debug_port")
+    fi
     # VHIL_DOCKER_NAME names the container, so a caller (the VS Code
     # extension's Cancel) can stop it with `docker kill`.
     "${docker[@]}" run --rm ${tty[@]+"${tty[@]}"} ${run_args[@]+"${run_args[@]}"} \
         ${fw_platform[@]+"${fw_platform[@]}"} \
         ${VHIL_DOCKER_NAME:+--name "$VHIL_DOCKER_NAME"} \
+        ${debug_args[@]+"${debug_args[@]}"} \
         ${cpu_args[@]+"${cpu_args[@]}"} ${src_args[@]+"${src_args[@]}"} \
         -v "$repo:/work" -v vhil-data:/vhil \
         -e FW_SOURCES="$fw_sources" -e FW_LOCAL_ONLY="${FW_LOCAL_ONLY:-0}" \
