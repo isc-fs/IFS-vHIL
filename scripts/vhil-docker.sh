@@ -31,6 +31,7 @@
 #                                                (with the app's api and proxy)
 #   scripts/vhil-docker.sh server                web app API + shell on http://localhost:8080
 #                                                (M5; full stack: docker/compose.yaml)
+#   scripts/vhil-docker.sh down                  stop this checkout's editor/server stack (vhil stop)
 #   scripts/vhil-docker.sh worker [--once ...]   run worker for the server's queue (vhil.worker)
 #   scripts/vhil-docker.sh prune [--dry-run]     prune old commit builds in /vhil/fw (vhil/fwprune.py)
 #   scripts/vhil-docker.sh editor-check [systems...]
@@ -370,7 +371,7 @@ web_port_free() {
     *"(project ifs-vhil)")
         # Started before per-checkout projects: its containers hold no data.
         echo "error: port $web_port is taken by $other, a stack from before each checkout got its own: stop it with" >&2
-        echo "  docker --context $context compose -p ifs-vhil down" >&2 ;;
+        echo "  $0 down    (or: vhil stop)" >&2 ;;
     *) echo "error: port $web_port is taken by $other. Stop it, or run this checkout's on another port: VHIL_WEB_PORT=8090 $0 $cmd" >&2 ;;
     esac
     exit 1
@@ -603,6 +604,12 @@ editor-check)
     # dataflow, in the editor image where the patched checkout lives.
     image=$editor_image
     in_container 'exec python -m vhil.editor check "$@"' "$@" ;;
+down)
+    # Stop this checkout's stack (vhil stop, the desktop app's Stop), and one
+    # from before each checkout got its own (project ifs-vhil), which holds
+    # no data but would keep the port and serve an old editor.
+    "${compose[@]}" down
+    "${docker[@]}" compose -p ifs-vhil -f "$repo/docker/compose.yaml" down ;;
 server)
     # A local checkout: dev mode (no login) unless VHIL_AUTH says otherwise;
     # the auth settings pass through when set (docs/development/web-app.md).

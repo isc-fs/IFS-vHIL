@@ -192,3 +192,19 @@ def test_the_stack_starts_with_no_local_firmware(tmp_path, verb):
     r = subprocess.run(["bash", str(SCRIPT), verb], env=env, capture_output=True, text=True, timeout=60)
     assert "unbound variable" not in r.stderr, r.stderr
     assert r.returncode == 0, r.stderr
+
+
+def test_stop_downs_this_checkouts_stack_and_a_pre_446_one(tmp_path):
+    """vhil stop (the desktop app's Stop) took compose.yaml's own name,
+    ifs-vhil, so it never stopped the per-checkout stack `vhil ui` starts."""
+    r, _, calls = status(tmp_path)
+    project = next(l for l in r.stdout.splitlines() if l.startswith("project=")).split()[0][len("project="):]
+    bindir = tmp_path / "bin"
+    log = tmp_path / "down.log"
+    (bindir / "docker").write_text(f'#!/bin/sh\necho "$*" >> {log}\n')
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "VHIL_DOCKER_CONTEXT": "stub"}
+    r = subprocess.run(["bash", str(REPO / "bin/vhil"), "stop"], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    downs = [l for l in log.read_text().splitlines() if l.endswith(" down")]
+    assert any(f"-p {project} " in l for l in downs), downs
+    assert any("-p ifs-vhil " in l for l in downs), downs
