@@ -3,6 +3,7 @@
 // a new one) and the tools. Runs and results stay in VS Code's Testing
 // panel. The tree itself is systemsTree.ts. Tested by test/systemsView.test.ts.
 
+import { ImageState, imagesCost, imagesNeeded } from "./status";
 import { SystemInfo } from "./systems";
 
 /** What the view shows, without VS Code. */
@@ -21,6 +22,8 @@ export interface StackState {
   dockerUp?: boolean; // undefined: not checked yet
   editorUp: boolean;
   context: string;
+  baseState?: ImageState; // from vhil-docker.sh status; undefined: not known
+  editorState?: ImageState;
 }
 
 /** An id a new system file can have: systems/<id>.yaml. */
@@ -39,6 +42,14 @@ export function statusRow(s: StackState): Row {
       kind: "status", id: "status", label: "Docker not running", description: "Diagnose",
       tooltip: `Docker context ${s.context} doesn't answer. Click to diagnose and fix.`,
       icon: "debug-disconnect", command: "vhil.diagnose",
+    };
+  }
+  // The status bar says the same: a run would pull or build them first.
+  if (imagesNeeded(s.baseState, s.editorState)) {
+    return {
+      kind: "status", id: "status", label: "Images needed", description: "Pull",
+      tooltip: `${imagesCost(s.baseState, s.editorState)}\nClick to get them now, in a terminal.`,
+      icon: "cloud-download", command: "vhil.pullImages",
     };
   }
   return {
