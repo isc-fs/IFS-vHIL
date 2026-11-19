@@ -190,6 +190,7 @@ the Scenario tab, ▶ runs it).
                     >↓</a>
                     <a
                         class="vhil-run-page" :href="runPage(r.id)" target="_blank" rel="noopener"
+                        @click="externalLink"
                         :aria-label="`Replay run ${r.id} in a new tab`"
                         :title="`Replay run ${r.id} in a new tab (a link to share)`"
                     >↗</a>
@@ -205,7 +206,7 @@ import {
     computed, defineComponent, ref, watch,
 } from 'vue';
 import {
-    ws, importRun, loadRuns, newSystem, open, openRun, pickScenario, runNow,
+    ws, externalLink, importRun, loadRuns, newSystem, open, openRun, pickScenario, runNow,
 } from './workspace.js';
 import { bundleUrl, call, runPage } from './api.js';
 import { loadScenarios, scen } from './scenarios.js';
@@ -318,6 +319,7 @@ export default defineComponent({
         return {
             VIEWS,
             ws,
+            externalLink,
             layout,
             currentLabel,
             toggle,
