@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { boardsOf, debugConfig, gdbQuote } from "../src/debug";
+import { boardsOf, debugConfig, entryBreakpoint, gdbQuote } from "../src/debug";
 
 test("the board to debug: the open firmware's, else the test's markers or scenario system", () => {
   assert.deepEqual(boardsOf({ id: "tests/sim/t.py::x", markers: ["ams", "can"] }, "ecu"), ["ecu"]);
@@ -35,8 +35,17 @@ test("a tree only the container has maps to its copy; no breakpoints stops at en
   const c = debugConfig(ready, "/r/d", "gdb", undefined, true);
   assert.deepEqual(c.sourceFileMap, { "/vhil/fw/ams@dev": "/r/d/src/ams@dev" });
   assert.equal(c.targetArchitecture, "arm");
-  assert.equal(c.stopAtEntry, true);
+  assert.equal(c.stopAtEntry, true); // no entry address: the first main to run
   assert.equal(debugConfig(ready, "/r/d", "gdb").stopAtEntry, false);
+});
+
+test("no breakpoints stops at the app's main by address, not the bootloader's", () => {
+  const ready = { board: "ams", port: 1, system: "ams", images: ["ams.elf", "ams.bootloader.elf"],
+                  sources: ["/vhil/fw/ams@dev"], entry: 0x08020f00 };
+  assert.equal(entryBreakpoint(ready), "*0x8020f00");
+  assert.equal(debugConfig(ready, "/r/d", "gdb", undefined, true).stopAtEntry, false);
+  assert.equal(entryBreakpoint({ ...ready, entry: null }), undefined);
+  assert.equal(entryBreakpoint({ ...ready, entry: undefined }), undefined);
 });
 
 test("GDB commands quote paths with spaces; Windows folders get forward slashes", () => {
