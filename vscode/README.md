@@ -135,8 +135,10 @@ Set up / Retry**, to try again.
   with its fix (start the VM, pull images, build firmware, change a
   setting, open the editor).
 - **vHIL: Open the system editor** opens it in a tab, started if needed
-  (the tab waits while its terminal runs, and says so if it exits; Retry
-  starts it again). Opening another system in an open tab asks the editor
+  (on localhost:8080 for your own vHIL checkout, `VHIL_WEB_PORT` if set; in
+  a firmware repository the extension's checkout has a port of its own, so
+  its editor runs beside yours). The tab waits while its terminal runs, and
+  says so if it exits; Retry starts it again. Opening another system in an open tab asks the editor
   to switch, or, with an editor that can't, asks before reloading it. The
   tab's **Open in the browser** button opens the same page outside VS Code,
   and the tab offers it too when the editor doesn't load in 15 s.

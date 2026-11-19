@@ -95,7 +95,17 @@ base_tag=latest editor_tag=latest
 docker=(docker --context "$context")
 registry=${VHIL_REGISTRY:-ghcr.io/isc-fs}
 # The web app's services, behind one proxy on one origin (docker/compose.yaml).
-compose=("${docker[@]}" compose -f "$repo/docker/compose.yaml")
+# One compose project and one directory of runs per checkout, named after its
+# path: a second checkout (another clone, the VS Code extension's) gets a stack
+# of its own instead of replacing this one's containers, and its worker never
+# claims this one's runs. The firmware builds (/vhil/fw) stay shared. Its port
+# is VHIL_WEB_PORT (8080 by default): give a second checkout another one.
+checkout=$(printf '%s' "$repo" | cksum | awk '{printf "%08x", $1}' | cut -c1-8)
+project=ifs-vhil-$checkout
+server_data=/vhil/server/$checkout
+web_port=${VHIL_WEB_PORT:-8080}
+export VHIL_WEB_PORT=$web_port VHIL_SERVER_DATA=$server_data
+compose=("${docker[@]}" compose -p "$project" -f "$repo/docker/compose.yaml")
 # Unprivileged on Docker's default network unless a job needs vcan: only
 # `ifs-hil` (and `shell`/`run` with VHIL_DOCKER_VCAN=1) gets --privileged
 # --network host. Published ports bind 127.0.0.1 only.
@@ -329,6 +339,24 @@ worktree_git
 # The compose stack mounts the checkout alone (docker/compose.yaml), so its
 # git dir isn't there: refuse up front rather than fail inside, where the
 # api's git says "the workspace has no commits".
+# The web port, unless this checkout's own stack holds it: another stack on it
+# (another checkout's, or one from before per-checkout projects) is named.
+web_port_free() {
+    local other
+    other=$("${docker[@]}" ps --filter "publish=$web_port" \
+        --format '{{.Label "com.docker.compose.project"}} {{.Names}}' 2>/dev/null \
+        | awk -v p="$project" '$1 != p {print $2 " (" ($1 ? "project " $1 : "not compose") ")"; exit}')
+    [ -z "$other" ] && return
+    case $other in
+    *"(project ifs-vhil)")
+        # Started before per-checkout projects: its containers hold no data.
+        echo "error: port $web_port is taken by $other, a stack from before each checkout got its own: stop it with" >&2
+        echo "  docker --context $context compose -p ifs-vhil down" >&2 ;;
+    *) echo "error: port $web_port is taken by $other. Stop it, or run this checkout's on another port: VHIL_WEB_PORT=8090 $0 $cmd" >&2 ;;
+    esac
+    exit 1
+}
+
 no_worktree() {
     [ -z "$git_common" ] && return
     echo "error: the $1 can't run from a git worktree yet (its git dir $git_common isn't visible in the containers): start it from the main checkout" >&2
@@ -408,6 +436,7 @@ status() {
         fi
     done
     echo "clean=$clean"
+    echo "project=$project web_port=$web_port"
     # Only an existing volume: `docker run -v` would create it.
     if [ "$state" = up ] && [ "$base_st" = local ] \
         && "${docker[@]}" volume inspect vhil-data >/dev/null 2>&1; then
@@ -527,6 +556,7 @@ editor)
     # check). It publishes no port of its own. Run is the web app's, which
     # the worker executes: it comes up too, or a run here stays queued (#393).
     no_worktree "system editor"
+    web_port_free
     ensure_images
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy worker ;;
 export-run|import-run)
@@ -545,7 +575,7 @@ export-run|import-run)
         dir=$(cd "$(dirname "$f")" && pwd)
         args=(import "/xfer/$(basename "$f")")
     fi
-    run_args+=(-v "$dir:/xfer" -e VHIL_DATA=/vhil/server -e "USER=${USER:-}")
+    run_args+=(-v "$dir:/xfer" -e VHIL_DATA="$server_data" -e "USER=${USER:-}")
     in_container 'exec python -c "import sys; from vhil.server.bundle import main; sys.exit(main())" "$@"' "${args[@]}" ;;
 editor-check)
     # Pipeline Manager's ./validate (its frontend's load) on each system's
@@ -558,12 +588,13 @@ server)
     # The api listens on 0.0.0.0 in its container, reached only through the
     # proxy, whose port is on the host's 127.0.0.1 only (docker/compose.yaml).
     no_worktree "web app"
+    web_port_free
     ensure_images
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up api proxy ;;
 worker)
-    in_container 'export VHIL_DATA=/vhil/server VHIL_FW_DIR=/vhil/fw; exec python -m vhil.worker "$@"' "$@" ;;
+    in_container 'export VHIL_DATA="$1" VHIL_FW_DIR=/vhil/fw; shift; exec python -m vhil.worker "$@"' "$server_data" "$@" ;;
 prune)
-    in_container 'export VHIL_DATA=/vhil/server VHIL_FW_DIR=/vhil/fw; exec python -m vhil.worker prune "$@"' "$@" ;;
+    in_container 'export VHIL_DATA="$1" VHIL_FW_DIR=/vhil/fw; shift; exec python -m vhil.worker prune "$@"' "$server_data" "$@" ;;
 shell) in_container 'exec bash' ;;
 run) in_container 'exec "$@"' "$@" ;;
 *) sed -n '2,/^set -euo/{/^#/p;}' "$0" | sed 's/^# \{0,1\}//'; [ "$cmd" = help ] ;;

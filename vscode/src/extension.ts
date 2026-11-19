@@ -29,7 +29,7 @@ import { boardsOf as debugBoards, debugConfig, entryBreakpoint, Ready } from "./
 import {
   barOf, DebuggerHealth, findings, Fix, GROUP, groupId, holdBack, ImageState, imagesNeeded, parseStatus, Phase, scenarioSystem,
 } from "./status";
-import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems } from "./systems";
+import { boardsOf, descriptionOf, ifsHilArgs, SystemInfo, ToolId, TOOLS, validationProblems, webPort } from "./systems";
 import { compilerDiagnostics, hostPath, PathMap, Snapshot, snapshotMarkdown } from "./trace";
 import { TRACE_VIEW, TracePanel } from "./tracePanel";
 import {
@@ -43,7 +43,6 @@ const SCRIPT = "scripts/vhil-docker.sh";
 const OUT_DIR = "results/vscode";
 // Firmware the sim and scenario jobs need (scripts/vhil-docker.sh need_elf).
 const NEEDED_FW = ["ecu", "ams", "ecu.bootloader"];
-const EDITOR_URL = "http://localhost:8080/editor/";
 
 let current: Vhil | undefined;
 // "vHIL: not set up": a firmware repository (a top-level .ioc) whose set-up failed, and why.
@@ -285,7 +284,7 @@ class Vhil implements vscode.Disposable {
   private editorEnded: Promise<number | undefined> | undefined;
   private editorPanel: vscode.WebviewPanel | undefined;
   /** The page the panel frames once the editor answers, and whether it does yet. */
-  private editorPage = EDITOR_URL;
+  private editorPage = "";
   private editorReady = false;
   /** The framed editor said vhil.ready: it opens systems without a reload. */
   private editorHandshake = false;
@@ -427,7 +426,18 @@ class Vhil implements vscode.Disposable {
     // The script names its context colima-<profile>: a context set here names the profile `vm` starts.
     if (startsVm(c.context)) env.VHIL_COLIMA_PROFILE = c.context.slice("colima-".length);
     if (this.local) env.FW_LOCAL = `${this.local.firmware.id}=${this.local.dir}`;
+    env.VHIL_WEB_PORT = String(this.webPort);
     return env;
+  }
+
+  /** The web app's port: this checkout's stack (webPort). */
+  private get webPort(): number {
+    return webPort(this.repo, !!this.local, process.env.VHIL_WEB_PORT);
+  }
+
+  /** The system editor's page, behind this checkout's proxy. */
+  private get editorUrl(): string {
+    return `http://localhost:${this.webPort}/editor/`;
   }
 
   private env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -587,7 +597,7 @@ class Vhil implements vscode.Disposable {
     const up = await this.dockerInfo();
     this.updateView();
     this.settle();
-    const editor = editorAnswers();
+    const editor = editorAnswers(this.editorUrl);
     if (this.local) {
       const status = await git(this.local.dir, ["status", "--porcelain"]);
       this.dirty = status.ok && !!status.out.trim();
@@ -647,7 +657,7 @@ class Vhil implements vscode.Disposable {
     const list = findings({
       context, startsVm: startsVm(context), dockerCli: this.dockerCli, dockerUp: !!this.dockerUp,
       baseState: this.baseState, editorState: this.editorState, built: this.built,
-      needed: NEEDED_FW, editorUp: this.editorUp, debugger: await this.debuggerHealth(),
+      needed: NEEDED_FW, editorUp: this.editorUp, webPort: this.webPort, debugger: await this.debuggerHealth(),
     });
     const fixes: { [f in Fix]: string } = {
       startVm: "Start the Docker VM", pullImages: "Get the images", buildFirmware: "Build firmware",
@@ -1316,7 +1326,7 @@ class Vhil implements vscode.Disposable {
   }
 
   /**
-   * The system editor in a VS Code tab: a webview framing EDITOR_URL (the
+   * The system editor in a VS Code tab: a webview framing editorUrl (the
    * editor's frame-ancestors allows VS Code, vhil/server/security.py). Starts
    * the editor first if it doesn't answer, and frames it once it does, on
    * `system` if given (the editor's ?system=; with &new=1, a new one).
@@ -1324,9 +1334,9 @@ class Vhil implements vscode.Disposable {
   private async openEditor(system?: string, isNew = false) {
     const firmware = this.local?.firmware.id;
     const page = system
-      ? `${EDITOR_URL}?system=${encodeURIComponent(system)}${isNew ? "&new=1" : ""}` +
+      ? `${this.editorUrl}?system=${encodeURIComponent(system)}${isNew ? "&new=1" : ""}` +
         `${isNew && firmware ? `&firmware=${encodeURIComponent(firmware)}` : ""}`
-      : EDITOR_URL;
+      : this.editorUrl;
     const panel = this.editorPanel;
     if (panel) {
       panel.reveal();
@@ -1405,7 +1415,7 @@ class Vhil implements vscode.Disposable {
     if (!panel) return;
     const open = () => panel === this.editorPanel;
     panel.webview.html = editorHtml(undefined, "Starting the system editor…");
-    if (!(await editorAnswers())) {
+    if (!(await editorAnswers(this.editorUrl))) {
       if (!this.editorTask || !this.editorEnded) {
         const t = this.startTask("System editor", ["editor"]);
         this.editorEnded = t.ended;
@@ -1417,7 +1427,7 @@ class Vhil implements vscode.Disposable {
       }
       let exit: number | undefined | null = null; // null: still running
       void this.editorEnded!.then((code) => { exit = code ?? -1; });
-      while (open() && !(await editorAnswers())) {
+      while (open() && !(await editorAnswers(this.editorUrl))) {
         if (exit !== null) {
           panel.webview.html = editorHtml(undefined, `The system editor exited (code ${exit}): see its terminal.`);
           void vscode.window.showErrorMessage(`vHIL: the system editor exited (code ${exit}).`, "Retry", "Diagnose")
@@ -1747,8 +1757,8 @@ p { padding: 1em; font-family: var(--vscode-font-family); color: var(--vscode-fo
 }
 
 /** Whether the system editor answers on its proxy. */
-function editorAnswers(): Promise<boolean> {
-  return fetch(EDITOR_URL, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
+function editorAnswers(url: string): Promise<boolean> {
+  return fetch(url, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
 }
 
 /** A free TCP port on the host, for a held board's debugger. */

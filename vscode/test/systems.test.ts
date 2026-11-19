@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { boardsOf, descriptionOf, ifsHilArgs, validationProblems } from "../src/systems";
+import { boardsOf, descriptionOf, ifsHilArgs, validationProblems, webPort } from "../src/systems";
 
 const SYSTEM = `kind: system
 id: ecu-ams
@@ -44,4 +44,14 @@ test("validate's errors land on the line naming what they quote", () => {
     "fine line",
   ].join("\n");
   assert.deepEqual(validationProblems(out, text).map((p) => p.line), [3, 5, 0]);
+});
+
+test("each vHIL checkout's web app has its port: 8080 for yours, its own for the extension's", () => {
+  assert.equal(webPort("/home/me/IFS-vHIL", false), 8080);
+  const a = webPort("/storage/a/vhil", true), b = webPort("/storage/b/vhil", true);
+  assert.ok(a >= 8100 && a < 8900 && b >= 8100 && b < 8900);
+  assert.notEqual(a, b);
+  assert.equal(webPort("/storage/a/vhil", true), a); // the same every window
+  assert.equal(webPort("/storage/a/vhil", true, "9000"), 9000); // VHIL_WEB_PORT wins
+  assert.equal(webPort("/home/me/IFS-vHIL", false, "nope"), 8080);
 });

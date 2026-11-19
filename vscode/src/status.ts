@@ -178,6 +178,7 @@ export interface Health {
   built: Map<string, string>; // board -> ELF, from /vhil/fw/built.txt
   needed: string[]; // the firmware sim and scenario tests need
   editorUp: boolean;
+  webPort?: number; // this checkout's web app (default 8080)
   debugger?: DebuggerHealth;
 }
 
@@ -231,7 +232,7 @@ export function findings(h: Health): Finding[] {
   out.push(missing.length
     ? { ok: false, label: "Firmware missing", detail: missing.join(", "), fix: "buildFirmware" }
     : { ok: true, label: "Firmware built", detail: [...h.built.keys()].sort().join(", ") });
-  out.push({ ok: h.editorUp, label: "System editor", detail: h.editorUp ? "running · localhost:8080" : "stopped", fix: "openEditor" });
+  out.push({ ok: h.editorUp, label: "System editor", detail: h.editorUp ? `running · localhost:${h.webPort ?? 8080}` : "stopped", fix: "openEditor" });
   return tail();
 }
 
