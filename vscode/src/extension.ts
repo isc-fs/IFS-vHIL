@@ -36,6 +36,7 @@ import {
   addressError, busError, partArgs, partFiles, partIdError, pinError, Protocol, PROTOCOLS, whoAmIError,
 } from "./part";
 import { newSystemError, Row, rows } from "./systemsView";
+import { latestUrl, newer, parseLatest } from "./update";
 import { SystemsView } from "./systemsTree";
 
 const SCRIPT = "scripts/vhil-docker.sh";
@@ -51,7 +52,66 @@ let notSetUp: vscode.StatusBarItem | undefined;
 export async function activate(context: vscode.ExtensionContext) {
   // Contributed without vhil.active: it is how a failed set-up is retried.
   context.subscriptions.push(vscode.commands.registerCommand("vhil.setup", () => setup(context, true)));
+  context.subscriptions.push(vscode.commands.registerCommand("vhil.checkForUpdates", () => checkForUpdate(context, true)));
+  void checkForUpdate(context, false);
   await setup(context, false);
+}
+
+const UPDATE_KEY = "vhil.updateChecked";
+
+/**
+ * A newer extension on the vHIL's vscode-latest release (.github/workflows/
+ * vscode.yml): once a day unless vhil.checkForUpdates is off, or on demand.
+ * Install downloads its .vsix and installs it through VS Code, then offers
+ * the reload that loads it.
+ */
+async function checkForUpdate(context: vscode.ExtensionContext, manual: boolean) {
+  if (!manual) {
+    if (!vscode.workspace.getConfiguration("vhil").get<boolean>("checkForUpdates", true)) return;
+    if (Date.now() - context.globalState.get<number>(UPDATE_KEY, 0) < 24 * 3600 * 1000) return;
+  }
+  await context.globalState.update(UPDATE_KEY, Date.now());
+  const slug = repoSlug(vhilRepo().url) ?? "isc-fs/IFS-vHIL";
+  const mine = String(context.extension.packageJSON.version);
+  let latest: ReturnType<typeof parseLatest>;
+  try {
+    const r = await fetch(latestUrl(slug), { signal: AbortSignal.timeout(10000) });
+    latest = r.ok ? parseLatest(await r.text(), slug) : undefined;
+  } catch {
+    latest = undefined;
+  }
+  if (!latest || !newer(latest.version, mine)) {
+    if (manual) {
+      void vscode.window.showInformationMessage(latest
+        ? `vHIL: the extension is up to date (${mine}).`
+        : `vHIL: couldn't read ${latestUrl(slug)}.`);
+    }
+    return;
+  }
+  const a = await vscode.window.showInformationMessage(
+    `vHIL: extension ${latest.version} is available (you have ${mine}).`, "Install", "Not now");
+  if (a !== "Install") return;
+  const { version, vsix } = latest;
+  const file = path.join(context.globalStorageUri.fsPath, `vhil-tests-${version}.vsix`);
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `vHIL: installing extension ${version}` },
+      async () => {
+        const r = await fetch(vsix, { signal: AbortSignal.timeout(120000) });
+        if (!r.ok) throw new Error(`${vsix}: HTTP ${r.status}`);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()));
+        await vscode.commands.executeCommand("workbench.extensions.installExtension", vscode.Uri.file(file));
+      });
+  } catch (e) {
+    void vscode.window.showErrorMessage(`vHIL: couldn't install extension ${version}: ${e}`);
+    return;
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+  const b = await vscode.window.showInformationMessage(
+    `vHIL: extension ${version} installed: reload the window to use it.`, "Reload");
+  if (b) await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 
 /**

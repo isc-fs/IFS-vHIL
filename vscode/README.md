@@ -23,8 +23,19 @@ VM `scripts/vhil-docker.sh vm` makes).
 
 ## Install
 
-Download `vhil-tests-<version>.vsix` from the `vscode` workflow's run
-(Actions → vscode → artifact), or build it:
+The newest extension, from the vHIL's `vscode-latest` release:
+
+```sh
+curl -fsSLo /tmp/vhil-tests.vsix https://github.com/isc-fs/IFS-vHIL/releases/download/vscode-latest/vhil-tests.vsix
+code --install-extension /tmp/vhil-tests.vsix
+```
+
+(or **Extensions → … → Install from VSIX…** on the downloaded file). Every
+change merged into `dev` is released: `vscode-v<version>` keeps each one, to
+go back to. Once a day the extension looks for a newer one and offers to
+install it (**vHIL: Check for extension updates** does it now;
+`vhil.checkForUpdates` turns it off). A pull request's `.vsix` is its `vscode`
+run's artifact. To build it yourself:
 
 ```sh
 cd vscode && npm ci && npm run package
@@ -167,6 +178,7 @@ watched and stopped.
 | `vhil.pytestArgs` | extra pytest arguments, e.g. `--vhil-trace` | |
 | `vhil.repository` | the vHIL a firmware repository is tested with (empty: `https://github.com/isc-fs/IFS-vHIL`) | |
 | `vhil.ref` | its branch or tag (empty: `dev`) | |
+| `vhil.checkForUpdates` | look for a newer extension once a day (default on) | |
 | `vhil.gdbPath` | the host's GDB for **Debug Test** (empty: `arm-none-eabi-gdb`) | |
 
 ## How it works

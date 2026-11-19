@@ -104,6 +104,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "vhil.checkForUpdates",
+        "title": "Check for extension updates",
+        "category": "vHIL"
+      },
+      {
         "command": "vhil.newPart",
         "title": "New part\u2026",
         "category": "vHIL"
@@ -130,6 +135,11 @@
     "configuration": {
       "title": "vHIL",
       "properties": {
+        "vhil.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Once a day, look for a newer extension on the vHIL's vscode-latest release and offer to install it."
+        },
         "vhil.dockerContext": {
           "type": "string",
           "default": "",
