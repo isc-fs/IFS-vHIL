@@ -457,6 +457,38 @@ fn app_answers() -> bool {
     matches!(status.as_bytes()[0], b'2' | b'3') || status == "401"
 }
 
+/// The body of GET `path` on the web app, or None.
+fn app_get(path: &str) -> Option<String> {
+    let mut s = TcpStream::connect_timeout(&APP_ADDR.parse().unwrap(), Duration::from_secs(1)).ok()?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    s.write_all(format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").as_bytes()).ok()?;
+    let mut reply = String::new();
+    s.read_to_string(&mut reply).ok()?;
+    let (head, body) = reply.split_once("\r\n\r\n")?;
+    (head.split(' ').nth(1) == Some("200")).then(|| body.to_string())
+}
+
+/// Whether the running vHIL's code is older than the workspace's: its
+/// server records the commit it started at (/api/health `started_ref`), and
+/// the checkout has moved on since (an update, a pull, a switch). One from
+/// before started_ref existed is older too. Unknown (no git, no answer):
+/// not stale, the app is left as it is.
+fn app_is_stale(ws: &str) -> bool {
+    let Some(body) = app_get("/api/health") else { return false };
+    let Ok(health) = serde_json::from_str::<serde_json::Value>(&body) else { return false };
+    let Ok(out) = shell("git -C \"$1\" rev-parse HEAD", &[ws]).stdin(Stdio::null()).output() else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || head.is_empty() {
+        return false;
+    }
+    match health.get("started_ref").and_then(|r| r.as_str()) {
+        Some(started) => !started.is_empty() && started != head,
+        None => true,
+    }
+}
+
 fn show_app(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.navigate(APP_URL.parse().unwrap());
@@ -465,9 +497,30 @@ fn show_app(app: &AppHandle) {
 
 /// Starts `bin/vhil ui --no-browser` (unless it's up) and shows the web app
 /// in the window once it answers.
+/// A vHIL already up but running older code than the workspace's is
+/// restarted first (app_is_stale), so an update never needs Stop then Open.
 #[tauri::command]
 fn open_app(app: AppHandle) -> Result<(), String> {
+    open_app_with(app, true)
+}
+
+fn open_app_with(app: AppHandle, restart_stale: bool) -> Result<(), String> {
     if app_answers() {
+        if restart_stale {
+            if let Ok(ws) = workspace(&app) {
+                if app_is_stale(&ws) {
+                    let _ = app.emit("log", LogLine {
+                        task: "ui".into(),
+                        line: "The vHIL's code changed since it started: restarting it.".into(),
+                    });
+                    thread::spawn(move || {
+                        stop_containers(&app);
+                        let _ = open_app_with(app, false);
+                    });
+                    return Ok(());
+                }
+            }
+        }
         show_app(&app);
         let _ = app.emit("done", Done { task: "ui".into(), code: 0 });
         return Ok(());
@@ -664,26 +717,10 @@ fn show_setup_for(app: &AppHandle, account: &str) {
     }
 }
 
-/// Whether the vHIL web app answers (its containers are up).
-#[tauri::command]
-async fn app_running() -> bool {
-    tauri::async_runtime::spawn_blocking(app_answers).await.unwrap_or(false)
-}
-
 /// GitHub's device sign-in page, in the browser (the code is on the set-up page).
 #[tauri::command]
 fn open_device_page() -> Result<(), String> {
     open_url("https://github.com/login/device")
-}
-
-/// Stop the vHIL's containers and open it again: it reads the account
-/// `vhil login` keeps when it starts.
-#[tauri::command]
-fn restart_app(app: AppHandle) {
-    thread::spawn(move || {
-        stop_containers(&app);
-        let _ = open_app(app.clone());
-    });
 }
 
 /// On quit: stop the app's containers. The VM keeps running (a quick start
@@ -732,8 +769,6 @@ fn main() {
             doctor,
             account,
             open_device_page,
-            app_running,
-            restart_app,
             run,
             open_app,
             check_update,

@@ -3,7 +3,9 @@
  * systems, scenarios and catalogue entries are shared/<login>/<name>
  * branches: the Team view lists them (Sync fetches them), opens one from its
  * branch, and a commit of yours goes to shared/<you>/<name> built on what you
- * opened, then is shared (pushed) when you are signed in.
+ * opened, then is shared (pushed) when you are signed in. Sign in here is
+ * GitHub's device flow, run by the server (vhil/server/account.py): it shows
+ * a code to enter on github.com and takes effect at once, no restart.
  */
 import { reactive } from 'vue';
 import { call } from './api.js';
@@ -11,6 +13,8 @@ import { call } from './api.js';
 export const team = reactive({
     me: null, prefix: null, base: 'dev', can_share: false, synced_at: null,
     items: [], busy: false, error: '',
+    // A sign-in in progress: {state: pending|done|failed, code, uri, error}.
+    signin: null,
 });
 
 function take(out) {
@@ -77,4 +81,49 @@ export function stateText(it) {
         remote: '',
         diverged: 'changed here and on GitHub',
     }[it.state] ?? it.state;
+}
+
+const POLL_MS = 2000;
+let polling = null;
+
+function stopPolling() {
+    if (polling) clearTimeout(polling);
+    polling = null;
+}
+
+async function pollSignIn() {
+    polling = null;
+    try {
+        team.signin = await call('GET', '/api/team/login');
+    } catch (e) {
+        team.signin = { state: 'failed', error: e.message || String(e) };
+    }
+    if (team.signin.state === 'pending') {
+        polling = setTimeout(pollSignIn, POLL_MS);
+    } else if (team.signin.state === 'done') {
+        team.signin = null;
+        await loadTeam();
+        syncTeam();
+    }
+}
+
+/** Start GitHub's device flow: the Team view shows the code and the link. */
+export async function signIn() {
+    stopPolling();
+    team.error = '';
+    try {
+        team.signin = await call('POST', '/api/team/login');
+    } catch (e) {
+        team.signin = null;
+        team.error = e.message || String(e);
+        return;
+    }
+    polling = setTimeout(pollSignIn, POLL_MS);
+}
+
+export async function signOut() {
+    stopPolling();
+    team.signin = null;
+    await busy(async () => call('POST', '/api/team/logout'));
+    await loadTeam();
 }

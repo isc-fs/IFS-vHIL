@@ -337,3 +337,16 @@ def test_the_team_view_shares_commits_on_your_own_branch():
     for route in ("'GET', '/api/team'", "'POST', '/api/team/sync'", "'POST', '/api/team/share'"):
         assert route in team
     assert "if (owner) return `${team.prefix}${branch.slice(`shared/${owner}/`.length)}`;" in team
+
+
+def test_the_team_view_signs_in_with_no_restart():
+    """Sign in from the Team view: the server's device flow (vhil/server/
+    account.py) shows a code, the view polls until it is entered, then
+    reloads who you are and what a commit may do (can_open_pr)."""
+    team = (VHIL / "team.js").read_text()
+    for route in ("'POST', '/api/team/login'", "'GET', '/api/team/login'", "'POST', '/api/team/logout'"):
+        assert route in team
+    rail = (VHIL / "VhilRail.vue").read_text()
+    assert '@click="signIn"' in rail and "team.signin.code" in rail
+    assert "watch(() => team.me, async () => {" in rail
+    assert "ws.config = await call('GET', '/api/config');" in rail

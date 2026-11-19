@@ -8,7 +8,7 @@ with the signals, log and artifacts REPLAY doesn't show yet, is a link) and
 Tests (step 11: the open system's scenarios, or every system's, with their
 last run's state and expects; opening one selects it and replays that run on
 the Scenario tab, ▶ runs it) and Team (teammates' shared systems, scenarios
-and catalogue entries, team.js: Sync fetches them, a click opens one from its
+and catalogue entries, team.js: Sign in, Sync fetches them, a click opens one from its
 branch, Share pushes one of yours).
 -->
 
@@ -100,15 +100,40 @@ branch, Share pushes one of yours).
             <div class="vhil-runs-head">
                 <span class="muted">{{ team.me ? `You: ${team.me}` : 'Not signed in' }}</span>
                 <button
+                    v-if="team.me && auth === 'dev'" type="button" class="vhil-btn --small"
+                    title="Sign out of GitHub on this computer"
+                    @click="signOut"
+                >Sign out</button>
+                <button
                     type="button" class="vhil-btn --small" :disabled="team.busy"
                     title="Fetch what teammates shared"
                     @click="syncTeam"
                 >{{ team.busy ? 'Syncing…' : 'Sync' }}</button>
             </div>
-            <p v-if="!team.me" class="muted">
-                Sign in to share your systems and tests: the desktop app's Sign in, or
-                <span class="mono">vhil login</span>. Teammates' work opens without it.
-            </p>
+            <div v-if="team.signin && team.signin.state === 'pending'" class="vhil-team-signin">
+                <p>
+                    Enter <strong class="mono vhil-team-code">{{ team.signin.code }}</strong> at
+                    <a
+                        :href="team.signin.uri" target="_blank" rel="noopener"
+                        @click="externalLink"
+                    >{{ team.signin.uri }}</a>
+                </p>
+                <button type="button" class="vhil-btn --small" @click="copyCode">Copy code</button>
+                <button type="button" class="vhil-btn --small" @click="signOut">Cancel</button>
+            </div>
+            <template v-else-if="!team.me">
+                <p v-if="team.signin && team.signin.state === 'failed'" class="vhil-team-error" role="alert">
+                    {{ team.signin.error }}
+                </p>
+                <p class="muted">
+                    Sign in to share your systems and tests. Teammates' work opens without it.
+                </p>
+                <button
+                    type="button" class="vhil-btn --small"
+                    title="Sign in with your GitHub account (a code to enter on github.com)"
+                    @click="signIn"
+                >Sign in with GitHub</button>
+            </template>
             <p v-if="team.error" class="vhil-team-error" role="alert">{{ team.error }}</p>
             <p v-if="!team.items.length" class="muted">
                 Nothing shared yet. A commit while signed in is shared with the team.
@@ -270,7 +295,7 @@ import { bundleUrl, call, runPage } from './api.js';
 import { loadScenarios, scen } from './scenarios.js';
 import { replay } from './replay.js';
 import {
-    share, stateText, syncTeam, team,
+    share, signIn, signOut, stateText, syncTeam, team,
 } from './team.js';
 import StateBadge from './VhilStateBadge.vue';
 
@@ -309,6 +334,12 @@ export default defineComponent({
         };
         const fromId = ref('');
         // The open system, else the first, once they are known.
+        // Signing in or out changes what a commit can do (Propose: can_open_pr).
+        watch(() => team.me, async () => {
+            try { ws.config = await call('GET', '/api/config'); } catch { /* keep the old */ }
+        });
+        const auth = computed(() => ws.config.auth);
+        const copyCode = () => navigator.clipboard?.writeText(team.signin?.code || '');
         watch(() => [ws.id, ws.systems.length], () => {
             if (!fromId.value) fromId.value = ws.id || ws.systems[0]?.id || '';
         }, { immediate: true });
@@ -400,6 +431,10 @@ export default defineComponent({
             openSystem,
             openFrom,
             team,
+            auth,
+            signIn,
+            signOut,
+            copyCode,
             syncTeam,
             stateText,
             openShared,

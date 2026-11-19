@@ -104,9 +104,14 @@ class GitHubHost(GitHost):
                 "The branch was saved in the workspace; push it and open the PR by hand.")
         if callable(self.token):
             try:
-                return self.token()
+                tok = self.token()
             except Exception as e:  # noqa: BLE001 - the App's own errors, network
                 raise HostError(f"no GitHub App token for {self.repo}: {e}")
+            if not tok:  # a desktop's account, signed out (vhil/server/account.py)
+                raise HostUnavailable(
+                    "not signed in to GitHub: sign in from the editor's Team view. "
+                    "The branch was saved in the workspace.")
+            return tok
         return self.token
 
     def push(self, workspace: Path, branch: str) -> None:

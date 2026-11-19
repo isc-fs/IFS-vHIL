@@ -106,6 +106,10 @@ project=ifs-vhil-$checkout
 server_data=/vhil/server/$checkout
 web_port=${VHIL_WEB_PORT:-8080}
 export VHIL_WEB_PORT=$web_port VHIL_SERVER_DATA=$server_data
+# Your GitHub account's directory (bin/vhil-account), mounted into the api so
+# a sign-in or sign-out takes effect without a restart. Made here, as you:
+# Docker would create a missing one owned by root.
+export VHIL_ACCOUNT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/vhil
 compose=("${docker[@]}" compose -p "$project" -f "$repo/docker/compose.yaml")
 # Unprivileged on Docker's default network unless a job needs vcan: only
 # `ifs-hil` (and `shell`/`run` with VHIL_DOCKER_VCAN=1) gets --privileged
@@ -580,6 +584,7 @@ editor)
     web_port_free
     stack_local
     ensure_images
+    mkdir -p "$VHIL_ACCOUNT_DIR" && chmod 700 "$VHIL_ACCOUNT_DIR"
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up editor proxy worker ;;
 export-run|import-run)
     # The app's runs (the vhil-data volume, as the api sees it) to and from
@@ -619,6 +624,7 @@ server)
     web_port_free
     stack_local
     ensure_images
+    mkdir -p "$VHIL_ACCOUNT_DIR" && chmod 700 "$VHIL_ACCOUNT_DIR"
     VHIL_IMAGE=$base_image VHIL_TAG=$base_tag VHIL_EDITOR_TAG=$editor_tag exec "${compose[@]}" up api proxy ;;
 worker)
     in_container 'export VHIL_DATA="$1" VHIL_FW_DIR=/vhil/fw; shift; exec python -m vhil.worker "$@"' "$server_data" "$@" ;;

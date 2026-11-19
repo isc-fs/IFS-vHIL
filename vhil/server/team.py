@@ -12,9 +12,10 @@ nobody moves another member's branch; Propose opens a PR into the base branch
 as for any branch (systems_write.pull_request).
 
 Who you are: the signed-in member in github mode; on a desktop (dev mode) the
-GitHub account the app signed in with: VHIL_TEAM_LOGIN, else the login of
-VHIL_GITHUB_TOKEN (GitHub's /user, looked up once). Without one you can sync
-and read, not share.
+GitHub account you signed in with (the Team view's Sign in, `vhil login` or
+the desktop app), read live from its file (vhil/server/account.py), else
+VHIL_TEAM_LOGIN, else the login of VHIL_GITHUB_TOKEN (GitHub's /user, looked
+up once per token). Without one you can sync and read, not share.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from vhil.server import account
 from vhil.server.gitstore import GitStore
 from vhil.server.githost import GitHubHost, HostError, HostUnavailable, _scrub, git_auth_env
 
@@ -81,14 +83,21 @@ def login(request: Request) -> str | None:
     if st.settings.auth != "dev":
         found = (getattr(request.state, "user", None) or {}).get("login")
         return found if isinstance(found, str) and _LOGIN.match(found) else None
-    if getattr(st, "team_login", None) is None:
-        env = os.environ.get("VHIL_TEAM_LOGIN", "")
-        if _LOGIN.match(env):
-            st.team_login = env
-        else:
-            token = _token(request)
-            st.team_login = (_github_login(token) if token else None) or ""
-    return st.team_login or None
+    if found := account.file_login():
+        return found
+    env = os.environ.get("VHIL_TEAM_LOGIN", "")
+    if _LOGIN.match(env):
+        return env
+    token = _token(request)
+    if not token:
+        return None
+    # A token with no login beside it: GitHub's /user, once per token.
+    cache = getattr(st, "team_logins", None)
+    if cache is None:
+        cache = st.team_logins = {}
+    if token not in cache:
+        cache[token] = _github_login(token) or ""
+    return cache[token] or None
 
 
 def _refs(store: GitStore) -> dict[str, dict]:
@@ -198,7 +207,7 @@ def share(body: Share, request: Request):
     from vhil.server.systems_write import _host, _store
     me = login(request)
     if not me:
-        raise HTTPException(409, "sign in with GitHub to share (the desktop app's Sign in)")
+        raise HTTPException(409, "sign in with GitHub to share (Sign in, in the Team view)")
     if not body.branch.lower().startswith(mine(me).lower()):
         raise HTTPException(422, {"errors": [f"only your own branches are shared: "
                                              f"{mine(me)}<name>, not '{body.branch}'"]})
