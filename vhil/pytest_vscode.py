@@ -76,10 +76,24 @@ class _Writer:
             if crash is not None:
                 state["file"], state["line"] = self.rel(crash.path), crash.lineno
                 state["short"] = crash.message
+            # Where the test itself failed: the innermost frame in its own
+            # file (the call into a helper that raised), not the helper's line.
+            own = self._own_frame(report)
+            if own is not None:
+                state["file"], state["line"] = own
         elif report.skipped and state["outcome"] == "passed":
             state["outcome"] = "skipped"
             longrepr = report.longrepr
             state["message"] = longrepr[2] if isinstance(longrepr, tuple) else str(longrepr)
+
+    def _own_frame(self, report) -> tuple[str, int] | None:
+        test_file = self.rel(self.root / report.location[0])
+        tb = getattr(report.longrepr, "reprtraceback", None)
+        for entry in reversed(getattr(tb, "reprentries", None) or []):
+            loc = getattr(entry, "reprfileloc", None)
+            if loc is not None and test_file and self.rel(loc.path) == test_file:
+                return test_file, loc.lineno
+        return None
 
     def pytest_runtest_logfinish(self, nodeid, location):
         state = self.outcome.pop(nodeid, {"outcome": "passed", "duration": 0.0})

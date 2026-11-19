@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { boardsOf, debugConfig } from "../src/debug";
+import { boardsOf, debugConfig, gdbQuote } from "../src/debug";
 
 test("the board to debug: the open firmware's, else the test's markers or scenario system", () => {
   assert.deepEqual(boardsOf({ id: "tests/sim/t.py::x", markers: ["ams", "can"] }, "ecu"), ["ecu"]);
@@ -23,8 +23,8 @@ test("the debug configuration attaches to the held board with the working tree's
   assert.deepEqual(c.sourceFileMap, { "/vhil/fw/ecu@local": "/home/me/IFS08-CE-ECU" });
   assert.deepEqual((c.setupCommands as { text: string }[]).map((s) => s.text), [
     "set confirm off",
-    "add-symbol-file /r/results/vscode/debug/ecu.bootloader.elf",
-    "set substitute-path /vhil/fw/ecu@local /home/me/IFS08-CE-ECU",
+    'add-symbol-file "/r/results/vscode/debug/ecu.bootloader.elf"',
+    'set substitute-path "/vhil/fw/ecu@local" "/home/me/IFS08-CE-ECU"',
   ]);
 });
 
@@ -37,4 +37,26 @@ test("a tree only the container has maps to its copy; no breakpoints stops at en
   assert.equal(c.targetArchitecture, "arm");
   assert.equal(c.stopAtEntry, true);
   assert.equal(debugConfig(ready, "/r/d", "gdb").stopAtEntry, false);
+});
+
+test("GDB commands quote paths with spaces; Windows folders get forward slashes", () => {
+  const ready = { board: "ecu", port: 1, system: "ecu", images: ["ecu.elf", "ecu.bootloader.elf"],
+                  sources: ["/vhil/fw/ecu@dev"], host_sources: ["src/ecu@dev"] };
+  const dir = "/Users/me/Library/Application Support/Code/User/globalStorage/isc-fs.vhil/IFS-vHIL/results/vscode/debug";
+  const c = debugConfig(ready, dir, "gdb");
+  assert.deepEqual(c.setupCommands, [
+    { text: "set confirm off" },
+    { text: `add-symbol-file "${dir}/ecu.bootloader.elf"`, ignoreFailures: true },
+    { text: `set substitute-path "/vhil/fw/ecu@dev" "${dir}/src/ecu@dev"`, ignoreFailures: true },
+  ]);
+  assert.equal(c.program, `${dir}/ecu.elf`); // cppdbg takes it as is
+  assert.deepEqual(c.sourceFileMap, { "/vhil/fw/ecu@dev": `${dir}/src/ecu@dev` });
+
+  const w = debugConfig(ready, "C:\\Users\\me\\x", "gdb");
+  assert.equal(w.program, "C:/Users/me/x/ecu.elf");
+  assert.equal((w.setupCommands as { text: string }[])[1].text, 'add-symbol-file "C:/Users/me/x/ecu.bootloader.elf"');
+});
+
+test("gdbQuote escapes quotes and backslashes", () => {
+  assert.equal(gdbQuote('a "b"\\c'), '"a \\"b\\"\\\\c"');
 });
