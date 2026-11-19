@@ -50,6 +50,24 @@ export function parseStatus(text: string): StackStatus | undefined {
   return { docker, baseState, editorState, built: builtLines(built.join("\n")) };
 }
 
+/**
+ * How long the extension's checkout waits for a new commit's images: image.yml
+ * publishes them minutes after a push (the base, after a docker/ change, in
+ * up to ~90 min). Past this, a commit with none moves anyway (its images then
+ * build locally), so a failed publish doesn't leave the checkout behind.
+ */
+export const HOLD_BACK_S = 2 * 3600;
+
+/**
+ * Whether the checkout stays on its commit rather than moving to a newer one
+ * whose images are neither here nor published yet: a run there would build
+ * them (Renode, ~30 min) while the registry is about to have them. Unknown
+ * (no Docker, no registry) moves: it can't tell.
+ */
+export function holdBack(tip: { base?: ImageState; editor?: ImageState; ageS: number }): boolean {
+  return (tip.base === "missing" || tip.editor === "missing") && tip.ageS < HOLD_BACK_S;
+}
+
 /** Whether a run would first pull or build an image: one of them isn't here. */
 export function imagesNeeded(base?: ImageState, editor?: ImageState): boolean {
   return [base, editor].some((s) => s === "missing" || s === "published");
