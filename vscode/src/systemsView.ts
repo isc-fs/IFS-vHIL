@@ -5,11 +5,12 @@
 
 import { ImageState, imagesCost, imagesNeeded } from "./status";
 import { SavedBranch } from "./branches";
+import { cloneAdvice, CloneStatus } from "./clone";
 import { SystemInfo } from "./systems";
 
 /** What the view shows, without VS Code. */
 export interface Row {
-  kind: "status" | "system" | "branch" | "tools";
+  kind: "status" | "account" | "clone" | "system" | "branch" | "tools";
   id: string;
   label: string;
   description?: string;
@@ -25,6 +26,10 @@ export interface StackState {
   context: string;
   baseState?: ImageState; // from vhil-docker.sh status; undefined: not known
   editorState?: ImageState;
+  /** The GitHub account the vHIL shares as (vhil-account whoami); null: none; undefined: not known. */
+  account?: string | null;
+  /** Your own vHIL clone against GitHub (vhil-clone status); undefined: not checked, or not yours. */
+  clone?: CloneStatus;
 }
 
 /** An id a new system file can have: systems/<id>.yaml. */
@@ -61,9 +66,34 @@ export function statusRow(s: StackState): Row {
   };
 }
 
+/** Who the team store shares as: sign in or out from here. */
+export function accountRow(account: string | null): Row {
+  return account
+    ? { kind: "account", id: "account", label: `GitHub: ${account}`, description: "signed in", icon: "account",
+        tooltip: "The systems and tests you commit in the editor are shared with the team (its Team view).\n\n" +
+          "Click to sign out.", command: "vhil.signOut" }
+    : { kind: "account", id: "account", label: "Sign in with GitHub", description: "to share", icon: "sign-in",
+        tooltip: "Sign in to share the systems and tests you make with the team. Teammates' work opens without it.",
+        command: "vhil.signIn" };
+}
+
+/** Your clone behind GitHub, or its branch merged already: undefined when all is well. */
+export function cloneRow(c: CloneStatus): Row | undefined {
+  const a = cloneAdvice(c);
+  if (!a) return undefined;
+  return {
+    kind: "clone", id: "clone", label: a.text, tooltip: a.detail, icon: "warning",
+    description: a.action === "update" ? "Update" : a.action === "switch" ? "Switch to dev" : undefined,
+    command: a.action === "update" ? "vhil.updateClone" : a.action === "switch" ? "vhil.switchToDev" : undefined,
+  };
+}
+
 export function rows(systems: SystemInfo[], state: StackState, tools: boolean,
                      branches: SavedBranch[] = []): Row[] {
   const out: Row[] = [statusRow(state)];
+  const clone = state.clone && cloneRow(state.clone);
+  if (clone) out.push(clone);
+  if (state.account !== undefined) out.push(accountRow(state.account));
   for (const s of systems) {
     const boards = s.boards.map((b) => b.name).join(", ");
     out.push({

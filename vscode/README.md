@@ -146,8 +146,22 @@ Set up / Retry**, to try again.
   `5 skipped` (nothing ran) (click: run again). Docker down or an image
   pull that fails is not a result: the tests are skipped and the bar says
   what's wrong. Checking it starts no container (`vhil-docker.sh status`).
+- **GitHub account** (Systems view, or **vHIL: Sign in with GitHub**): the
+  same account as the desktop app and `vhil login` (`bin/vhil-account`,
+  `~/.config/vhil/github`). Sign in copies the code and opens GitHub's page;
+  the running vHIL picks it up without a restart, and what you commit in the
+  editor is shared with the team (its Team view). Click the row to sign out.
+- **Your clone** (your own vHIL checkout): fetched on open and every 10
+  minutes at most (`bin/vhil-clone status`). Behind its upstream, the
+  Systems view says so with **Update** (a fast-forward, never a merge); on a
+  branch already merged into `dev`, **Switch to dev** (with no uncommitted
+  changes). A diverged branch is left to git. An open editor tab restarts
+  on the new code.
+- **vHIL: Set up the vHIL** runs `vhil setup` in a terminal: the Docker VM
+  (macOS), the images and the firmware, then `vhil doctor`.
 - **vHIL: Diagnose:** Docker (and its CLI), images (here, published, or
-  built from source), firmware, the system editor and the debugger, each
+  built from source), firmware, the system editor, the debugger, and
+  `vhil doctor`'s compose plugin and free disk checks, each
   with its fix (start the VM, pull images, build firmware, change a
   setting, open the editor).
 - **The editor's Run** in a firmware repository runs your working tree too:
