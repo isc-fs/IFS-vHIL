@@ -22,7 +22,6 @@ e-stop, bit 2 = GO. Mission 3 = autocross (pipeline, requests_r2d). The
 operator's sequence is IFSSIM's tools/vhil_boards/server.py Panel.
 """
 import os
-import warnings
 
 import pytest
 
@@ -40,12 +39,12 @@ pytestmark = [pytest.mark.ecu, pytest.mark.ams, pytest.mark.udv, pytest.mark.sys
 AS_READY, AS_DRIVING = 1, 2
 DV_READY, DV_RUNNING = 2, 3
 MISSION_AUTOCROSS = 3
-R2D_REQUEST = 0x510
+R2D_REQUEST, R2D_CONFIRM = 0x510, 0x511
 TANK_BAR = 8.0                 # both EBS tanks, above the firmware's storage threshold
 BRAKE_HELD_COUNTS = 3100       # above the ECU's BrakeDvHardRaw (2500)
 GPIOF, DASH_CHG = "sysbus.gpioPortF", 10
 FDCAN2 = "sysbus.fdcan2_h7"
-BOOTS = int(os.environ.get("VHIL_R2D_BOOTS", "12"))
+BOOTS = int(os.environ.get("VHIL_R2D_BOOTS", "3"))
 GO_STEP_US = 337               # GO moves this much later on each boot
 
 
@@ -152,6 +151,7 @@ def _drive(sim, k):
         raise AssertionError(f"boot {k}: the uDV never reached AS Ready")
     op.run(5200, dv_status=DV_READY)                     # READY_DWELL_MS
     op.run_us(k * GO_STEP_US)                            # this boot's phase
+    t_go = sim.now_us()
     op.res_frame(0x05)                                   # GO
     for _ in range(30):
         op.run(100, dv_status=DV_READY)
@@ -162,7 +162,8 @@ def _drive(sim, k):
     t = sim.now_us()
     op.run(1500, dv_status=DV_RUNNING)
     return {
-        "r2d_requests": sim.can("can_acu").count([R2D_REQUEST], t),
+        "r2d_requests": sim.can("can_acu").count([R2D_REQUEST], t_go),
+        "confirms": sum(1 for f in sim.can("can_acu").frames([R2D_CONFIRM], t_go) if f.data[:1] != b"\0"),
         "torque": sim.can("can_acu").count([0x507], t),
         "dropped": op.counter("TxRequestsDropped"),
         "off_put": op.counter("TxRequestsOffPut"),
@@ -171,14 +172,13 @@ def _drive(sim, k):
     }
 
 
-# 1000 us is IFSSIM's quantum (tools/vhil_boards/server.py --quantum-us),
-# where the boots stuck; 500 us is the gate's.
-@pytest.mark.quantum_opt_in
-@pytest.mark.parametrize("quantum_us", [500, 1000])
+# The gate's quantum. IFSSIM's 1000 us (tools/vhil_boards/server.py
+# --quantum-us) gave the same on 12 boots each (#472); VHIL_R2D_BOOTS=12
+# for a longer look.
 @pytest.mark.parametrize("k", range(BOOTS))
-def test_driving_requests_r2d_on_every_boot(images, k, quantum_us):
-    got = _boot(images, k, quantum_us)
-    warnings.warn(f"#415 quantum {quantum_us} boot {k}: {got}")
+def test_driving_requests_r2d_on_every_boot(images, k):
+    got = _boot(images, k, None)
     assert got["torque"] > 0, f"the uDV streams no 0x507 in Driving: {got}"
     assert got["dropped"] == 0 and got["off_put"] == 0, f"the FDCAN2 Tx FIFO race (#415): {got}"
-    assert got["r2d_requests"] > 0 or got["r2d"], f"Driving with no 0x510 (#415): {got}"
+    assert got["r2d_requests"] > 0, f"Driving with no 0x510 (#415): {got}"
+    assert got["confirms"] > 0 and got["r2d"], f"the ECU never confirmed R2D (0x511): {got}"
