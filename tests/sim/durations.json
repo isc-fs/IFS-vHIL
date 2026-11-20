@@ -52,5 +52,6 @@
  "tests/sim/test_rcc_resets.py": 167,
  "tests/sim/test_reset_cause.py": 115,
  "tests/sim/test_server_runs.py": 12,
- "tests/sim/test_sys_ecu_ams.py": 504
+ "tests/sim/test_sys_ecu_ams.py": 504,
+ "tests/sim/test_sys_udv_r2d.py": 90
 }
