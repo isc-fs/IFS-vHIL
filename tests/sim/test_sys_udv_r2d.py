@@ -22,6 +22,7 @@ e-stop, bit 2 = GO. Mission 3 = autocross (pipeline, requests_r2d). The
 operator's sequence is IFSSIM's tools/vhil_boards/server.py Panel.
 """
 import os
+import warnings
 
 import pytest
 
@@ -129,10 +130,10 @@ class Operator:
         raise AssertionError("the tractive system never came up (g_telemetry_ts_active)")
 
 
-def _boot(images, k):
+def _boot(images, k, quantum_us):
     # One Renode process per boot, stopped with it (make_sim keeps every
     # Sim to the end of the module).
-    with Sim(REPO / "systems" / "ecu-ams-udv.yaml", images("ecu-ams-udv")) as sim:
+    with Sim(REPO / "systems" / "ecu-ams-udv.yaml", images("ecu-ams-udv"), quantum_us=quantum_us) as sim:
         sim.wait_for_app()
         return _drive(sim, k)
 
@@ -170,10 +171,14 @@ def _drive(sim, k):
     }
 
 
+# 1000 us is IFSSIM's quantum (tools/vhil_boards/server.py --quantum-us),
+# where the boots stuck; 500 us is the gate's.
+@pytest.mark.quantum_opt_in
+@pytest.mark.parametrize("quantum_us", [500, 1000])
 @pytest.mark.parametrize("k", range(BOOTS))
-def test_driving_requests_r2d_on_every_boot(images, k):
-    got = _boot(images, k)
-    print(f"#415 boot {k}: {got}")
+def test_driving_requests_r2d_on_every_boot(images, k, quantum_us):
+    got = _boot(images, k, quantum_us)
+    warnings.warn(f"#415 quantum {quantum_us} boot {k}: {got}")
     assert got["torque"] > 0, f"the uDV streams no 0x507 in Driving: {got}"
     assert got["dropped"] == 0 and got["off_put"] == 0, f"the FDCAN2 Tx FIFO race (#415): {got}"
     assert got["r2d_requests"] > 0 or got["r2d"], f"Driving with no 0x510 (#415): {got}"
