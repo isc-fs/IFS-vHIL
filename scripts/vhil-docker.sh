@@ -32,6 +32,7 @@
 #   scripts/vhil-docker.sh server                web app API + shell on http://localhost:8080
 #                                                (M5; full stack: docker/compose.yaml)
 #   scripts/vhil-docker.sh down                  stop this checkout's editor/server stack (vhil stop)
+#   scripts/vhil-docker.sh stack                 this checkout's stack: project=, port=, owner= (who holds the port)
 #   scripts/vhil-docker.sh worker [--once ...]   run worker for the server's queue (vhil.worker)
 #   scripts/vhil-docker.sh prune [--dry-run]     prune old commit builds in /vhil/fw (vhil/fwprune.py)
 #   scripts/vhil-docker.sh editor-check [systems...]
@@ -101,7 +102,10 @@ registry=${VHIL_REGISTRY:-ghcr.io/isc-fs}
 # of its own instead of replacing this one's containers, and its worker never
 # claims this one's runs. The firmware builds (/vhil/fw) stay shared. Its port
 # is VHIL_WEB_PORT (8080 by default): give a second checkout another one.
-checkout=$(printf '%s' "$repo" | cksum | awk '{printf "%08x", $1}' | cut -c1-8)
+# VHIL_STACK_ID replaces the path's: the VS Code extension runs one stack per
+# firmware repository over its one checkout (vscode/src/extension.ts).
+checkout=${VHIL_STACK_ID:-$(printf '%s' "$repo" | cksum | awk '{printf "%08x", $1}' | cut -c1-8)}
+case $checkout in *[!a-z0-9]*|'') echo "error: VHIL_STACK_ID=$checkout: lowercase letters and digits only" >&2; exit 2;; esac
 project=ifs-vhil-$checkout
 server_data=/vhil/server/$checkout
 web_port=${VHIL_WEB_PORT:-8080}
@@ -609,6 +613,14 @@ editor-check)
     # dataflow, in the editor image where the patched checkout lives.
     image=$editor_image
     in_container 'exec python -m vhil.editor check "$@"' "$@" ;;
+stack)
+    # Which stack this checkout runs, and which one holds its port now
+    # (for the VS Code extension: never frame another checkout's). owner is
+    # the compose project publishing the port, empty when none does.
+    echo "project=$project"
+    echo "port=$web_port"
+    echo "owner=$("${docker[@]}" ps --filter "publish=$web_port" \
+        --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | head -1)" ;;
 down)
     # Stop this checkout's stack (vhil stop, the desktop app's Stop), and one
     # from before each checkout got its own (project ifs-vhil), which holds

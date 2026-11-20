@@ -1,6 +1,8 @@
 # ISC vHIL for VS Code
 
-The vHIL's tests in VS Code's **Testing** panel: every test of `tests/unit`,
+The vHIL in VS Code, beside the desktop app: its tests in the **Testing** panel,
+the system editor in a tab, your GitHub account for the team store, and your
+clone and the stack kept on current code. The tests: every test of `tests/unit`,
 `tests/sim` and `tests/scenarios`, with Run and Cancel per test, file or
 folder, one **status bar** item that says where things stand and runs
 the tests again, and a **Systems** view (the vHIL icon) to open, run and
@@ -122,9 +124,10 @@ Set up / Retry**, to try again.
   and **Run its scenarios**. **+** makes a new system: name it, then place
   boards and wire buses on the editor's empty canvas and save it with the
   editor's **Commit…** (a branch and PR on IFS-vHIL, from a firmware
-  repository too). With no GitHub token on the editor's server (the usual
-  case), VS Code offers to push the committed branch with your git and opens
-  its pull request on GitHub; in a firmware repository, a branch committed
+  repository too). Signed in to GitHub (the editor's Team view, the desktop
+  app or `vhil login`), the editor's server pushes and opens the pull
+  request itself; signed out, VS Code offers to push the committed branch
+  with your git and opens its pull request on GitHub; in a firmware repository, a branch committed
   but not pushed stays listed in the view (**Push and open a pull
   request**), since the checkout it lives in is VS Code's own. **Tools…** at the bottom in the vHIL repository.
 - **Run on save**: the Testing panel's continuous run (the eye icon) runs
@@ -145,8 +148,26 @@ Set up / Retry**, to try again.
   `5 skipped` (nothing ran) (click: run again). Docker down or an image
   pull that fails is not a result: the tests are skipped and the bar says
   what's wrong. Checking it starts no container (`vhil-docker.sh status`).
+- **GitHub account** (Systems view, or **vHIL: Sign in with GitHub**): the
+  same account as the desktop app and `vhil login` (`bin/vhil-account`,
+  `~/.config/vhil/github`). Sign in copies the code and opens GitHub's page;
+  the running vHIL picks it up without a restart, and what you commit in the
+  editor is shared with the team (its Team view). Click the row to sign out.
+- **Your clone** (your own vHIL checkout): fetched on open and every 10
+  minutes at most (`bin/vhil-clone status`). Behind its upstream, the
+  Systems view says so with **Update** (a fast-forward, never a merge); on a
+  branch already merged into `dev`, **Switch to dev** (with no uncommitted
+  changes). A diverged branch is left to git. An open editor tab restarts
+  on the new code.
+- **vHIL: Set up the vHIL** runs `vhil setup` in a terminal: the Docker VM
+  (macOS), the images and the firmware, then `vhil doctor`.
+- **vHIL: Install the vhil command** links `bin/vhil` into
+  `/opt/homebrew/bin` (or `/usr/local/bin`) on macOS, `~/.local/bin`
+  elsewhere, as the desktop app does: `vhil ui`, `vhil test`, `vhil login`
+  in any terminal.
 - **vHIL: Diagnose:** Docker (and its CLI), images (here, published, or
-  built from source), firmware, the system editor and the debugger, each
+  built from source), firmware, the system editor, the debugger, and
+  `vhil doctor`'s compose plugin and free disk checks, each
   with its fix (start the VM, pull images, build firmware, change a
   setting, open the editor).
 - **The editor's Run** in a firmware repository runs your working tree too:
@@ -154,9 +175,16 @@ Set up / Retry**, to try again.
   included, before each Run, Live or pytest run; off, the catalogue's or
   the board's refs.
 - **vHIL: Open the system editor** opens it in a tab, started if needed
-  (on localhost:8080 for your own vHIL checkout, `VHIL_WEB_PORT` if set; in
-  a firmware repository the extension's checkout has a port of its own, so
-  its editor runs beside yours). The tab waits while its terminal runs, and
+  (on localhost:8080 for your own vHIL checkout, the `vhil.webPort` setting
+  or `VHIL_WEB_PORT` if set; each firmware repository gets a vHIL and a port
+  of its own, so its editor runs beside yours and builds its own working
+  tree). It frames only this checkout's vHIL, on this checkout's code: if
+  another vHIL holds the port (the desktop app's, another clone's) it asks
+  before stopping it, and one of this checkout's started at an older commit
+  (after a pull, a switch or **Update vHIL**) is restarted first
+  (`vhil-docker.sh stack`, `/api/health`'s `started_ref`).
+  **vHIL: Stop the vHIL** stops its containers (`vhil stop`), whoever
+  started them. The tab waits while its terminal runs, and
   says so if it exits; Retry starts it again. Opening another system in an open tab asks the editor
   to switch, or, with an editor that can't, asks before reloading it. The
   tab's **Open in the browser** button opens the same page outside VS Code,
@@ -201,8 +229,13 @@ systems and tools, `src/systemsView.ts` what the Systems view lists, `src/firmwa
 tests and systems run it (all tested by `npm test`); `src/extension.ts` is the
 VS Code side.
 
-Not yet: the Robot smoke suites, Windows hosts (the script
-is bash; WSL2 works as on Linux).
+**Windows:** the vHIL runs in WSL2, as on Linux. Clone the repository (or
+the firmware repository) in WSL's filesystem and open it with VS Code's WSL
+extension (**WSL: Reopen Folder in WSL**, or `code .` in a WSL terminal),
+with Docker Desktop's WSL integration on. A folder opened on Windows itself
+gets a "vHIL: open in WSL" status bar item and a prompt instead.
+
+Not yet: the Robot smoke suites.
 
 ## Develop
 

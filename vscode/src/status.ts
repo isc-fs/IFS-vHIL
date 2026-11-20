@@ -236,6 +236,23 @@ export function findings(h: Health): Finding[] {
   return tail();
 }
 
+/**
+ * The checks of `bin/vhil doctor --json` Diagnose has none of its own for:
+ * the compose plugin and Docker's free disk (the desktop app shows the same).
+ * Anything else it reports Diagnose already checks; unparseable: none.
+ */
+export function doctorFindings(json: string): Finding[] {
+  let doc: { checks?: { level?: string; id?: string; message?: string }[] };
+  try {
+    doc = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  const label: { [id: string]: string } = { compose: "Docker compose", disk: "Disk" };
+  return (doc.checks ?? []).filter((c) => c.id && c.id in label && c.message)
+    .map((c) => ({ ok: c.level === "ok", label: label[c.id!], detail: c.message! }));
+}
+
 /** The system of a scenario test (test_scenario[<system>/<name>]), else undefined. */
 export function scenarioSystem(testId: string): string | undefined {
   if (!testId.startsWith("tests/scenarios/")) return undefined;

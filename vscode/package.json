@@ -1,8 +1,8 @@
 {
   "name": "vhil-tests",
   "displayName": "ISC vHIL",
-  "description": "Run the vHIL's tests (unit, sim, scenarios) from VS Code's Testing panel against your working tree, in the vHIL's Docker image.",
-  "version": "0.6.0",
+  "description": "The vHIL in VS Code: run its tests against your working tree, edit systems in its editor, share them with the team, and keep the stack and your clone up to date, in the vHIL's Docker images.",
+  "version": "0.7.0",
   "publisher": "isc-fs",
   "private": true,
   "repository": {
@@ -78,7 +78,7 @@
       },
       {
         "command": "vhil.stopEditor",
-        "title": "Stop the system editor",
+        "title": "Stop the vHIL (its containers)",
         "category": "vHIL"
       },
       {
@@ -89,6 +89,36 @@
       {
         "command": "vhil.updateVhil",
         "title": "Update the vHIL checkout",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.signIn",
+        "title": "Sign in with GitHub (share with the team)",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.signOut",
+        "title": "Sign out of GitHub",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.updateClone",
+        "title": "Update your clone (fast-forward)",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.switchToDev",
+        "title": "Switch your clone to dev",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.setUpStack",
+        "title": "Set up the vHIL (VM, images, firmware)",
+        "category": "vHIL"
+      },
+      {
+        "command": "vhil.installCli",
+        "title": "Install the vhil command (terminal)",
         "category": "vHIL"
       },
       {
@@ -160,6 +190,12 @@
           "default": [],
           "markdownDescription": "Extra pytest arguments for every run, e.g. `--vhil-trace`.",
           "order": 1
+        },
+        "vhil.webPort": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Advanced. The web app's port (`VHIL_WEB_PORT`). 0: 8080 for your own checkout, a port of its own for each firmware repository. Set it to run this window's vHIL beside another one.",
+          "order": 2
         },
         "vhil.cpus": {
           "type": "number",
@@ -245,6 +281,30 @@
         {
           "command": "vhil.updateVhil",
           "when": "vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.signIn",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.signOut",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.updateClone",
+          "when": "vhil.active && !vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.switchToDev",
+          "when": "vhil.active && !vhil.firmwareRepo"
+        },
+        {
+          "command": "vhil.setUpStack",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.installCli",
+          "when": "vhil.active"
         },
         {
           "command": "vhil.diagnose",
