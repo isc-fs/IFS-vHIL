@@ -5,6 +5,17 @@ commits under `vscode/` (`.github/workflows/vscode.yml`); every merge into
 `dev` publishes one on the `vscode-latest` release, which the extension
 checks once a day (**vHIL: Check for updates**).
 
+## 0.7 (continued)
+
+- **Robot smoke suites in the Testing panel** (the vHIL repository): each
+  `tests/<system>_smoke.robot` and its cases; a run reports each case from
+  Robot's `output.xml` (#427).
+- **The test listing is cached in your own clone too**, keyed by the commit
+  and the changed test files: no 20 s listing on reopening an unchanged
+  tree; Refresh lists again (#427).
+- **Run logs** under `results/vscode/runs/`, kept across window reloads:
+  **vHIL: Open a test run's log** (#427).
+
 ## 0.7
 
 - **Your GitHub account** in the Systems view: sign in (GitHub's device
