@@ -118,6 +118,10 @@ Set up / Retry**, to try again.
   panel's filter. The list comes from `pytest --collect-only` in the
   container (about 20 s) and refreshes when a test file changes.
   Right-click a system's scenarios: **Open a system in the system editor**.
+  In the vHIL repository, **tests (Robot smoke)** lists each
+  `tests/<system>_smoke.robot` and its cases, read from the file; a run
+  runs the whole suite (`vhil-docker.sh smoke <system>`) and reports each
+  case from Robot's `output.xml`.
 - **Systems** (the vHIL icon in the activity bar): the stack's state
   (click: Diagnose), then each system you can test, with its boards. Click
   one to open it in the system editor; inline, **Open the system file**
@@ -137,8 +141,13 @@ Set up / Retry**, to try again.
 - **One run at a time:** a run started while another goes (the status bar,
   a system's scenarios, Debug Test, the Testing panel) waits for it. A run
   of tests a refresh has since replaced runs the current ones.
-- **Listing** happens once per vHIL checkout commit in a firmware
-  repository: reopening the window shows the tests at once.
+- **Listing** is cached by what it depends on: the vHIL checkout's commit
+  in a firmware repository; in your own clone also the test, system and
+  `pytest.ini` files that differ from it. An unchanged tree shows its tests
+  at once on reopening the window; the panel's Refresh lists again anyway.
+- **Run logs:** each run's output is also written to
+  `results/vscode/runs/` (the last 30 are kept), so it outlives a window
+  reload: **vHIL: Open a test run's log**. The run's output names its file.
 - **System files** (the vHIL repository): any change to `systems/*.yaml`
   (a save, a checkout, a revert) validates it; its errors show in Problems
   at the line they name.

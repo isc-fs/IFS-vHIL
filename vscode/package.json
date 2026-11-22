@@ -40,6 +40,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "vhil.openRunLog",
+        "title": "Open a test run's log",
+        "category": "vHIL",
+        "icon": "$(output)"
+      },
+      {
         "command": "vhil.statusClick",
         "title": "Run the tests again",
         "category": "vHIL"
@@ -312,6 +318,10 @@
         },
         {
           "command": "vhil.refreshTests",
+          "when": "vhil.active"
+        },
+        {
+          "command": "vhil.openRunLog",
           "when": "vhil.active"
         },
         {

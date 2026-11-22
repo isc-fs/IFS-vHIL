@@ -44,6 +44,8 @@ import { compareUrl, SavedBranch, systemsIn, unpushed } from "./branches";
 import { newSystemError, Row, rows } from "./systemsView";
 import { latestUrl, newer, parseLatest } from "./update";
 import { SystemsView } from "./systemsTree";
+import { isRunLog, RUN_LOG_DIR, runLogLabel, runLogName, toPrune } from "./runlog";
+import { isSmoke, robotCases, robotResults, SMOKE_ROOT, smokeResults, smokeSystem } from "./robot";
 
 const SCRIPT = "scripts/vhil-docker.sh";
 // Where the plugin's JSON lines go: results/ is git-ignored and inside /work.
@@ -413,7 +415,7 @@ class Vhil implements vscode.Disposable {
               private readonly context: vscode.ExtensionContext, private readonly local?: Local) {
     this.repo = repo;
     this.controller = vscode.tests.createTestController("vhil", "vHIL");
-    this.controller.refreshHandler = () => this.refresh();
+    this.controller.refreshHandler = () => this.refresh(true);
     const runProfile = this.controller.createRunProfile("Run", vscode.TestRunProfileKind.Run,
       (request, token) => request.continuous ? this.runOnSave(request, token) : this.run(request, token), true);
     runProfile.supportsContinuousRun = true;
@@ -432,6 +434,8 @@ class Vhil implements vscode.Disposable {
     const watch = (glob: string) => vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(local ? path.join(this.repo, ".none") : this.repo, glob));
     const tests = watch("tests/{unit,sim,scenarios}/**/*.py");
+    const robots = watch("tests/*_smoke.robot");
+    const resmoke = () => this.buildSmoke();
     const systems = watch("systems/**");
     const later = () => this.refreshSoon();
     const reread = () => this.readSystems();
@@ -450,6 +454,7 @@ class Vhil implements vscode.Disposable {
       vscode.window.registerWebviewViewProvider(TRACE_VIEW, this.tracePanel,
         { webviewOptions: { retainContextWhenHidden: true } }),
       tests.onDidChange(later), tests.onDidCreate(later), tests.onDidDelete(later),
+      robots, robots.onDidChange(resmoke), robots.onDidCreate(resmoke), robots.onDidDelete(resmoke),
       systems.onDidChange(revalidate), systems.onDidCreate(revalidate),
       systems.onDidDelete((uri) => { reread(); this.systemProblems.delete(uri); }),
       vscode.tasks.onDidEndTaskProcess((e) => {
@@ -462,7 +467,8 @@ class Vhil implements vscode.Disposable {
 
       command("vhil.statusClick", () => this.statusClick()),
       command("vhil.diagnose", () => this.diagnose()),
-      command("vhil.refreshTests", () => this.refresh()),
+      command("vhil.refreshTests", () => this.refresh(true)),
+      command("vhil.openRunLog", () => this.openRunLog()),
       command("vhil.startVm", () => this.task("Start the Docker VM", ["vm"])),
       command("vhil.pullImages", () => this.pullImages()),
       command("vhil.buildImages", () => this.task("Build images", ["image"])),
@@ -840,10 +846,11 @@ class Vhil implements vscode.Disposable {
     this.refreshTimer = setTimeout(() => void this.refresh(), 1500);
   }
 
-  refresh(): Promise<void> {
+  /** `force`: list again even when a cached listing matches (the Refresh button). */
+  refresh(force = false): Promise<void> {
     void this.readAccount();
     void this.readClone(false);
-    this.refreshing ??= this.collect().finally(() => { this.refreshing = undefined; });
+    this.refreshing ??= this.collect(force).finally(() => { this.refreshing = undefined; });
     return this.refreshing;
   }
 
@@ -859,12 +866,39 @@ class Vhil implements vscode.Disposable {
     return r.ok ? r.out.trim() : "";
   }
 
-  private async collect() {
-    // In a firmware repository the tests are the checkout's, which changes
-    // only with its commit: a cached listing is the listing.
-    const head = this.local ? await this.head() : "";
-    const cached = head ? this.context.workspaceState.get<Record[]>(this.cacheKey(head)) : undefined;
-    if (cached?.length && !this.byId.size) {
+  /**
+   * What the listing depends on in your own clone: its commit, and the size
+   * and mtime of every test file (or pytest.ini, conftest) that differs from
+   * it. Unchanged since the last listing: the same key, no 20 s re-list.
+   */
+  private async listingKey(): Promise<string> {
+    const head = await this.head();
+    if (!head || this.local) return head;
+    const r = await git(this.repo, ["status", "--porcelain", "--untracked-files=all", "--", "tests", "systems", "scenarios", "pytest.ini", "vhil/pytest_vscode.py"]);
+    if (!r.ok) return "";
+    const dirty = r.out.split("\n").filter(Boolean).map((l) => {
+      const f = l.slice(3).replace(/^.* -> /, "");
+      try {
+        const st = fs.statSync(path.join(this.repo, f));
+        return `${f}:${st.size}:${st.mtimeMs}`;
+      } catch {
+        return `${f}:gone`;
+      }
+    });
+    if (!dirty.length) return head;
+    return `${head}+${crypto.createHash("sha1").update(dirty.sort().join("\n")).digest("hex").slice(0, 12)}`;
+  }
+
+  private async collect(force = false) {
+    // A listing is cached by what it depends on: in a firmware repository
+    // the checkout's commit; in your own clone also its changed test files.
+    // An unchanged tree lists at once, on open and on a refresh.
+    const head = await this.listingKey();
+    // One slot per checkout (the last listing and its key), so editing tests doesn't pile up listings.
+    const slot = `vhil.tests:${this.repo}`;
+    const saved = this.context.workspaceState.get<{ key: string; records: Record[] }>(slot);
+    const cached = head && !force && saved?.key === this.cacheKey(head) ? saved.records : undefined;
+    if (cached?.length && (!this.byId.size || !this.local)) {
       this.build(cached.filter((r): r is Item => r.kind === "item"), cached);
       return;
     }
@@ -886,7 +920,10 @@ class Vhil implements vscode.Disposable {
       return;
     }
     this.build(items, records);
-    if (head) void this.context.workspaceState.update(this.cacheKey(head), [...items, ...records.filter((r) => r.kind === "error")]);
+    if (head) {
+      void this.context.workspaceState.update(slot,
+        { key: this.cacheKey(head), records: [...items, ...records.filter((r) => r.kind === "error")] });
+    }
   }
 
   private tag(marker: string): vscode.TestTag {
@@ -940,6 +977,75 @@ class Vhil implements vscode.Disposable {
       }
     }
     this.controller.items.replace(roots);
+    this.buildSmoke();
+  }
+
+  /**
+   * The Robot smoke suites (tests/<system>_smoke.robot) and their cases, read
+   * from the files: no Docker, so they list at once. The vHIL's own clone
+   * only: they run the catalogue's firmware, not an open working tree.
+   */
+  private buildSmoke() {
+    if (this.local) return;
+    for (const [id] of this.byId) if (isSmoke(id)) this.byId.delete(id);
+    this.controller.items.delete(SMOKE_ROOT);
+    const dir = path.join(this.repo, "tests");
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => smokeSystem(`tests/${f}`)).sort() : [];
+    if (!files.length) return;
+    const root = this.controller.createTestItem(SMOKE_ROOT, "tests (Robot smoke)", vscode.Uri.file(dir));
+    for (const f of files) {
+      const id = `tests/${f}`;
+      const uri = vscode.Uri.file(path.join(dir, f));
+      const suite = this.controller.createTestItem(id, f, uri);
+      for (const c of robotCases(fs.readFileSync(uri.fsPath, "utf8"))) {
+        const test = this.controller.createTestItem(`${id}::${c.name}`, c.name, uri);
+        test.range = new vscode.Range(c.line - 1, 0, c.line - 1, 0);
+        suite.children.add(test);
+        this.byId.set(test.id, test);
+      }
+      root.children.add(suite);
+      this.byId.set(id, suite);
+    }
+    this.byId.set(SMOKE_ROOT, root);
+    this.controller.items.add(root);
+  }
+
+  /**
+   * One smoke suite, whole (`vhil-docker.sh smoke <system>`), its cases'
+   * results from Robot's output.xml. A case the suite never reported errors
+   * with the job's last lines.
+   */
+  private async runSmoke(run: vscode.TestRun, tally: Tally, system: string, tests: vscode.TestItem[],
+                         token: vscode.CancellationToken) {
+    const xml = path.join(this.repo, smokeResults(system));
+    fs.rmSync(xml, { force: true });
+    const name = `vhil-vscode-${crypto.randomBytes(4).toString("hex")}`;
+    const write = (t: string) => run.appendOutput(t.replace(/\r?\n/g, "\r\n"));
+    write(`$ ${SCRIPT} smoke ${system}\n`);
+    for (const t of tests) run.started(t);
+    let text = "";
+    const proc = this.script(["smoke", system], this.env({ VHIL_DOCKER_NAME: name }), (t) => { text += t; write(t); });
+    const cancel = token.onCancellationRequested(() => this.stopJob(proc, name));
+    const code = await proc.done;
+    cancel.dispose();
+    const results = fs.existsSync(xml) ? robotResults(fs.readFileSync(xml, "utf8")) : new Map();
+    const tail = text.trim().split("\n").slice(-15).join("\n");
+    for (const t of tests) {
+      const r = results.get(t.id.slice(t.id.indexOf("::") + 2));
+      if (r?.status === "PASS") {
+        run.passed(t, r.duration);
+        tally.passed++;
+      } else if (r?.status === "SKIP" || r?.status === "NOT RUN" || (!r && token.isCancellationRequested)) {
+        run.skipped(t);
+        tally.skipped++;
+      } else if (r) {
+        run.failed(t, new vscode.TestMessage(r.message || "failed"), r.duration);
+        tally.failed.add(t.id);
+      } else {
+        run.errored(t, new vscode.TestMessage(`${SCRIPT} smoke ${system} exited ${code} before this test ran:\n\n${tail}`));
+        tally.failed.add(t.id);
+      }
+    }
   }
 
   // -- runs -------------------------------------------------------------------
@@ -981,7 +1087,7 @@ class Vhil implements vscode.Disposable {
     const included = request.include ?? [...this.controller.items].map(([, i]) => i);
     const excluded = request.exclude ?? [];
     const excludedIds = new Set(excluded.flatMap((e) => this.leaves(e)).map((e) => e.id));
-    const run = this.controller.createTestRun(request);
+    const run = this.logged(this.controller.createTestRun(request));
     opts.onRun?.(run);
     const all = included.flatMap((i) => this.leaves(i)).filter((t) => !excludedIds.has(t.id));
     for (const t of all) run.enqueued(t);
@@ -989,7 +1095,13 @@ class Vhil implements vscode.Disposable {
     const tally: Tally = { passed: 0, failed: new Set(), skipped: 0, total: all.length };
     // A scenario group isn't a pytest id: its tests are.
     const ids = included.flatMap((i) => i.id.startsWith(GROUP) ? this.leaves(i).map((l) => l.id) : [i.id]);
-    const groups = plan(ids);
+    const groups = plan(ids.filter((id) => !isSmoke(id)));
+    // The smoke suites a run touches, each with the cases it runs.
+    const smoke = new Map<string, vscode.TestItem[]>();
+    for (const t of all) {
+      const s = smokeSystem(t.id);
+      if (s) smoke.set(s, [...(smoke.get(s) ?? []), t]);
+    }
     const c = this.config();
     // Whether the run tested anything: a job ran, or the working tree didn't
     // compile. Docker down or a build that never got to the compiler is no
@@ -1027,7 +1139,14 @@ class Vhil implements vscode.Disposable {
         tested.started = true;
         await this.runJob(run, tally, job, jobIds, deselect, mine, c.pytestArgs, token, opts.env);
       }
+      for (const [system, cases] of smoke) {
+        if (token.isCancellationRequested) break;
+        tested.started = true;
+        await this.runSmoke(run, tally, system, cases, token);
+        this.progress(tally);
+      }
     } finally {
+      run.appendOutput(`\r\nvHIL: ${tally.passed} passed, ${tally.failed.size} failed, ${tally.skipped} skipped\r\n`);
       run.end();
       this.busy--;
       // The run may have pulled or built the images, and built firmware.
@@ -1043,6 +1162,53 @@ class Vhil implements vscode.Disposable {
                         cancelled: cancelled || undefined });
       }
     }
+  }
+
+  /**
+   * The run, with everything it prints also written to a log file under
+   * results/vscode/runs, which outlives a window reload (vHIL: Open a run's
+   * log). The newest RUN_LOGS_KEPT are kept.
+   */
+  private logged(run: vscode.TestRun): vscode.TestRun {
+    const dir = path.join(this.repo, RUN_LOG_DIR);
+    let file: string | undefined;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      for (const old of toPrune(fs.readdirSync(dir))) fs.rmSync(path.join(dir, old), { force: true });
+      file = path.join(dir, runLogName(new Date(), process.pid));
+      fs.writeFileSync(file, "");
+    } catch {
+      return run;      // no log is no reason not to run
+    }
+    const append = (t: string) => { try { fs.appendFileSync(file!, t.replace(/\r\n/g, "\n")); } catch { /* full disk */ } };
+    const proxy = new Proxy(run, {
+      get: (target, prop) => {
+        if (prop === "appendOutput") {
+          return (out: string, ...rest: unknown[]) => {
+            append(out);
+            return (target.appendOutput as (...a: unknown[]) => void)(out, ...rest);
+          };
+        }
+        const v = (target as any)[prop];
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    run.appendOutput(`vHIL: this run's log: ${file}\r\n`);
+    return proxy;
+  }
+
+  /** Pick one of the kept run logs, newest first, and open it. */
+  private async openRunLog() {
+    const dir = path.join(this.repo, RUN_LOG_DIR);
+    const names = fs.existsSync(dir) ? fs.readdirSync(dir).filter(isRunLog).sort().reverse() : [];
+    if (!names.length) {
+      void vscode.window.showInformationMessage("vHIL: no test run has been logged yet.");
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(
+      names.map((n) => ({ label: runLogLabel(n), description: n, name: n })),
+      { placeHolder: "open which run's log?" });
+    if (pick) await vscode.window.showTextDocument(vscode.Uri.file(path.join(dir, pick.name)));
   }
 
   private progress(tally: Tally) {
