@@ -240,3 +240,29 @@ def test_a_stack_id_replaces_the_paths(tmp_path):
     assert out["project"] == "ifs-vhil-0badf00d"
     r, _ = _stack(tmp_path, "", VHIL_STACK_ID="../evil")
     assert r.returncode == 2 and "VHIL_STACK_ID" in r.stderr
+
+
+def test_fw_passes_commits_with_refs(tmp_path):
+    """FW_COMMITS reaches the container beside FW_REFS, and the build there
+    turns each pair into --commit, as FW_REFS's into --ref."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # `fw` also tags the local images by key.
+    (bindir / "docker").write_text(STUB.replace('"run "*)', '"tag "*) ;;\n"run "*)'))
+    (bindir / "docker").chmod(0o755)
+    log = tmp_path / "docker.log"
+    sha = "a" * 40
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "STUB_LOG": str(log),
+           "VHIL_DOCKER_CONTEXT": "stub", "XDG_CACHE_HOME": str(tmp_path / "cache"),
+           "STUB_UP": "1", "STUB_LOCAL": "1", "STUB_VOLUME": "1", "STUB_PUBLISHED": "",
+           "STUB_BUILT": "", "VHIL_FW_NATIVE": "1",
+           "FW_REFS": "ecu=pr-12 ams=dev", "FW_COMMITS": f"ecu={sha}"}
+    r = subprocess.run(["bash", str(SCRIPT), "fw", "ecu"], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    calls = log.read_text()
+    assert calls.count(" run --rm ") == 1, calls
+    assert "FW_REFS=ecu=pr-12 ams=dev" in calls
+    assert f"FW_COMMITS=ecu={sha}" in calls
+    body = SCRIPT.read_text().split("\nfw)\n", 1)[1].split(";;", 1)[0]
+    assert 'for r in $FW_COMMITS; do refs+=(--commit "$r"); done' in body
