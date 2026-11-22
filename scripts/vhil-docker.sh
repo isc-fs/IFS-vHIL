@@ -47,7 +47,10 @@
 # Firmware, the IFS_HIL checkout and their build trees live in the Docker
 # volume `vhil-data` (/vhil in the container). IFS_HIL_REF picks IFS_HIL's
 # ref (default dev); FW_REFS passes --ref pairs to the firmware build
-# (e.g. FW_REFS="ecu=feat/x"). FW_LOCAL builds a catalogue firmware from a
+# (e.g. FW_REFS="ecu=feat/x"), and FW_COMMITS --commit pairs: that board is
+# fetched at a full commit id, built in its commit directory, and its FW_REFS
+# entry only names the build (e.g. FW_REFS="ecu=pr-12" FW_COMMITS="ecu=<sha>",
+# for a pull request or a commit no branch points at). FW_LOCAL builds a catalogue firmware from a
 # local working tree instead, uncommitted edits included, with the same
 # recipe: FW_LOCAL="ecu=$HOME/src/IFS08-CE-ECU" (firmware id = absolute
 # path, no spaces; mounted read-only, copied to /vhil/fw/<id>@local and
@@ -421,7 +424,7 @@ in_container() {
         ${cpu_args[@]+"${cpu_args[@]}"} ${src_args[@]+"${src_args[@]}"} \
         -v "$repo:/work" ${git_args[@]+"${git_args[@]}"} -v vhil-data:/vhil \
         -e FW_SOURCES="$fw_sources" -e FW_LOCAL_ONLY="${FW_LOCAL_ONLY:-0}" \
-        -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" \
+        -e IFS_HIL_REF="${IFS_HIL_REF:-dev}" -e FW_REFS="${FW_REFS:-}" -e FW_COMMITS="${FW_COMMITS:-}" \
         -e VHIL_SYSTEM="${VHIL_SYSTEM:-}" -e VHIL_DUT="${VHIL_DUT:-ecu}" \
         ${VHIL_FAST_FORWARD:+-e VHIL_FAST_FORWARD="$VHIL_FAST_FORWARD"} \
         ${VHIL_PROFILE_HOST:+-e VHIL_PROFILE_HOST="$VHIL_PROFILE_HOST"} \
@@ -488,6 +491,7 @@ fw)
     x86_fw
     in_container "$prelude"'
         refs=(); for r in $FW_REFS; do refs+=(--ref "$r"); done
+        for r in $FW_COMMITS; do refs+=(--commit "$r"); done
         for r in $FW_SOURCES; do refs+=(--source "$r"); done
         [ "$FW_LOCAL_ONLY" = 1 ] && refs+=(--only-local)
         mkdir -p /vhil/fw
